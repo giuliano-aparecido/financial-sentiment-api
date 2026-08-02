@@ -8,13 +8,35 @@ import httpx
 
 import yfinance as yf
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from fastapi.middleware.cors import CORSMiddleware
 
 from pydantic import BaseModel
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+
+from slowapi.errors import RateLimitExceeded
+
+from slowapi.middleware import SlowAPIMiddleware
+
+from slowapi.util import get_remote_address
+
 app = FastAPI(title="Multi-Model Financial RAG Reasoning Engine")
+
+# Applies to every route via default_limits, no per-route decorators needed.
+# Keyed by client IP - see the Dockerfile's --proxy-headers flag, without
+# which every request behind Render's proxy would share one IP and thus one
+# bucket. The real cost here is per-request HF inference + yfinance calls,
+# so the limit is deliberately tight - this endpoint is not meant for bursts.
+limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Added before CORSMiddleware so CORS ends up as the outer layer (Starlette
+# wraps middleware in reverse order of addition) - otherwise a 429 response
+# would be missing CORS headers and the browser would see an opaque network
+# error instead of a readable 429.
+app.add_middleware(SlowAPIMiddleware)
 
 # ==============================================================================
 
@@ -22,19 +44,31 @@ app = FastAPI(title="Multi-Model Financial RAG Reasoning Engine")
 
 # ==============================================================================
 
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+
 app.add_middleware(
 
     CORSMiddleware,
 
-    allow_origins=["*"],  # Allows requests from Vercel deployment
+    allow_origins=[FRONTEND_ORIGIN],
 
-    allow_credentials=True,
+    allow_credentials=False,
 
-    allow_methods=["*"],
+    allow_methods=["POST", "GET"],
 
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-API-Key"],
 
 )
+
+API_KEY = os.getenv("API_KEY")
+
+
+async def verify_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+
+    if not API_KEY or x_api_key != API_KEY:
+
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 HF_API_TOKEN = os.getenv("HF_TOKEN")
 
@@ -110,7 +144,7 @@ def health_check():
 
     }
 
-@app.post("/api/analyze")
+@app.post("/api/analyze", dependencies=[Depends(verify_api_key)])
 
 async def analyze_stock(req: QueryRequest):
 
