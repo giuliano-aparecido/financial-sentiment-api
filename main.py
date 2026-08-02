@@ -76,19 +76,19 @@ MODEL_ARCHITECTURE = os.getenv("MODEL_ARCHITECTURE", "apertus").lower()
 
 DEFAULT_MODELS = {
 
-    "llama": "your-username/llama-3.2-3b-financial-reasoner",
+    "llama": "gaparecido/llama-3.2-3b-financial-reasoner",
 
-    "apertus": "your-username/apertus-8b-financial-reasoner",
+    "apertus": "gaparecido/apertus-8b-financial-reasoner",
 
-    "qwen": "your-username/qwen-2.5-7b-financial-reasoner",
+    "qwen": "gaparecido/qwen-2.5-7b-financial-reasoner",
 
-    "mistral": "your-username/mistral-7b-financial-reasoner"
+    "mistral": "gaparecido/mistral-7b-financial-reasoner"
 
 }
 
 HF_MODEL_REPO = os.getenv("HF_MODEL_URL", DEFAULT_MODELS.get(MODEL_ARCHITECTURE, DEFAULT_MODELS["apertus"]))
 
-HF_INFERENCE_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}"
+HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL") or f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}"
 
 class QueryRequest(BaseModel):
 
