@@ -1,0 +1,9 @@
+fastapi
+
+uvicorn
+
+yfinance
+
+httpx
+
+pydantic
