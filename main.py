@@ -136,24 +136,38 @@ def extract_json_object(text: str) -> str:
     return text[start:]
 
 def fetch_live_news_rag(ticker: str) -> str:
+    context_blocks = []
+    
+    # 1. Fetch Actual Stock Price & 1-Month Trend
     try:
-        # Search DuckDuckGo News for the ticker's recent financial news
-        query = f"{ticker} stock financial news earnings"
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1m")
+        if not hist.empty:
+            start_price = hist["Close"].iloc[0]
+            current_price = hist["Close"].iloc[-1]
+            pct_change = ((current_price - start_price) / start_price) * 100
+            
+            context_blocks.append(
+                f"STOCK MARKET METRICS ({ticker}):\n"
+                f"- Current Price: ${current_price:.2f}\n"
+                f"- 30-Day Price Trend: {pct_change:+.2f}%\n"
+            )
+    except Exception as e:
+        print(f"YFinance Error: {e}")
+
+    # 2. Fetch Recent Financial News
+    try:
+        query = f"{ticker} stock earnings performance financial news"
         results = list(DDGS().news(keywords=query, max_results=4))
         
-        if not results:
-            return f"No recent live news found for ticker {ticker}."
-            
-        # Combine top news titles and snippets into context string
-        news_snippets = []
-        for article in results:
-            news_snippets.append(f"- {article['title']}: {article['body']}")
-            
-        return "\n".join(news_snippets)
-        
+        if results:
+            context_blocks.append("RECENT HEADLINES & NEWS:")
+            for article in results:
+                context_blocks.append(f"- {article['title']}: {article['body']}")
     except Exception as e:
-        print(f"RAG Retrieval Error: {e}")
-        return f"Recent quarterly earnings and market updates for {ticker}."
+        print(f"DuckDuckGo Error: {e}")
+        
+    return "\n".join(context_blocks)
 
 @app.get("/health")
 
@@ -178,6 +192,10 @@ async def analyze_stock(req: QueryRequest):
 
 ### Instruction:
 Analyze the following financial news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), and confidence score.
+
+CRITICAL SENTIMENT RULES:
+1. If the company lowered its full-year guidance, issued an earnings warning, or suffered a major price drop due to a revenue miss, the overall sentiment MUST be BEARISH regardless of short-term bounces.
+2. Weigh guidance cuts and revenue misses higher than minor operational wins.
 
 ### Input:
 Target Stock: {ticker}
