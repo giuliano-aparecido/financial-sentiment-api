@@ -9,3 +9,5 @@ httpx
 pydantic
 
 slowapi
+
+duckduckgo_search

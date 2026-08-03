@@ -133,35 +133,27 @@ def extract_json_object(text: str) -> str:
 
     return text[start:]
 
+from duckduckgo_search import DDGS
+
 def fetch_live_news_rag(ticker: str) -> str:
-
     try:
-
-        stock = yf.Ticker(ticker)
-
-        news_items = stock.news[:3]
-
-        if not news_items:
-
-            return f"No recent live news found for {ticker}."
-
+        # Search DuckDuckGo News for the ticker's recent financial news
+        query = f"{ticker} stock financial news earnings"
+        results = list(DDGS().news(keywords=query, max_results=4))
         
-
-        context_str = ""
-
-        for item in news_items:
-
-            title = item.get("title", "")
-
-            summary = item.get("summary", "")
-
-            context_str += f"- {title}: {summary}\n"
-
-        return context_str
-
-    except Exception:
-
-        return f"Recent quarterly and news updates for {ticker}."
+        if not results:
+            return f"No recent live news found for ticker {ticker}."
+            
+        # Combine top news titles and snippets into context string
+        news_snippets = []
+        for article in results:
+            news_snippets.append(f"- {article['title']}: {article['body']}")
+            
+        return "\n".join(news_snippets)
+        
+    except Exception as e:
+        print(f"RAG Retrieval Error: {e}")
+        return f"Recent quarterly earnings and market updates for {ticker}."
 
 @app.get("/health")
 
