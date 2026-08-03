@@ -22,6 +22,8 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from slowapi.util import get_remote_address
 
+from duckduckgo_search import DDGS
+
 app = FastAPI(title="Multi-Model Financial RAG Reasoning Engine")
 
 # Applies to every route via default_limits, no per-route decorators needed.
@@ -132,8 +134,6 @@ def extract_json_object(text: str) -> str:
                 return text[start:i + 1]
 
     return text[start:]
-
-from duckduckgo_search import DDGS
 
 def fetch_live_news_rag(ticker: str) -> str:
     try:
