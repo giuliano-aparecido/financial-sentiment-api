@@ -100,6 +100,39 @@ def extract_ticker(text: str) -> str:
 
     return match.group(0) if match else "AAPL"
 
+def extract_json_object(text: str) -> str:
+    # Balances braces (ignoring ones inside string literals) instead of a
+    # greedy regex, so trailing commentary from the model with its own
+    # stray braces can't extend the match past the real JSON object.
+    start = text.find("{")
+    if start == -1:
+        return text
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    return text[start:]
+
 def fetch_live_news_rag(ticker: str) -> str:
 
     try:
@@ -145,111 +178,70 @@ def health_check():
     }
 
 @app.post("/api/analyze", dependencies=[Depends(verify_api_key)])
-
 async def analyze_stock(req: QueryRequest):
-
     ticker = extract_ticker(req.user_query)
-
     live_context = fetch_live_news_rag(ticker)
-
     
-
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
-
 Analyze the following financial news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), and confidence score.
 
 ### Input:
-
 Target Stock: {ticker}
-
 Recent News & Results:
-
 {live_context}
 
 ### Response:
-
 """
 
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-
     payload = {
-
         "inputs": prompt,
-
         "parameters": {
-
             "max_new_tokens": 350,
-
             "temperature": 0.1,
-
             "return_full_text": False
-
         }
-
     }
 
     async with httpx.AsyncClient(timeout=45.0) as client:
-
         response = await client.post(HF_INFERENCE_URL, headers=headers, json=payload)
-
         
-
     if response.status_code != 200:
-
         raise HTTPException(
-
             status_code=500, 
-
             detail=f"Inference error for [{MODEL_ARCHITECTURE}]: {response.text}"
-
         )
-
         
-
     res_data = response.json()
-
     raw_model_output = res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
-
     
-
     try:
+        # Clean special tokens, markdown code fences, and whitespace
+        clean_output = re.sub(r"<\|.*?\|>", "", raw_model_output)  # Strips <|eot_id|> and other Llama tokens
+        clean_output = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", clean_output)  # Strips ```json ... ``` code blocks
+        clean_output = clean_output.strip()
 
-        analysis_json = json.loads(raw_model_output)
+        # Extract only the valid JSON substring if there's surrounding text
+        json_str = extract_json_object(clean_output)
 
+        analysis_json = json.loads(json_str)
         impact = analysis_json["impacted_stocks"][0]
-
         
-
         return {
-
             "model_architecture": MODEL_ARCHITECTURE,
-
             "ticker": ticker,
-
             "live_news_retrieved": live_context,
-
             "reasoning": impact["reasoning"],
-
             "predicted_direction": impact["direction"],
-
             "confidence": impact["confidence"],
-
             "raw_json": analysis_json
-
         }
-
     except Exception:
-
         return {
-
             "model_architecture": MODEL_ARCHITECTURE,
-
             "ticker": ticker,
-
             "live_news_retrieved": live_context,
-
             "raw_response": raw_model_output
-
         }
