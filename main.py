@@ -8,6 +8,9 @@ import httpx
 
 import traceback
 
+import urllib.parse
+import feedparser
+
 import yfinance as yf
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -138,40 +141,30 @@ def extract_json_object(text: str) -> str:
     return text[start:]
 
 def fetch_live_news_rag(ticker: str) -> str:
-    context_items = []
-    
-    # 1. Fetch Price Metrics
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1mo")
-        if not hist.empty:
-            start_p = hist["Close"].iloc[0]
-            end_p = hist["Close"].iloc[-1]
-            pct = ((end_p - start_p) / start_p) * 100
-            context_items.append(f"Price Trend (30D): {pct:+.2f}% (Current: ${end_p:.2f})")
-    except Exception as e:
-        print(f"yfinance error: {e}")
-
-    # 2. Fetch News with Custom User-Agent
-    try:
-        # Pass realistic headers to avoid cloud IP blocking
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        with DDGS(headers=headers) as ddgs:
-            results = list(ddgs.news(keywords=f"{ticker} stock earnings news", max_results=4))
-            
-        for item in results:
-            context_items.append(f"- {item.get('title')}: {item.get('body')}")
-    except Exception as e:
-        print(f"DuckDuckGo error: {e}")
-        traceback.print_exc()
-
-    # Fallback if both scrapers were blocked by Cloud Provider
-    if not context_items:
-        return f"- Recent market volatility and Q2 earnings report performance for {ticker}."
+        # Construct clean query for Google News RSS
+        query = f"{ticker} stock earnings financial news"
+        encoded_query = urllib.parse.quote(query)
+        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
         
-    return "\n".join(context_items)
+        # Parse XML feed directly (No API key, No IP rate limits)
+        feed = feedparser.parse(rss_url)
+        
+        if not feed.entries:
+            return f"Recent market volatility and financial developments for {ticker}."
+            
+        # Extract top 4 news headlines with publication dates
+        news_items = []
+        for entry in feed.entries[:4]:
+            title = entry.get("title", "")
+            published = entry.get("published", "")[:16]  # Date string snippet
+            news_items.append(f"- [{published}] {title}")
+            
+        return "\n".join(news_items)
+        
+    except Exception as e:
+        print(f"RAG Google News RSS Error: {e}")
+        return f"Recent quarterly earnings and news updates for {ticker}."
 
 @app.get("/health")
 
