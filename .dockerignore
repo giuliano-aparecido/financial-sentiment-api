@@ -1,0 +1,13 @@
+.git
+.github
+__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+.mypy_cache
+*.egg-info
+.vscode
+tests
+conftest.py
+requirements-dev.txt
