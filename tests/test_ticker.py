@@ -26,3 +26,18 @@ def test_ignores_common_stopwords():
 
 def test_falls_back_when_only_stopwords_present():
     assert extract_ticker("WILL the CEO announce an IPO") == "AAPL"
+
+
+def test_extracts_cashtag_ticker():
+    assert extract_ticker("What's the outlook for $TSLA this quarter?") == "TSLA"
+
+
+def test_cashtag_is_uppercased():
+    assert extract_ticker("thoughts on $aapl earnings?") == "AAPL"
+
+
+def test_cashtag_takes_priority_over_plain_caps_word():
+    # WILL would otherwise be filtered by the stopword list and NVDA found
+    # by the fallback heuristic anyway - this asserts the cashtag short-
+    # circuits straight to NVDA without even running that fallback.
+    assert extract_ticker("Will $NVDA beat GOOGL this quarter") == "NVDA"
