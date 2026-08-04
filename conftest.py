@@ -1,6 +1,19 @@
 import os
 
+import pytest
+from fastapi.testclient import TestClient
+
 # Must be set before any test imports main, since module-level code reads
 # these via os.getenv at import time (API_KEY gates every mutating route).
 os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.setdefault("HF_TOKEN", "test-hf-token")
+
+from main import app  # noqa: E402
+
+
+@pytest.fixture
+def client():
+    # Entering as a context manager runs the app's lifespan, which starts
+    # the shared httpx client that /api/analyze depends on.
+    with TestClient(app) as c:
+        yield c

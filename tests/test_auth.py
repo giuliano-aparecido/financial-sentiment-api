@@ -1,23 +1,17 @@
-from fastapi.testclient import TestClient
-
-from main import app
-
-client = TestClient(app)
-
 VALID_KEY = "test-api-key"  # matches conftest.py's API_KEY env var
 
 
-def test_health_requires_no_auth():
+def test_health_requires_no_auth(client):
     response = client.get("/health")
     assert response.status_code == 200
 
 
-def test_analyze_rejects_missing_key():
+def test_analyze_rejects_missing_key(client):
     response = client.post("/api/analyze", json={"user_query": "AAPL"})
     assert response.status_code == 401
 
 
-def test_analyze_rejects_wrong_key():
+def test_analyze_rejects_wrong_key(client):
     response = client.post(
         "/api/analyze",
         json={"user_query": "AAPL"},
@@ -26,12 +20,12 @@ def test_analyze_rejects_wrong_key():
     assert response.status_code == 401
 
 
-def test_update_inference_url_rejects_missing_key():
+def test_update_inference_url_rejects_missing_key(client):
     response = client.post("/api/update-inference-url", json={"url": "https://abc123.ngrok-free.app"})
     assert response.status_code == 401
 
 
-def test_update_inference_url_rejects_disallowed_host():
+def test_update_inference_url_rejects_disallowed_host(client):
     response = client.post(
         "/api/update-inference-url",
         json={"url": "http://169.254.169.254/latest/meta-data"},
@@ -40,7 +34,7 @@ def test_update_inference_url_rejects_disallowed_host():
     assert response.status_code == 400
 
 
-def test_update_inference_url_accepts_allowed_host():
+def test_update_inference_url_accepts_allowed_host(client):
     response = client.post(
         "/api/update-inference-url",
         json={"url": "https://abc123.ngrok-free.app/"},
@@ -50,7 +44,7 @@ def test_update_inference_url_accepts_allowed_host():
     assert response.json()["hf_inference_url"] == "https://abc123.ngrok-free.app"
 
 
-def test_update_inference_url_accepts_ngrok_free_dev_with_path():
+def test_update_inference_url_accepts_ngrok_free_dev_with_path(client):
     # Regression: ngrok-free.dev is a real, current ngrok free-tier domain
     # (alongside ngrok-free.app) - a Colab tunnel on it was rejected before
     # this suffix was added, and a path like /generate must survive intact

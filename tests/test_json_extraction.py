@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from main import extract_json_object
+from app.services.parsing import extract_json_object
 
 
 def _clean_and_extract(raw: str) -> dict:

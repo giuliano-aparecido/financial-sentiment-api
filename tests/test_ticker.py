@@ -1,4 +1,4 @@
-from main import extract_ticker
+from app.services.ticker import extract_ticker
 
 
 def test_extracts_ticker_from_natural_language_query():
