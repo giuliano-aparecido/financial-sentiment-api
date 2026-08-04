@@ -2,6 +2,7 @@ import logging
 import urllib.parse
 
 import feedparser
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +14,13 @@ def fetch_live_news_rag(ticker: str) -> str:
         encoded_query = urllib.parse.quote(query)
         rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
-        # Parse XML feed directly (No API key, No IP rate limits)
-        feed = feedparser.parse(rss_url)
+        # feedparser.parse(url) fetches internally via urllib with no
+        # timeout - a hung connection would pin this thread (and the
+        # asyncio.to_thread pool slot it came from) forever. Fetch with an
+        # explicit timeout ourselves and hand feedparser the bytes instead.
+        response = httpx.get(rss_url, timeout=10.0)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
 
         if not feed.entries:
             return f"Recent market volatility and financial developments for {ticker}."
