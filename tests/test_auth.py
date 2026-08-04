@@ -48,3 +48,17 @@ def test_update_inference_url_accepts_allowed_host():
     )
     assert response.status_code == 200
     assert response.json()["hf_inference_url"] == "https://abc123.ngrok-free.app"
+
+
+def test_update_inference_url_accepts_ngrok_free_dev_with_path():
+    # Regression: ngrok-free.dev is a real, current ngrok free-tier domain
+    # (alongside ngrok-free.app) - a Colab tunnel on it was rejected before
+    # this suffix was added, and a path like /generate must survive intact
+    # since it's part of where analyze_stock actually POSTs.
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "https://unflawed-washboard-crux.ngrok-free.dev/generate"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert response.json()["hf_inference_url"] == "https://unflawed-washboard-crux.ngrok-free.dev/generate"
