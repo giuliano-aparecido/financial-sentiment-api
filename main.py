@@ -11,7 +11,7 @@ import httpx
 import urllib.parse
 import feedparser
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -199,9 +199,10 @@ ALLOWED_INFERENCE_HOST_SUFFIXES = tuple(
 )
 
 @app.post("/api/update-inference-url", dependencies=[Depends(verify_api_key)])
-async def update_inference_url(req: UpdateInferenceURLRequest):
+async def update_inference_url(req: UpdateInferenceURLRequest, request: Request):
     global HF_INFERENCE_URL
 
+    caller_ip = get_remote_address(request)
     new_url = req.url.strip().rstrip("/")
     parsed = urllib.parse.urlparse(new_url)
 
@@ -211,12 +212,15 @@ async def update_inference_url(req: UpdateInferenceURLRequest):
     # risk, it's a token-exfiltration one.
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not host.endswith(ALLOWED_INFERENCE_HOST_SUFFIXES):
+        print(f"update-inference-url REJECTED from {caller_ip}: {new_url!r} (disallowed scheme/host)")
         raise HTTPException(
             status_code=400,
             detail="url must be https and match an allowed host (see ALLOWED_INFERENCE_HOST_SUFFIXES)",
         )
 
+    old_url = HF_INFERENCE_URL
     HF_INFERENCE_URL = new_url
+    print(f"update-inference-url OK from {caller_ip}: {old_url!r} -> {new_url!r}")
     return {"status": "ok", "hf_inference_url": HF_INFERENCE_URL}
 
 @app.post("/api/analyze", dependencies=[Depends(verify_api_key)])
