@@ -2,7 +2,6 @@ import os
 
 API_KEY = os.getenv("API_KEY")
 HF_API_TOKEN = os.getenv("HF_TOKEN")
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
 MODEL_ARCHITECTURE = os.getenv("MODEL_ARCHITECTURE", "apertus").lower()
 
@@ -25,3 +24,10 @@ ALLOWED_INFERENCE_HOST_SUFFIXES = tuple(
     ).split(",")
     if suffix.strip()
 )
+
+
+def is_allowed_inference_host(host: str) -> bool:
+    # A plain str.endswith(suffix) has no label boundary, so
+    # "evil-huggingface.co" would satisfy suffix "huggingface.co". Requiring
+    # an exact match or a "." right before the suffix closes that gap.
+    return any(host == suffix or host.endswith("." + suffix) for suffix in ALLOWED_INFERENCE_HOST_SUFFIXES)

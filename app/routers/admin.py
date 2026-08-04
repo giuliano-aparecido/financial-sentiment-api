@@ -4,7 +4,7 @@ import urllib.parse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from slowapi.util import get_remote_address
 
-from app.config import ALLOWED_INFERENCE_HOST_SUFFIXES
+from app.config import is_allowed_inference_host
 from app.deps import verify_api_key
 from app.models import UpdateInferenceURLRequest
 from app.services.inference import get_hf_inference_url, set_hf_inference_url
@@ -24,7 +24,7 @@ async def update_inference_url(req: UpdateInferenceURLRequest, request: Request)
     # bearer token there on every request, so this isn't just a bad-config
     # risk, it's a token-exfiltration one.
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not host.endswith(ALLOWED_INFERENCE_HOST_SUFFIXES):
+    if parsed.scheme != "https" or not is_allowed_inference_host(host):
         logger.warning("update-inference-url REJECTED from %s: %r (disallowed scheme/host)", caller_ip, new_url)
         raise HTTPException(
             status_code=400,
