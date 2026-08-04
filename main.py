@@ -101,6 +101,10 @@ class QueryRequest(BaseModel):
 
     user_query: str
 
+class UpdateInferenceURLRequest(BaseModel):
+
+    url: str
+
 def extract_ticker(text: str) -> str:
 
     match = re.search(r'\b[A-Z]{3,5}\b', text.upper())
@@ -179,6 +183,17 @@ def health_check():
         "target_model_repo": HF_MODEL_REPO
 
     }
+
+@app.post("/api/update-inference-url", dependencies=[Depends(verify_api_key)])
+async def update_inference_url(req: UpdateInferenceURLRequest):
+    global HF_INFERENCE_URL
+
+    new_url = req.url.strip().rstrip("/")
+    if not new_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+
+    HF_INFERENCE_URL = new_url
+    return {"status": "ok", "hf_inference_url": HF_INFERENCE_URL}
 
 @app.post("/api/analyze", dependencies=[Depends(verify_api_key)])
 async def analyze_stock(req: QueryRequest):
