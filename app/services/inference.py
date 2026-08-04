@@ -114,7 +114,8 @@ Recent News & Results:
             "confidence": impact["confidence"],
             "raw_json": analysis_json,
         }
-    except Exception:
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        logger.info("Model output for [%s] wasn't the expected JSON shape (%s) - falling back to raw_response", MODEL_ARCHITECTURE, e)
         return {
             "model_architecture": MODEL_ARCHITECTURE,
             "ticker": ticker,
