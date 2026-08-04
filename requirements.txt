@@ -2,14 +2,10 @@ fastapi
 
 uvicorn
 
-yfinance
-
 httpx
 
 pydantic
 
 slowapi
-
-duckduckgo_search
 
 feedparser

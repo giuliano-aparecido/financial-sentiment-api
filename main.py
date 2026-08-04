@@ -1,3 +1,5 @@
+import asyncio
+
 import os
 
 import re
@@ -6,12 +8,8 @@ import json
 
 import httpx
 
-import traceback
-
 import urllib.parse
 import feedparser
-
-import yfinance as yf
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
@@ -26,8 +24,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from slowapi.util import get_remote_address
-
-from duckduckgo_search import DDGS
 
 app = FastAPI(title="Multi-Model Financial RAG Reasoning Engine")
 
@@ -193,13 +189,32 @@ def health_check():
 
     }
 
+ALLOWED_INFERENCE_HOST_SUFFIXES = tuple(
+    suffix.strip()
+    for suffix in os.getenv(
+        "ALLOWED_INFERENCE_HOST_SUFFIXES",
+        "ngrok-free.app,ngrok.io,ngrok.app,huggingface.cloud,huggingface.co",
+    ).split(",")
+    if suffix.strip()
+)
+
 @app.post("/api/update-inference-url", dependencies=[Depends(verify_api_key)])
 async def update_inference_url(req: UpdateInferenceURLRequest):
     global HF_INFERENCE_URL
 
     new_url = req.url.strip().rstrip("/")
-    if not new_url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+    parsed = urllib.parse.urlparse(new_url)
+
+    # Anyone holding the API key could otherwise repoint this at an internal
+    # address or cloud metadata endpoint - analyze_stock then POSTs the HF
+    # bearer token there on every request, so this isn't just a bad-config
+    # risk, it's a token-exfiltration one.
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host.endswith(ALLOWED_INFERENCE_HOST_SUFFIXES):
+        raise HTTPException(
+            status_code=400,
+            detail="url must be https and match an allowed host (see ALLOWED_INFERENCE_HOST_SUFFIXES)",
+        )
 
     HF_INFERENCE_URL = new_url
     return {"status": "ok", "hf_inference_url": HF_INFERENCE_URL}
@@ -207,7 +222,10 @@ async def update_inference_url(req: UpdateInferenceURLRequest):
 @app.post("/api/analyze", dependencies=[Depends(verify_api_key)])
 async def analyze_stock(req: QueryRequest):
     ticker = extract_ticker(req.user_query)
-    live_context = fetch_live_news_rag(ticker)
+    # fetch_live_news_rag does a blocking HTTP fetch (feedparser.parse) - off
+    # the event loop, so one slow Google News response doesn't stall every
+    # other concurrent request on this single-worker process.
+    live_context = await asyncio.to_thread(fetch_live_news_rag, ticker)
     
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
@@ -236,17 +254,25 @@ Recent News & Results:
         }
     }
 
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        response = await client.post(HF_INFERENCE_URL, headers=headers, json=payload)
-        
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(HF_INFERENCE_URL, headers=headers, json=payload)
+    except httpx.RequestError as e:
+        print(f"HF inference request failed for [{MODEL_ARCHITECTURE}] at {HF_INFERENCE_URL}: {e}")
+        raise HTTPException(status_code=502, detail="Failed to reach the inference backend.")
+
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Inference error for [{MODEL_ARCHITECTURE}]: {response.text}"
-        )
-        
-    res_data = response.json()
-    raw_model_output = res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
+        # response.text can carry HF account/model/quota details (or ngrok
+        # internals) - log it server-side, don't hand it to the client.
+        print(f"Inference error for [{MODEL_ARCHITECTURE}]: {response.status_code} {response.text[:1000]}")
+        raise HTTPException(status_code=502, detail="The inference backend returned an error.")
+
+    try:
+        res_data = response.json()
+        raw_model_output = res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        print(f"Unexpected inference response shape for [{MODEL_ARCHITECTURE}]: {e} - body: {response.text[:1000]}")
+        raise HTTPException(status_code=502, detail="The inference backend returned an unexpected response.")
     
     try:
         # Clean special tokens, markdown code fences, and whitespace
