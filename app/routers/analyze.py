@@ -18,4 +18,4 @@ async def analyze_stock(req: QueryRequest):
     # the event loop, so one slow Google News response doesn't stall every
     # other concurrent request on this single-worker process.
     live_context = await asyncio.to_thread(fetch_live_news_rag, ticker)
-    return await analyze_with_hf(ticker, live_context)
+    return await analyze_with_hf(ticker, req.user_query, live_context)
