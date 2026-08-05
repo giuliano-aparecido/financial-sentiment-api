@@ -45,7 +45,7 @@ def _client_or_raise() -> httpx.AsyncClient:
     return _client
 
 
-async def analyze_with_hf(ticker: str, live_context: str) -> dict:
+async def analyze_with_hf(ticker: str, user_query: str, live_context: str) -> dict:
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
@@ -57,6 +57,7 @@ CRITICAL SENTIMENT RULES:
 
 ### Input:
 Target Stock: {ticker}
+User Question: {user_query}
 Recent News & Results:
 {live_context}
 
