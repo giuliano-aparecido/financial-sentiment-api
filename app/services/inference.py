@@ -52,8 +52,7 @@ async def analyze_with_hf(ticker: str, user_query: str, live_context: str) -> di
 Analyze the following financial news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), and confidence score.
 
 CRITICAL SENTIMENT RULES:
-1. If the company lowered its full-year guidance, issued an earnings warning, or suffered a major price drop due to a revenue miss, the overall sentiment MUST be BEARISH regardless of short-term bounces.
-2. Weigh guidance cuts and revenue misses higher than minor operational wins.
+1. Weigh guidance cuts and revenue misses higher than minor operational wins.
 
 ### Input:
 Target Stock: {ticker}
