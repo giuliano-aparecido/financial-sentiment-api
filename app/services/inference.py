@@ -49,18 +49,22 @@ async def analyze_with_hf(ticker: str, user_query: str, live_context: str) -> di
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
+
 Analyze the following financial news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), and confidence score.
 
 CRITICAL SENTIMENT RULES:
+
 1. Weigh guidance cuts and revenue misses higher than minor operational wins.
 
 ### Input:
+
 Target Stock: {ticker}
 User Question: {user_query}
 Recent News & Results:
 {live_context}
 
 ### Response:
+
 """
 
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
