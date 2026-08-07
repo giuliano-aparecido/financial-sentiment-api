@@ -15,8 +15,10 @@ doing it properly, not because it needs to scale or handle real traffic.
 - **httpx** — shared `AsyncClient` (started in the app's lifespan, not
   recreated per request) for both the HF inference call and the news fetch
 - **feedparser** — Google News RSS, no API key needed
+- **yfinance** — market fundamentals/earnings (keyless; see `app/services/
+  fundamentals.py`/`earnings.py`/`valuation.py`)
 - **slowapi** — global rate limit
-- **pytest** — 25 tests, run via GitHub Actions on every push/PR
+- **pytest** — 53 tests, run via GitHub Actions on every push/PR
 
 ## Architecture
 
@@ -36,6 +38,12 @@ app/
                               markdown fences, special tokens)
     news.py                    Google News RSS fetch, with a timeout
                               (feedparser's own url-fetching has none)
+    fundamentals.py            yfinance current-price/P-E/dividend/52wk
+                              fetch + "Current Market Data" block renderer
+    valuation.py               Graham Number valuation (deterministic
+                              math, never LLM-generated) + block renderer
+    earnings.py                yfinance last-quarter revenue/EPS/next-
+                              earnings-date fetch + block renderer
     inference.py                HF inference call + response parsing;
                               also holds the mutable in-memory
                               HF_INFERENCE_URL (see below)
@@ -59,6 +67,20 @@ app/
   URL receives the HF bearer token on every subsequent request, that
   bug would have been a token-exfiltration path, not just a
   bad-config one.
+- **Valuation is always deterministic, code-only math — never LLM-generated.**
+  `valuation.py`'s Graham Number (`sqrt(22.5 x EPS x book value/share)`) is
+  computed in Python from `fundamentals.py`'s yfinance data, not asked of
+  the model. Negative/missing EPS or book value renders "Not applicable"
+  (a real, expected outcome for loss-making companies); a failed
+  fundamentals fetch renders "Data unavailable." — the two are
+  deliberately distinct strings (see the tests) so the eventual model can
+  learn to tell "no defined value" from "couldn't fetch anything."
+- **`fundamentals.py`/`valuation.py`/`earnings.py` aren't wired into
+  `/api/analyze` yet.** They're built and unit-tested against the prompt
+  block format `financial-sentiment-model-colab`'s v4 dataset generators
+  already produce, but `inference.py`'s live prompt still only sends
+  news — wiring these in is gated on that repo's v4 model actually being
+  trained and evaluated (see its PR #11 and this repo's own follow-up PR).
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since
