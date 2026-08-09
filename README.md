@@ -75,12 +75,18 @@ app/
   fundamentals fetch renders "Data unavailable." — the two are
   deliberately distinct strings (see the tests) so the eventual model can
   learn to tell "no defined value" from "couldn't fetch anything."
-- **`fundamentals.py`/`valuation.py`/`earnings.py` aren't wired into
-  `/api/analyze` yet.** They're built and unit-tested against the prompt
-  block format `financial-sentiment-model-colab`'s v4 dataset generators
-  already produce, but `inference.py`'s live prompt still only sends
-  news — wiring these in is gated on that repo's v4 model actually being
-  trained and evaluated (see its PR #11 and this repo's own follow-up PR).
+- **`/api/analyze` sends the full v4 prompt (market data + valuation +
+  earnings + news), but no v4 model is live yet.** `HF_INFERENCE_URL`
+  still points at whatever model is currently deployed via
+  `/api/update-inference-url` — until `financial-sentiment-model-colab`'s
+  v4 model is trained, evaluated, and that URL is repointed, this app is
+  serving the new prompt shape to an OLDER model that was never trained on
+  it. `analyze_with_hf` parses the new `answer` field with `.get`, not
+  indexing, specifically so an older model's response (which has no
+  `answer` key at all) degrades to an omitted field rather than a 500 —
+  but the model's actual JSON output quality against the new prompt is
+  untested until the cutover happens. Do not treat this as "the analyst
+  pipeline is live" until that model swap is confirmed.
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since

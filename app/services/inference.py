@@ -45,12 +45,24 @@ def _client_or_raise() -> httpx.AsyncClient:
     return _client
 
 
-async def analyze_with_hf(ticker: str, user_query: str, live_context: str) -> dict:
+async def analyze_with_hf(
+    ticker: str,
+    user_query: str,
+    live_context: str,
+    market_data: str,
+    valuation: str,
+    earnings: str,
+) -> dict:
+    # Canonical prompt template - must stay byte-identical to
+    # financial-sentiment-model-colab's gpu/tpu train_model.py and
+    # evaluate_*.py copies (see that repo's CONTRIBUTING.md 4-way sync
+    # rule). The model is trained on exactly this shape; a drift here
+    # trains one prompt and serves another.
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
 
-Analyze the following financial news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), and confidence score.
+Analyze the following financial data and news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), confidence score, and a direct answer to the user's question.
 
 CRITICAL SENTIMENT RULES:
 
@@ -60,6 +72,16 @@ CRITICAL SENTIMENT RULES:
 
 Target Stock: {ticker}
 User Question: {user_query}
+
+Current Market Data:
+{market_data}
+
+Valuation:
+{valuation}
+
+Recent Earnings:
+{earnings}
+
 Recent News & Results:
 {live_context}
 
@@ -71,7 +93,9 @@ Recent News & Results:
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 350,
+            # 350 -> 512: the v4 `answer` field adds length beyond what the
+            # old 4-field JSON output needed.
+            "max_new_tokens": 512,
             "temperature": 0.1,
             "return_full_text": False,
         },
@@ -109,7 +133,7 @@ Recent News & Results:
         analysis_json = json.loads(json_str)
         impact = analysis_json["impacted_stocks"][0]
 
-        return {
+        result = {
             "model_architecture": MODEL_ARCHITECTURE,
             "ticker": ticker,
             "live_news_retrieved": live_context,
@@ -117,7 +141,17 @@ Recent News & Results:
             "predicted_direction": impact["direction"],
             "confidence": impact["confidence"],
             "raw_json": analysis_json,
+            "market_data": market_data,
+            "valuation": valuation,
+            "earnings": earnings,
         }
+        # .get, not impact["answer"] - a still-served older model (pre-v4)
+        # won't have this key at all, and that must degrade to an omitted
+        # field, not a 500 on an otherwise-successful analysis.
+        answer = impact.get("answer")
+        if answer is not None:
+            result["answer"] = answer
+        return result
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
         logger.info("Model output for [%s] wasn't the expected JSON shape (%s) - falling back to raw_response", MODEL_ARCHITECTURE, e)
         return {
@@ -125,4 +159,11 @@ Recent News & Results:
             "ticker": ticker,
             "live_news_retrieved": live_context,
             "raw_response": raw_model_output,
+            # Still attached even though the model's own output didn't
+            # parse - these were fetched independently by the router and
+            # remain valid regardless of what the model returned, so the
+            # UI can still show data cards alongside the raw fallback text.
+            "market_data": market_data,
+            "valuation": valuation,
+            "earnings": earnings,
         }
