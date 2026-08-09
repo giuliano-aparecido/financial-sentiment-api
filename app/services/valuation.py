@@ -43,6 +43,10 @@
 # needs to stay in step with them; the formula/constants below are not yet
 # ported there - see this repo's PR history for the staged-rollout plan).
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 STAGE_1_YEARS = 5
 STAGE_2_YEARS = 5
 
@@ -187,6 +191,18 @@ def scenario_dcf_value(cf0: float, g1: float, g2: float, exit_multiple: float, d
     return pv
 
 
+def scenario_present_values(cf0: float) -> dict[str, float]:
+    """PV per named scenario (SCENARIOS' keys, in order). Factored out of
+    intrinsic_value so the DCF formula (scenario_dcf_value) is applied
+    exactly once per scenario in exactly one place - both intrinsic_value's
+    probability-weighting and valuation_block_for's logging build on this
+    same dict rather than recomputing or duplicating it."""
+    return {
+        name: scenario_dcf_value(cf0, scenario["g1"], scenario["g2"], scenario["exit_multiple"], DISCOUNT_RATE)
+        for name, scenario in SCENARIOS.items()
+    }
+
+
 def intrinsic_value(cf0: float | None) -> float | None:
     """Probability-weighted intrinsic value across SCENARIOS, applied
     directly to cf0 - the scenario assumptions are universal across all
@@ -200,11 +216,8 @@ def intrinsic_value(cf0: float | None) -> float | None:
     if cf0 is None or cf0 <= 0:
         return None
 
-    weighted_total = 0.0
-    for scenario in SCENARIOS.values():
-        pv = scenario_dcf_value(cf0, scenario["g1"], scenario["g2"], scenario["exit_multiple"], DISCOUNT_RATE)
-        weighted_total += scenario["probability"] * pv
-    return weighted_total
+    pvs = scenario_present_values(cf0)
+    return sum(SCENARIOS[name]["probability"] * pv for name, pv in pvs.items())
 
 
 def valuation_block(price: float | None, intrinsic: float | None, basis: str) -> str:
@@ -232,13 +245,45 @@ def valuation_block(price: float | None, intrinsic: float | None, basis: str) ->
     )
 
 
-def valuation_block_for(fundamentals: dict | None) -> str:
+def _log_valuation_computation(ticker, fundamentals, basis, cf0, intrinsic, block):
+    # INFO (not DEBUG) so it shows up by default under this app's existing
+    # logging.basicConfig(level=logging.INFO) (see main.py), matching
+    # inference.py's prompt-logging convention - no config change needed to
+    # see this in Render's log stream. Logs the full "recipe" (which
+    # classification inputs drove the basis choice, the actual cf0 used,
+    # every scenario's growth/exit-multiple/PV, and the final weighted
+    # result) so the formula's behavior can be audited per-ticker after the
+    # fact, not just the one-line rendered block. Fires even when cf0/
+    # intrinsic end up None (the "Not applicable" case) - that's exactly
+    # when knowing WHY (which classification inputs were missing/unusable)
+    # is most useful, not less.
+    pvs = scenario_present_values(cf0) if cf0 is not None and cf0 > 0 else {}
+    scenario_summary = "; ".join(
+        f"{name}(p={s['probability']:.0%}, g1={s['g1']:.1%}, g2={s['g2']:.1%}, exit={s['exit_multiple']:.1f}x)"
+        + (f" -> PV=${pvs[name]:,.2f}" if name in pvs else "")
+        for name, s in SCENARIOS.items()
+    )
+    logger.info(
+        "Valuation[%s]: classification inputs eps_trailing=%s, payout_ratio=%s, "
+        "sector=%r, free_cash_flow=%s -> basis=%s; cf0=%s; discount_rate=%.0f%%; "
+        "scenarios: %s; intrinsic_value=%s; price=%s; block=%r",
+        ticker,
+        fundamentals.get("eps_trailing"), fundamentals.get("payout_ratio"),
+        fundamentals.get("sector"), fundamentals.get("free_cash_flow"), basis,
+        cf0, DISCOUNT_RATE * 100, scenario_summary, intrinsic, fundamentals.get("price"),
+        block,
+    )
+
+
+def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) -> str:
     """Convenience wrapper for callers holding a fundamentals.fetch_
     fundamentals() result - classifies the valuation basis, computes the
     intrinsic value, and renders the block in one call. A missing/failed
     fundamentals fetch (or a missing price specifically) renders as 'Data
     unavailable.' before classification is even attempted, since none of
-    its inputs would be trustworthy either.
+    its inputs would be trustworthy either. `ticker` is optional and used
+    only to label the audit log below - callers without it (e.g. existing
+    tests) still work unchanged.
     """
     if not fundamentals or fundamentals.get("price") is None:
         return "Data unavailable."
@@ -251,4 +296,6 @@ def valuation_block_for(fundamentals: dict | None) -> str:
     )
     cf0 = cash_flow_basis_value(basis, fundamentals)
     intrinsic = intrinsic_value(cf0)
-    return valuation_block(fundamentals["price"], intrinsic, basis)
+    block = valuation_block(fundamentals["price"], intrinsic, basis)
+    _log_valuation_computation(ticker, fundamentals, basis, cf0, intrinsic, block)
+    return block
