@@ -33,6 +33,19 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "dividend_yield": info.get("dividendYield"),
         "year_low": info.get("fiftyTwoWeekLow"),
         "year_high": info.get("fiftyTwoWeekHigh"),
+        # Added for the scenario-DCF valuation model (app/services/
+        # valuation.py) - all sourced from this SAME .info call, no extra
+        # yfinance request. free_cash_flow/total_revenue/dividend_rate are
+        # per-company-total or per-share cash-flow-basis candidates;
+        # sector/industry/payout_ratio drive which basis gets picked. Each
+        # is independently optional - valuation.py's classifier and
+        # fail-soft rendering handle any subset being None.
+        "free_cash_flow": info.get("freeCashflow"),
+        "total_revenue": info.get("totalRevenue"),
+        "dividend_rate": info.get("dividendRate") or info.get("trailingAnnualDividendRate"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "payout_ratio": info.get("payoutRatio"),
     }
 
 
