@@ -40,8 +40,9 @@ app/
                               (feedparser's own url-fetching has none)
     fundamentals.py            yfinance current-price/P-E/dividend/52wk
                               fetch + "Current Market Data" block renderer
-    valuation.py               Graham Number valuation (deterministic
-                              math, never LLM-generated) + block renderer
+    valuation.py               Scenario-weighted 2-stage DCF valuation
+                              (deterministic math, never LLM-generated)
+                              + block renderer
     earnings.py                yfinance last-quarter revenue/EPS/next-
                               earnings-date fetch + block renderer
     inference.py                HF inference call + response parsing;
@@ -68,13 +69,32 @@ app/
   bug would have been a token-exfiltration path, not just a
   bad-config one.
 - **Valuation is always deterministic, code-only math — never LLM-generated.**
-  `valuation.py`'s Graham Number (`sqrt(22.5 x EPS x book value/share)`) is
-  computed in Python from `fundamentals.py`'s yfinance data, not asked of
-  the model. Negative/missing EPS or book value renders "Not applicable"
-  (a real, expected outcome for loss-making companies); a failed
-  fundamentals fetch renders "Data unavailable." — the two are
-  deliberately distinct strings (see the tests) so the eventual model can
-  learn to tell "no defined value" from "couldn't fetch anything."
+  `valuation.py` replaced an earlier Graham Number implementation
+  (`sqrt(22.5 x EPS x book value/share)`) that was confirmed live to be
+  badly broken for asset-light, buyback-heavy companies (Apple showed
+  "725% overvalued" purely because its book value/share is tiny — Graham
+  Number treats book value as a proxy for a company's worth, which fails
+  hard when most of the value is intangible). The current model instead
+  classifies each company into one of four valuation bases — FCF
+  (asset-heavy industrials), EPS/Net Income (tech/growth/platform),
+  Dividends (mature cash-cow/REIT-style payers), or Revenue (early-stage
+  unprofitable growth) — since a single metric can't meaningfully value
+  both a bank and a pre-profit growth company. The classified metric is
+  projected across a 2-stage (years 1-5, years 6-10), 3-scenario
+  (Normal/Best/Worst probability-weighted) growth model with an
+  exit-multiple terminal value, discounted at a flat rate. All computed in
+  Python from `fundamentals.py`'s yfinance data, not asked of the model.
+  Missing/non-positive inputs for the classified basis render "Not
+  applicable" (a real, expected outcome); a failed fundamentals fetch
+  renders "Data unavailable." — the two are deliberately distinct strings
+  (see the tests) so the eventual model can learn to tell "no defined
+  value" from "couldn't fetch anything." Known limitation: extreme-multiple
+  growth stocks (e.g. Tesla, trailing P/E ~300) can still show implausibly
+  high "overvalued" percentages even after this change, since a
+  disciplined, non-circular growth assumption can't fully bridge a
+  razor-thin trailing EPS — see `app/services/valuation.py`'s module
+  docstring for the two earlier, rejected attempts at fixing this and why
+  they made it worse.
 - **`/api/analyze` sends the full v4 prompt (market data + valuation +
   earnings + news), but no v4 model is live yet.** `HF_INFERENCE_URL`
   still points at whatever model is currently deployed via
