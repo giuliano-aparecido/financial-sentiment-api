@@ -5,3 +5,4 @@ pydantic==2.13.4
 slowapi==0.1.10
 feedparser==6.0.14
 yfinance==1.5.2
+lxml==6.1.1
