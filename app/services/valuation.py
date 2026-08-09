@@ -50,6 +50,20 @@ STAGE_2_YEARS = 5
 ASSET_HEAVY_SECTORS = {"Energy", "Industrials", "Basic Materials", "Utilities"}
 DIVIDEND_PAYOUT_THRESHOLD = 0.40  # payout_ratio >= this -> treated as a mature dividend payer
 
+# REITs are legally required to distribute ~90% of TAXABLE income as
+# dividends, but yfinance's payoutRatio is computed against GAAP earnings,
+# which real-estate accounting depresses with large non-cash depreciation
+# charges - a REIT can be distributing effectively all its real cash flow
+# while showing a deceptively low GAAP payout ratio (confirmed live:
+# Aedifica, a real REIT, showed payout_ratio=0.34 - below
+# DIVIDEND_PAYOUT_THRESHOLD - which routed it to "eps" instead of
+# "dividends"). Same reasoning means GAAP EPS itself is unreliable for this
+# sector (depreciation can push it to near-zero or negative even for a
+# healthy REIT), so this is checked as an unconditional sector override,
+# ahead of the profitability check below - not just an addition to the
+# payout-ratio check.
+REIT_SECTORS = {"Real Estate"}
+
 BASIS_LABELS = {
     "revenue": "Revenue-based",
     "eps": "EPS-based",
@@ -84,22 +98,30 @@ def classify_valuation_basis(
     """Picks which metric to value, since a single metric can't meaningfully
     value both a bank and a pre-profit growth company. Evaluated in order:
 
-    1. Unprofitable or unknown profitability -> "revenue" (can't project
+    1. Real Estate sector -> "dividends" unconditionally, BEFORE the
+       profitability check below - see REIT_SECTORS' comment for why
+       REITs need a sector override rather than relying on payout_ratio or
+       eps_trailing, both of which GAAP real-estate depreciation makes
+       unreliable for this sector specifically (confirmed live: Aedifica,
+       a real REIT, would otherwise have been misrouted).
+    2. Unprofitable or unknown profitability -> "revenue" (can't project
        earnings/FCF/dividends that don't exist yet - matches early-stage
        growth companies like Beyond Meat).
-    2. High payout ratio (pays out a large share of earnings) -> "dividends"
-       (mature cash-cow/REIT-style payers - matches Coca-Cola/Exxon-style
-       examples).
-    3. Asset-heavy sector AND a real positive FCF figure -> "fcf" (matches
+    3. High payout ratio (pays out a large share of earnings) -> "dividends"
+       (mature cash-cow-style payers - matches Kinder Morgan/Coca-Cola
+       Europacific-style examples).
+    4. Asset-heavy sector AND a real positive FCF figure -> "fcf" (matches
        industrial/asset-heavy examples). The FCF check isn't redundant with
        the sector check - confirmed live that yfinance's freeCashflow is
        None for banks (they don't have a meaningful FCF in the standard
        sense), and it can also be negative/None for an asset-heavy company
        mid capex-spike - both fall through to EPS rather than crashing or
        producing a nonsense basis.
-    4. Otherwise -> "eps" (profitable, low payout, not asset-heavy - most
+    5. Otherwise -> "eps" (profitable, low payout, not asset-heavy - most
        tech/platform/growth names, and the fallback for financials, whose
        sector is never in ASSET_HEAVY_SECTORS)."""
+    if sector in REIT_SECTORS:
+        return "dividends"
     if eps_trailing is None or eps_trailing <= 0:
         return "revenue"
     if payout_ratio is not None and payout_ratio >= DIVIDEND_PAYOUT_THRESHOLD:

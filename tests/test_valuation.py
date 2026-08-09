@@ -10,6 +10,22 @@ from app.services.valuation import (
 # --- classify_valuation_basis ---
 
 
+def test_classify_reit_uses_dividends_basis_regardless_of_low_payout_ratio():
+    # Confirmed live: Aedifica (a real REIT) has payout_ratio=0.34 - below
+    # DIVIDEND_PAYOUT_THRESHOLD - because GAAP payout ratio is computed
+    # against depreciation-depressed GAAP earnings, not the real cash REITs
+    # actually distribute. The Real Estate sector override must win even
+    # when payout_ratio alone would say "eps".
+    assert classify_valuation_basis(eps_trailing=11.49, payout_ratio=0.34, sector="Real Estate", free_cash_flow=None) == "dividends"
+
+
+def test_classify_reit_uses_dividends_basis_even_when_technically_unprofitable():
+    # GAAP depreciation can push a healthy REIT's reported EPS to zero or
+    # negative - the sector override must win before the profitability
+    # check, not after it (a REIT should never fall to "revenue").
+    assert classify_valuation_basis(eps_trailing=-0.5, payout_ratio=None, sector="Real Estate", free_cash_flow=None) == "dividends"
+
+
 def test_classify_unprofitable_company_uses_revenue_basis():
     assert classify_valuation_basis(eps_trailing=-1.0, payout_ratio=None, sector="Technology", free_cash_flow=None) == "revenue"
 
