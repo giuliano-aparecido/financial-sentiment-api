@@ -27,9 +27,9 @@ async def analyze_stock(req: QueryRequest):
         asyncio.to_thread(fetch_fundamentals, ticker),
         asyncio.to_thread(fetch_earnings, ticker),
     )
-    # valuation_block_for's Graham Number math is pure/in-memory - no
+    # valuation_block_for's scenario-DCF math is pure/in-memory - no
     # to_thread needed, it just consumes fundamentals' already-fetched dict.
     market_data = market_data_block(fundamentals)
-    valuation = valuation_block_for(fundamentals)
+    valuation = valuation_block_for(fundamentals, ticker=ticker)
     earnings = earnings_block(earnings_data)
     return await analyze_with_hf(ticker, req.user_query, live_context, market_data, valuation, earnings)
