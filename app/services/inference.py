@@ -89,6 +89,15 @@ Recent News & Results:
 
 """
 
+    # Full prompt, not truncated - unlike the response-body logging below,
+    # the whole point here is to let you verify exactly what data/formatting
+    # reached the model (e.g. confirming market_data/valuation/earnings are
+    # populated and not silently "Data unavailable."), so cutting it short
+    # would defeat that. INFO (not DEBUG) so it shows up by default under
+    # this app's logging.basicConfig(level=logging.INFO) - no config change
+    # needed to see it in Render's log stream.
+    logger.info("Prompt sent to [%s] for ticker=%s:\n%s", MODEL_ARCHITECTURE, ticker, prompt)
+
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {
         "inputs": prompt,
