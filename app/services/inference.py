@@ -54,7 +54,7 @@ async def analyze_with_hf(
     earnings: str,
 ) -> dict:
     # Canonical prompt template - must stay byte-identical to
-    # financial-sentiment-model-colab's gpu/tpu train_model.py and
+    # financial-sentiment-model's colab/train/gpu/tpu train_model.py and
     # evaluate_*.py copies (see that repo's CONTRIBUTING.md 4-way sync
     # rule). The model is trained on exactly this shape; a drift here
     # trains one prompt and serves another.

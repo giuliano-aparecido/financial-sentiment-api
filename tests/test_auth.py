@@ -79,3 +79,16 @@ def test_update_inference_url_accepts_ngrok_free_dev_with_path(client):
     )
     assert response.status_code == 200
     assert response.json()["hf_inference_url"] == "https://unflawed-washboard-crux.ngrok-free.dev/generate"
+
+
+def test_update_inference_url_accepts_modal_run(client):
+    # modal.run backs the scale-to-zero serving alternative to the Colab/
+    # ngrok tunnel (see financial-sentiment-model's modal/serve_model.py) -
+    # its endpoint URLs are subdomains like <workspace>--<app>-<fn>.modal.run.
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "https://gaparecido--financial-sentiment-reasoner-generate.modal.run"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert response.json()["hf_inference_url"] == "https://gaparecido--financial-sentiment-reasoner-generate.modal.run"

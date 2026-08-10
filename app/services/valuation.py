@@ -51,7 +51,7 @@
 #      below for how per-company inputs are now sourced.
 #
 # Deterministic, code-only math - never LLM-generated - matching
-# financial-sentiment-model-colab's training-data generators (see that
+# financial-sentiment-model's training-data generators (see that
 # repo's CONTRIBUTING.md 4-way sync rule for why the RENDERED BLOCK FORMAT
 # needs to stay in step with them; the formula/constants below are not yet
 # ported there - see this repo's PR history for the staged-rollout plan).
