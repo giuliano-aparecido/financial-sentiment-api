@@ -6,3 +6,4 @@ slowapi==0.1.10
 feedparser==6.0.14
 yfinance==1.5.2
 lxml==6.1.1
+pandas==3.0.3
