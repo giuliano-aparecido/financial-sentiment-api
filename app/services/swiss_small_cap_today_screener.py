@@ -1,15 +1,12 @@
 """
-Swiss small-cap "today" snapshot.
+Swiss small-cap "big loss" screener - TODAY only.
 
-Lists EVERY SIX Swiss Exchange-listed, Switzerland-domiciled small-cap
-stock's today numbers (price, change%, volume, volume vs. its own
-3-month average) - no loss or volume filtering, by design: this is meant
-to show the full universe so you can read the whole picture yourself,
-not a pre-filtered subset. Sorted by volume vs. 3-month average
-(thinnest first, then biggest move) purely as a reading aid - a stock
-near the top of the list is trading unusually thin today, which is
-useful context whether it's up, down, or flat, not a criterion for
-being included at all.
+Finds SIX Swiss Exchange-listed, Switzerland-domiciled small-cap stocks
+that are down >= LOSS_THRESHOLD_PCT today. No volume filtering - volume
+vs. each stock's own 3-month average is shown and used to SORT the
+results (thinnest first), but never excludes a row: a big loss on
+unusually thin volume vs. one on heavy volume tell different stories,
+and both are worth seeing, not just one of them.
 
 Ported from the standalone research/ project (D:\\projects\\research) - see
 swiss_small_cap_crash_rebound.py's module docstring for why this now runs
@@ -30,15 +27,18 @@ below just reads them off the already-discovered/filtered `domestic` dict.
 
 import pandas as pd
 
+# --- Config ---
 
-def build_today_snapshot(domestic: dict) -> pd.DataFrame:
+LOSS_THRESHOLD_PCT = -5.0  # today's regularMarketChangePercent <= this
+
+
+def find_big_loss(domestic: dict, loss_threshold: float) -> pd.DataFrame:
     """Reads today's change%/volume/3-month-average-volume straight off
     each candidate's already-fetched screener quote (see
     swiss_universe.filter_domestic) - no extra fetch needed. Skips any
     candidate missing a live change% or volume figure, which happens for
     very illiquid names with no trade yet today rather than being a fetch
-    failure - there's no meaningful "today" row to show for those, not a
-    "doesn't qualify" exclusion.
+    failure.
     """
     rows = []
     for symbol, entry in domestic.items():
@@ -48,6 +48,8 @@ def build_today_snapshot(domestic: dict) -> pd.DataFrame:
         avg_volume_3mo = quote.get("averageDailyVolume3Month")
 
         if change_pct is None or volume_today is None:
+            continue
+        if change_pct > loss_threshold:
             continue
 
         volume_ratio = round(volume_today / avg_volume_3mo, 2) if avg_volume_3mo else None
@@ -67,8 +69,8 @@ def build_today_snapshot(domestic: dict) -> pd.DataFrame:
     results = pd.DataFrame(rows)
     if results.empty:
         return results
-    # Reading aid only, not a filter (see module docstring) - thinnest
-    # volume first, biggest move as the tiebreaker within similarly-thin
+    # Reading aid, not a further filter (see module docstring) - thinnest
+    # volume first, biggest loss as the tiebreaker within similarly-thin
     # names.
     return results.sort_values(
         ["volume_vs_3mo_avg", "change_pct"], ascending=[True, True]
@@ -76,10 +78,9 @@ def build_today_snapshot(domestic: dict) -> pd.DataFrame:
 
 
 def run_scan(domestic: dict) -> pd.DataFrame:
-    """Runs the full today snapshot against an already-discovered/
+    """Runs the full today big-loss scan against an already-discovered/
     domicile-filtered `domestic` dict (see swiss_universe.filter_domestic)
     - see this module's docstring for why no separate fetch is needed
-    here. Returns a DataFrame covering every ticker with a live quote
-    today, empty only if none of them do.
+    here. Returns a DataFrame, empty if nothing is down >= 5% today.
     """
-    return build_today_snapshot(domestic)
+    return find_big_loss(domestic, LOSS_THRESHOLD_PCT)
