@@ -20,7 +20,7 @@ ALLOWED_INFERENCE_HOST_SUFFIXES = tuple(
     suffix.strip()
     for suffix in os.getenv(
         "ALLOWED_INFERENCE_HOST_SUFFIXES",
-        "ngrok-free.app,ngrok-free.dev,ngrok-free.pizza,ngrok.io,ngrok.app,huggingface.cloud,huggingface.co",
+        "ngrok-free.app,ngrok-free.dev,ngrok-free.pizza,ngrok.io,ngrok.app,huggingface.cloud,huggingface.co,modal.run",
     ).split(",")
     if suffix.strip()
 )

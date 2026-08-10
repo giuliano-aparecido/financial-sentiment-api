@@ -98,7 +98,7 @@ app/
 - **`/api/analyze` sends the full v4 prompt (market data + valuation +
   earnings + news), but no v4 model is live yet.** `HF_INFERENCE_URL`
   still points at whatever model is currently deployed via
-  `/api/update-inference-url` — until `financial-sentiment-model-colab`'s
+  `/api/update-inference-url` — until `financial-sentiment-model`'s
   v4 model is trained, evaluated, and that URL is repointed, this app is
   serving the new prompt shape to an OLDER model that was never trained on
   it. `analyze_with_hf` parses the new `answer` field with `.get`, not

@@ -100,7 +100,7 @@ def fetch_earnings(ticker: str) -> dict | None:
 
 def earnings_block(earnings: dict | None) -> str:
     """Renders the 'Recent Earnings' prompt block. Byte-format matches
-    financial-sentiment-model-colab's dataset generators exactly (see that
+    financial-sentiment-model's dataset generators exactly (see that
     repo's CONTRIBUTING.md 4-way sync rule) - the model is trained on this
     shape.
     """

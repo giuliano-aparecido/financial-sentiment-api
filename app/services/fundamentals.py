@@ -155,7 +155,7 @@ def format_market_cap(value: float) -> str:
 def market_data_block(fundamentals: dict | None) -> str:
     """Renders the 'Current Market Data' prompt block. Byte-format matches
     generate_synthetic_dataset.py/generate_real_dataset.py in
-    financial-sentiment-model-colab exactly (see that repo's
+    financial-sentiment-model exactly (see that repo's
     CONTRIBUTING.md 4-way sync rule) - the model is trained on this shape.
     """
     if not fundamentals or fundamentals.get("market_cap") is None:
