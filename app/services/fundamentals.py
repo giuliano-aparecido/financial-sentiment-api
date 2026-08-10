@@ -5,6 +5,39 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 
+def resolve_ticker(ticker: str) -> str:
+    """Resolves a bare ticker to the symbol yfinance/Yahoo actually
+    recognizes, e.g. "NESN" -> "NESN.SW". app.services.ticker.extract_ticker
+    has no exchange-suffix awareness (it just pulls a 2-5 letter token out
+    of free text), which works fine for US listings (no suffix needed on
+    Yahoo) but 404s for most non-US ones - confirmed live:
+    yf.Ticker("NESN").info returns nothing, while yf.Search("NESN").quotes
+    ranks "NESN.SW" (Nestle's real Swiss listing) as the top EQUITY match.
+    This is exactly why market_data/valuation render "Data unavailable."
+    for a company like Nestle while the news block (a free-text Google News
+    search - see news.py - which doesn't need a valid symbol at all) still
+    works.
+
+    Only meant to be called as a FALLBACK after a direct fetch with the
+    original ticker has already failed (see fetch_fundamentals below) -
+    calling it unconditionally on every request would add a network round
+    trip to the already-working common case for no benefit. Returns the
+    ORIGINAL ticker unchanged (not None) on any resolution failure or if no
+    EQUITY match is found, so callers can use the result unconditionally -
+    a resolution failure just means the downstream fetch fails the same way
+    it would have without this fallback.
+    """
+    try:
+        matches = yf.Search(ticker).quotes
+    except Exception as e:
+        logger.warning("yfinance ticker search failed for %r: %s", ticker, e)
+        return ticker
+    for match in matches:
+        if match.get("quoteType") == "EQUITY" and match.get("symbol"):
+            return match["symbol"]
+    return ticker
+
+
 def _fetch_growth_consensus(ticker: str) -> dict:
     """Best-effort near-term consensus growth from yfinance's
     earnings_estimate table (0y/+1y analyst EPS estimates), used by
@@ -42,6 +75,20 @@ def _fetch_growth_consensus(ticker: str) -> dict:
         return empty
 
 
+def _fetch_price_info(ticker: str) -> dict | None:
+    """Ticker.info if it resolves to a real quote with a price, else None -
+    factored out so fetch_fundamentals can retry once with a
+    resolve_ticker()-corrected symbol without duplicating the fetch/
+    price-check logic."""
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception as e:
+        logger.warning("yfinance fundamentals fetch failed for %s: %s", ticker, e)
+        return None
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    return info if price is not None else None
+
+
 def fetch_fundamentals(ticker: str) -> dict | None:
     """Fetches current fundamentals for `ticker` via yfinance's .info dict.
     Returns None on any fetch failure or if price itself is missing (the
@@ -49,19 +96,30 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     anchored to). Individual other fields (P/E, dividend yield, 52-week
     range, EPS, book value) can still be None inside a successful result;
     callers render those as "N/A" rather than failing the whole block.
-    """
-    try:
-        info = yf.Ticker(ticker).info
-    except Exception as e:
-        logger.warning("yfinance fundamentals fetch failed for %s: %s", ticker, e)
-        return None
 
-    price = info.get("currentPrice") or info.get("regularMarketPrice")
-    if price is None:
+    If the bare ticker doesn't resolve, retries once via resolve_ticker
+    (e.g. "NESN" -> "NESN.SW") before giving up - see that function's
+    docstring for why this is needed for most non-US listings. The
+    resolved symbol (which may equal the original) is used for every
+    subsequent call in this function, including _fetch_growth_consensus
+    below, and is exposed back as "resolved_ticker" so callers that need
+    the SAME symbol used elsewhere (e.g. fetch_earnings, run independently
+    and concurrently - see analyze.py - so it can't just reuse this
+    result) can be told about the correction; it's not required reading
+    for callers that don't care.
+    """
+    info = _fetch_price_info(ticker)
+    resolved_ticker = ticker
+    if info is None:
+        resolved_ticker = resolve_ticker(ticker)
+        if resolved_ticker != ticker:
+            info = _fetch_price_info(resolved_ticker)
+    if info is None:
         return None
 
     fundamentals = {
-        "price": price,
+        "resolved_ticker": resolved_ticker,
+        "price": info.get("currentPrice") or info.get("regularMarketPrice"),
         "market_cap": info.get("marketCap"),
         "pe_trailing": info.get("trailingPE"),
         "pe_forward": info.get("forwardPE"),
@@ -84,7 +142,7 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "industry": info.get("industry"),
         "payout_ratio": info.get("payoutRatio"),
     }
-    fundamentals.update(_fetch_growth_consensus(ticker))
+    fundamentals.update(_fetch_growth_consensus(resolved_ticker))
     return fundamentals
 
 
