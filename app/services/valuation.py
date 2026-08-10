@@ -17,11 +17,7 @@
 # consistent with this project's existing "Not applicable"/"Data
 # unavailable" fail-soft pattern.
 #
-# SCENARIOS/DISCOUNT_RATE below match a specific, given reference
-# calculation (universal across all four bases - the scenario assumptions
-# don't vary by which metric is being projected, only the metric's own
-# value does). Two earlier, self-invented alternatives were tried and
-# rejected first, for the historical record:
+# History of rejected/replaced approaches, for the record:
 #   1. Graham's own growth-adjusted revision (V = EPS x (8.5+2g) x 4.4/Y)
 #      using yfinance's raw earningsGrowth field - made things WORSE
 #      (Tesla -> 4374%), because that field is a noisy single-quarter YoY
@@ -34,8 +30,25 @@
 #      across variants tried), because high-beta names got an inflated
 #      discount rate on top of already-conservative growth assumptions,
 #      double-punishing exactly the names that needed the opposite.
-# The constants below use a flat discount rate and wider Best/Worst exit-
-# multiple spread instead, which resolved most of variant 2's outliers.
+#   3. A flat, universal SCENARIOS table (same g1/g2/exit_multiple for
+#      EVERY company, same 60/20/20 probability weights) - resolved most of
+#      variant 2's outliers, but was confirmed live against a real
+#      investor-analyst's own per-company DCF assumptions (5 tickers:
+#      NVDA/MSFT/PEP/NFLX/XOM) to be wrong in two structural ways, not just
+#      mistuned constants:
+#        a. Probability weights should be equal (1/3 each), not 60/20/20.
+#        b. For "eps"/"fcf"/"revenue" bases, summing all 10 years of
+#           projected cash flow AND adding a terminal value double-counts -
+#           that projected cash flow isn't actually paid to the
+#           shareholder each year (unlike a dividend), so only the
+#           discounted terminal (eventual sale) price should count. This
+#           was the single biggest source of error (NVDA/MSFT/NFLX were all
+#           40-70%+ too high under the old full-sum formula; matched within
+#           2-12% once switched to terminal-only - see
+#           scenario_terminal_value below).
+#      Growth/exit-multiple were also confirmed to genuinely vary by
+#      company (not universal) - see CURATED_SCENARIOS and build_scenarios
+#      below for how per-company inputs are now sourced.
 #
 # Deterministic, code-only math - never LLM-generated - matching
 # financial-sentiment-model-colab's training-data generators (see that
@@ -77,19 +90,68 @@ BASIS_LABELS = {
 
 # Flat for every company (not risk-adjusted per company) - deliberately
 # simpler than a CAPM/beta-derived rate, and specifically what resolved the
-# high-beta-name double-punishment problem described above.
+# high-beta-name double-punishment problem described in the module history
+# above. Unlike g1/g2/exit_multiple below, this one constant was NOT
+# contradicted by the live analyst comparison, so it's kept as-is.
 DISCOUNT_RATE = 0.10
 
-# g1 = years 1-5 growth, g2 = years 6-10 growth (equal within each scenario
-# here - growth doesn't fade between stages in this model, unlike an
-# earlier rejected variant), exit_multiple applied to year-10's projected
-# cash flow for the terminal value. Universal across all four valuation
-# bases - the scenario assumptions represent market-wide bull/base/bear
-# conditions, not a per-metric-type judgment.
-SCENARIOS = {
-    "normal": {"probability": 0.60, "g1": 0.08, "g2": 0.08, "exit_multiple": 15.0},
-    "best": {"probability": 0.20, "g1": 0.10, "g2": 0.10, "exit_multiple": 30.0},
-    "worst": {"probability": 0.20, "g1": 0.04, "g2": 0.04, "exit_multiple": 10.0},
+# Confirmed live (see module history, point 3a): the analyst's three
+# scenarios were weighted equally, not 60/20/20.
+SCENARIO_PROBABILITY = 1 / 3
+
+# Exact per-company scenario assumptions from a real investor analyst's own
+# DCF, keyed by ticker - used verbatim (bypassing build_scenarios' derived/
+# generic logic below) whenever the incoming ticker matches. g1 = years 1-5
+# growth, g2 = years 6-10 growth, exit_multiple applied to year-10's
+# projected cash flow. Confirmed these reproduce the analyst's own target
+# price within 2-12% once combined with equal weighting and the
+# terminal-only formula (see scenario_terminal_value) for the non-dividend
+# bases - NVDA/MSFT/NFLX/PEP were all 40-70%+ off under the old flat model.
+CURATED_SCENARIOS = {
+    "NVDA": {
+        "normal": {"g1": 0.30, "g2": 0.10, "exit_multiple": 20.0},
+        "best": {"g1": 0.30, "g2": 0.15, "exit_multiple": 25.0},
+        "worst": {"g1": 0.05, "g2": 0.05, "exit_multiple": 10.0},
+    },
+    "MSFT": {
+        "normal": {"g1": 0.15, "g2": 0.10, "exit_multiple": 20.0},
+        "best": {"g1": 0.20, "g2": 0.10, "exit_multiple": 25.0},
+        "worst": {"g1": 0.05, "g2": 0.05, "exit_multiple": 12.0},
+    },
+    "PEP": {
+        "normal": {"g1": 0.03, "g2": 0.03, "exit_multiple": 20.0},
+        "best": {"g1": 0.05, "g2": 0.05, "exit_multiple": 25.0},
+        "worst": {"g1": 0.03, "g2": -0.05, "exit_multiple": 15.0},
+    },
+    "NFLX": {
+        "normal": {"g1": 0.12, "g2": 0.10, "exit_multiple": 20.0},
+        "best": {"g1": 0.15, "g2": 0.12, "exit_multiple": 25.0},
+        "worst": {"g1": 0.08, "g2": 0.06, "exit_multiple": 15.0},
+    },
+    "XOM": {
+        "normal": {"g1": 0.04, "g2": 0.04, "exit_multiple": 20.0},
+        "best": {"g1": 0.06, "g2": 0.06, "exit_multiple": 30.0},
+        "worst": {"g1": 0.03, "g2": 0.03, "exit_multiple": 12.0},
+    },
+}
+
+# Fallback for any ticker not in CURATED_SCENARIOS. exit_multiple/g2 are
+# used as-is regardless of consensus data availability - confirmed live
+# that the analyst's exit multiples cluster tightly around 20x (normal) and
+# 25x (best) across unrelated companies (4-5 of 5 examples each), so those
+# look like genuine fixed defaults rather than per-company judgment. g2
+# (years 6-10 growth), by contrast, showed NO consistent pattern even
+# within the SAME company across scenarios (e.g. NVDA's best case fades to
+# 15%, not the 10% its normal case fades to) - so it's kept as a flat
+# generic default rather than pretending to derive it. g1 here is only the
+# FALLBACK for when a per-ticker consensus growth estimate isn't available
+# or isn't trustworthy (see build_scenarios) - reuses this model's
+# pre-existing "average company" growth assumptions rather than inventing
+# new numbers.
+GENERIC_SCENARIOS = {
+    "normal": {"g1": 0.08, "g2": 0.08, "exit_multiple": 20.0},
+    "best": {"g1": 0.10, "g2": 0.10, "exit_multiple": 25.0},
+    "worst": {"g1": 0.04, "g2": 0.04, "exit_multiple": 12.0},
 }
 
 
@@ -170,14 +232,64 @@ def cash_flow_basis_value(basis: str, fundamentals: dict) -> float | None:
     return None
 
 
+def build_scenarios(ticker: str | None, fundamentals: dict) -> dict[str, dict]:
+    """Assembles this company's normal/best/worst g1/g2/exit_multiple/
+    probability. Curated tickers (CURATED_SCENARIOS) use the analyst's
+    exact numbers verbatim. Everyone else starts from GENERIC_SCENARIOS and,
+    if a same-direction 0y/+1y consensus growth estimate is available (see
+    fundamentals.fetch_fundamentals' growth_0y/growth_1y/growth_0y_low/
+    growth_0y_high), overrides just g1 per scenario - g2/exit_multiple stay
+    generic regardless (see GENERIC_SCENARIOS' comment for why).
+
+    "Same-direction" is the reliability gate: confirmed live that when 0y
+    and +1y consensus growth point in OPPOSITE directions (e.g. XOM's
+    +65.7% this year / -8.6% next year), that's not a real growth trend -
+    it's a rebound-then-giveback around a distorted (commodity-cycle,
+    one-off) base year, and no combination of those two numbers recovers
+    the analyst's actual 4% long-run assumption. Falling back to the
+    generic g1 in that case is a deliberate "don't know" rather than a
+    confidently wrong derived number - same fail-soft philosophy as the
+    rest of this module.
+    """
+    if ticker and ticker in CURATED_SCENARIOS:
+        return {
+            name: {**scenario, "probability": SCENARIO_PROBABILITY}
+            for name, scenario in CURATED_SCENARIOS[ticker].items()
+        }
+
+    scenarios = {
+        name: {**scenario, "probability": SCENARIO_PROBABILITY} for name, scenario in GENERIC_SCENARIOS.items()
+    }
+
+    growth_0y = fundamentals.get("growth_0y")
+    growth_1y = fundamentals.get("growth_1y")
+    consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
+    if not consensus_reliable:
+        return scenarios
+
+    scenarios["normal"]["g1"] = (growth_0y + growth_1y) / 2
+    growth_0y_high = fundamentals.get("growth_0y_high")
+    growth_0y_low = fundamentals.get("growth_0y_low")
+    if growth_0y_high is not None:
+        scenarios["best"]["g1"] = growth_0y_high
+    if growth_0y_low is not None:
+        scenarios["worst"]["g1"] = growth_0y_low
+    return scenarios
+
+
 def scenario_dcf_value(cf0: float, g1: float, g2: float, exit_multiple: float, discount_rate: float) -> float:
-    """Present value of ONE scenario: cf0 compounds at g1 for
+    """Present value of ONE scenario, summing every projected year's cash
+    flow PLUS the discounted terminal value: cf0 compounds at g1 for
     STAGE_1_YEARS, then at g2 for STAGE_2_YEARS, each year's cash flow
     discounted back at discount_rate; the terminal value (final year's cash
     flow x exit_multiple) is discounted back from the same final year.
-    cf0 must be positive - callers (intrinsic_value) are responsible for
-    that check, matching this module's existing convention of validating
-    inputs at the boundary rather than inside the pure math."""
+    Used only for the "dividends" basis (see scenario_present_values) -
+    dividends are real cash actually paid to the shareholder every year, so
+    summing the interim stream is correct there, unlike EPS/FCF/revenue
+    (see scenario_terminal_value). cf0 must be positive - callers
+    (intrinsic_value) are responsible for that check, matching this
+    module's existing convention of validating inputs at the boundary
+    rather than inside the pure math."""
     pv = 0.0
     cf = cf0
     for year in range(1, STAGE_1_YEARS + 1):
@@ -191,33 +303,54 @@ def scenario_dcf_value(cf0: float, g1: float, g2: float, exit_multiple: float, d
     return pv
 
 
-def scenario_present_values(cf0: float) -> dict[str, float]:
-    """PV per named scenario (SCENARIOS' keys, in order). Factored out of
-    intrinsic_value so the DCF formula (scenario_dcf_value) is applied
-    exactly once per scenario in exactly one place - both intrinsic_value's
-    probability-weighting and valuation_block_for's logging build on this
-    same dict rather than recomputing or duplicating it."""
+def scenario_terminal_value(cf0: float, g1: float, g2: float, exit_multiple: float, discount_rate: float) -> float:
+    """Present value of ONE scenario counting ONLY the discounted terminal
+    value - no interim-year summation. Used for "eps"/"fcf"/"revenue"
+    bases: projected EPS/FCF/revenue isn't cash actually paid to the
+    shareholder each year (unlike a dividend), so a shareholder's real
+    return comes from eventually selling at the projected year-10 price,
+    not from "receiving" ten years of paper earnings on top of that sale.
+    Summing both (scenario_dcf_value's approach) double-counts, which was
+    confirmed live to be the single largest source of error in the
+    previous flat model - see module history, point 3b."""
+    future_cf = cf0 * (1 + g1) ** STAGE_1_YEARS * (1 + g2) ** STAGE_2_YEARS
+    terminal_value = future_cf * exit_multiple
+    return terminal_value / (1 + discount_rate) ** (STAGE_1_YEARS + STAGE_2_YEARS)
+
+
+def _scenario_pv(basis: str, cf0: float, g1: float, g2: float, exit_multiple: float, discount_rate: float) -> float:
+    if basis == "dividends":
+        return scenario_dcf_value(cf0, g1, g2, exit_multiple, discount_rate)
+    return scenario_terminal_value(cf0, g1, g2, exit_multiple, discount_rate)
+
+
+def scenario_present_values(cf0: float, basis: str, scenarios: dict[str, dict]) -> dict[str, float]:
+    """PV per named scenario in `scenarios` (see build_scenarios), using the
+    basis-appropriate formula (see _scenario_pv). Factored out of
+    intrinsic_value so the DCF formula is applied exactly once per scenario
+    in exactly one place - both intrinsic_value's probability-weighting and
+    valuation_block_for's logging build on this same dict rather than
+    recomputing or duplicating it."""
     return {
-        name: scenario_dcf_value(cf0, scenario["g1"], scenario["g2"], scenario["exit_multiple"], DISCOUNT_RATE)
-        for name, scenario in SCENARIOS.items()
+        name: _scenario_pv(basis, cf0, scenario["g1"], scenario["g2"], scenario["exit_multiple"], DISCOUNT_RATE)
+        for name, scenario in scenarios.items()
     }
 
 
-def intrinsic_value(cf0: float | None) -> float | None:
-    """Probability-weighted intrinsic value across SCENARIOS, applied
-    directly to cf0 - the scenario assumptions are universal across all
-    four valuation bases (see module docstring), so this takes no basis
-    argument, unlike an earlier per-basis-tiered version. None (not a fetch
-    failure) when cf0 is missing or non-positive - the classified basis's
-    own metric isn't usable for this company right now (e.g. a company
-    just barely flipped profitable enough to avoid the "revenue" fallback
-    but has near-zero EPS), same "Not applicable" semantics as the old
-    Graham Number's negative-EPS case."""
+def intrinsic_value(cf0: float | None, basis: str, scenarios: dict[str, dict]) -> float | None:
+    """Probability-weighted intrinsic value across `scenarios` (see
+    build_scenarios), using the basis-appropriate DCF formula (see
+    _scenario_pv). None (not a fetch failure) when cf0 is missing or
+    non-positive - the classified basis's own metric isn't usable for this
+    company right now (e.g. a company just barely flipped profitable
+    enough to avoid the "revenue" fallback but has near-zero EPS), same
+    "Not applicable" semantics as the old Graham Number's negative-EPS
+    case."""
     if cf0 is None or cf0 <= 0:
         return None
 
-    pvs = scenario_present_values(cf0)
-    return sum(SCENARIOS[name]["probability"] * pv for name, pv in pvs.items())
+    pvs = scenario_present_values(cf0, basis, scenarios)
+    return sum(scenario["probability"] * pvs[name] for name, scenario in scenarios.items())
 
 
 def valuation_block(price: float | None, intrinsic: float | None, basis: str) -> str:
@@ -245,45 +378,49 @@ def valuation_block(price: float | None, intrinsic: float | None, basis: str) ->
     )
 
 
-def _log_valuation_computation(ticker, fundamentals, basis, cf0, intrinsic, block):
+def _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block):
     # INFO (not DEBUG) so it shows up by default under this app's existing
     # logging.basicConfig(level=logging.INFO) (see main.py), matching
     # inference.py's prompt-logging convention - no config change needed to
     # see this in Render's log stream. Logs the full "recipe" (which
     # classification inputs drove the basis choice, the actual cf0 used,
-    # every scenario's growth/exit-multiple/PV, and the final weighted
-    # result) so the formula's behavior can be audited per-ticker after the
-    # fact, not just the one-line rendered block. Fires even when cf0/
-    # intrinsic end up None (the "Not applicable" case) - that's exactly
-    # when knowing WHY (which classification inputs were missing/unusable)
-    # is most useful, not less.
-    pvs = scenario_present_values(cf0) if cf0 is not None and cf0 > 0 else {}
+    # whether this ticker's scenarios are curated or derived/generic, every
+    # scenario's growth/exit-multiple/PV, and the final weighted result) so
+    # the formula's behavior can be audited per-ticker after the fact, not
+    # just the one-line rendered block. Fires even when cf0/intrinsic end
+    # up None (the "Not applicable" case) - that's exactly when knowing WHY
+    # (which classification inputs were missing/unusable) is most useful,
+    # not less.
+    pvs = scenario_present_values(cf0, basis, scenarios) if cf0 is not None and cf0 > 0 else {}
+    source = "curated" if ticker and ticker in CURATED_SCENARIOS else "derived/generic"
     scenario_summary = "; ".join(
         f"{name}(p={s['probability']:.0%}, g1={s['g1']:.1%}, g2={s['g2']:.1%}, exit={s['exit_multiple']:.1f}x)"
         + (f" -> PV=${pvs[name]:,.2f}" if name in pvs else "")
-        for name, s in SCENARIOS.items()
+        for name, s in scenarios.items()
     )
     logger.info(
         "Valuation[%s]: classification inputs eps_trailing=%s, payout_ratio=%s, "
         "sector=%r, free_cash_flow=%s -> basis=%s; cf0=%s; discount_rate=%.0f%%; "
-        "scenarios: %s; intrinsic_value=%s; price=%s; block=%r",
+        "scenarios(%s): %s; intrinsic_value=%s; price=%s; block=%r",
         ticker,
         fundamentals.get("eps_trailing"), fundamentals.get("payout_ratio"),
         fundamentals.get("sector"), fundamentals.get("free_cash_flow"), basis,
-        cf0, DISCOUNT_RATE * 100, scenario_summary, intrinsic, fundamentals.get("price"),
+        cf0, DISCOUNT_RATE * 100, source, scenario_summary, intrinsic, fundamentals.get("price"),
         block,
     )
 
 
 def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) -> str:
     """Convenience wrapper for callers holding a fundamentals.fetch_
-    fundamentals() result - classifies the valuation basis, computes the
-    intrinsic value, and renders the block in one call. A missing/failed
-    fundamentals fetch (or a missing price specifically) renders as 'Data
-    unavailable.' before classification is even attempted, since none of
-    its inputs would be trustworthy either. `ticker` is optional and used
-    only to label the audit log below - callers without it (e.g. existing
-    tests) still work unchanged.
+    fundamentals() result - classifies the valuation basis, builds this
+    company's scenarios (see build_scenarios), computes the intrinsic
+    value, and renders the block in one call. A missing/failed fundamentals
+    fetch (or a missing price specifically) renders as 'Data unavailable.'
+    before classification is even attempted, since none of its inputs
+    would be trustworthy either. `ticker` is optional - without it,
+    build_scenarios can never match CURATED_SCENARIOS and always falls
+    back to derived/generic, and the audit log below just omits the label;
+    callers without it (e.g. existing tests) still work.
     """
     if not fundamentals or fundamentals.get("price") is None:
         return "Data unavailable."
@@ -295,7 +432,8 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
         fundamentals.get("free_cash_flow"),
     )
     cf0 = cash_flow_basis_value(basis, fundamentals)
-    intrinsic = intrinsic_value(cf0)
+    scenarios = build_scenarios(ticker, fundamentals)
+    intrinsic = intrinsic_value(cf0, basis, scenarios)
     block = valuation_block(fundamentals["price"], intrinsic, basis)
-    _log_valuation_computation(ticker, fundamentals, basis, cf0, intrinsic, block)
+    _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block)
     return block

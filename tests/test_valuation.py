@@ -1,8 +1,11 @@
 from app.services.valuation import (
+    CURATED_SCENARIOS,
+    build_scenarios,
     cash_flow_basis_value,
     classify_valuation_basis,
     intrinsic_value,
     scenario_dcf_value,
+    scenario_terminal_value,
     valuation_block,
     valuation_block_for,
 )
@@ -104,14 +107,12 @@ def test_cash_flow_basis_value_fcf_none_when_fcf_missing():
     assert cash_flow_basis_value("fcf", {"free_cash_flow": None, "market_cap": 3.0e12, "price": 300.0}) is None
 
 
-# --- scenario_dcf_value ---
+# --- scenario_dcf_value (full-sum: interim years + terminal, "dividends" basis) ---
 # Reference value below computed via an independent Python loop (not this
-# module) for cf0=10.0, g1=g2=0.08 (the "normal" scenario's growth - equal
-# across both stages in this model, unlike an earlier rejected fading-
-# growth variant), exit_multiple=15.0, r=0.10: year-10 projected cash flow
-# is 10 x 1.08^10 ~= 21.589; PV of years 1-10 plus the exit-multiple
-# terminal value (21.589 x 15, discounted back 10 years) sums to
-# ~215.379972.
+# module) for cf0=10.0, g1=g2=0.08, exit_multiple=15.0, r=0.10: year-10
+# projected cash flow is 10 x 1.08^10 ~= 21.589; PV of years 1-10 plus the
+# exit-multiple terminal value (21.589 x 15, discounted back 10 years) sums
+# to ~215.379972.
 
 
 def test_scenario_dcf_value_matches_independent_reference_calc():
@@ -137,32 +138,131 @@ def test_scenario_dcf_value_higher_discount_rate_produces_lower_pv():
     assert high_rate < low_rate
 
 
+# --- scenario_terminal_value (terminal-only, "eps"/"fcf"/"revenue" bases) ---
+# Reference value below computed independently for cf0=10.0, g1=g2=0.08,
+# exit_multiple=15.0, r=0.10: year-10 cash flow 10 x 1.08^10 ~= 21.589,
+# terminal value 21.589 x 15 ~= 323.84, discounted back 10 years at 10% ->
+# ~124.85. Deliberately smaller than scenario_dcf_value's 215.38 for the
+# same inputs - that gap IS the interim-year summation scenario_dcf_value
+# adds and scenario_terminal_value doesn't (see module history point 3b).
+
+
+def test_scenario_terminal_value_matches_independent_reference_calc():
+    pv = scenario_terminal_value(cf0=10.0, g1=0.08, g2=0.08, exit_multiple=15.0, discount_rate=0.10)
+    assert round(pv, 2) == 124.85
+
+
+def test_scenario_terminal_value_is_lower_than_full_sum_for_same_inputs():
+    terminal_only = scenario_terminal_value(cf0=10.0, g1=0.08, g2=0.08, exit_multiple=15.0, discount_rate=0.10)
+    full_sum = scenario_dcf_value(cf0=10.0, g1=0.08, g2=0.08, exit_multiple=15.0, discount_rate=0.10)
+    assert terminal_only < full_sum
+
+
+def test_scenario_terminal_value_higher_growth_produces_higher_pv():
+    low = scenario_terminal_value(cf0=10.0, g1=0.04, g2=0.04, exit_multiple=15.0, discount_rate=0.10)
+    high = scenario_terminal_value(cf0=10.0, g1=0.20, g2=0.20, exit_multiple=15.0, discount_rate=0.10)
+    assert high > low
+
+
+# --- build_scenarios ---
+
+
+def test_build_scenarios_uses_curated_table_verbatim_for_known_ticker():
+    scenarios = build_scenarios("NVDA", {"growth_0y": 999.0, "growth_1y": 999.0})  # would-be consensus, ignored
+    assert scenarios["normal"]["g1"] == CURATED_SCENARIOS["NVDA"]["normal"]["g1"]
+    assert scenarios["normal"]["g2"] == CURATED_SCENARIOS["NVDA"]["normal"]["g2"]
+    assert scenarios["normal"]["exit_multiple"] == CURATED_SCENARIOS["NVDA"]["normal"]["exit_multiple"]
+
+
+def test_build_scenarios_curated_tickers_use_equal_probability():
+    scenarios = build_scenarios("NVDA", {})
+    assert scenarios["normal"]["probability"] == 1 / 3
+    assert scenarios["best"]["probability"] == 1 / 3
+    assert scenarios["worst"]["probability"] == 1 / 3
+
+
+def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {})
+    assert scenarios["normal"]["g1"] == 0.08
+    assert scenarios["normal"]["g2"] == 0.08
+    assert scenarios["normal"]["exit_multiple"] == 20.0
+
+
+def test_build_scenarios_derives_normal_g1_from_same_direction_consensus():
+    # MSFT-style: 0y=13.87%, +1y=19.30%, both positive -> average = 16.585%.
+    fundamentals = {"growth_0y": 0.1387, "growth_1y": 0.1930}
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    assert round(scenarios["normal"]["g1"], 4) == round((0.1387 + 0.1930) / 2, 4)
+    # g2/exit_multiple stay generic even when g1 is derived.
+    assert scenarios["normal"]["g2"] == 0.08
+    assert scenarios["normal"]["exit_multiple"] == 20.0
+
+
+def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
+    fundamentals = {
+        "growth_0y": 0.1387,
+        "growth_1y": 0.1930,
+        "growth_0y_high": 0.25,
+        "growth_0y_low": 0.05,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    assert scenarios["best"]["g1"] == 0.25
+    assert scenarios["worst"]["g1"] == 0.05
+
+
+def test_build_scenarios_falls_back_to_generic_when_consensus_reverses_direction():
+    # XOM-style: 0y strongly positive (rebound), +1y negative (giveback) -
+    # a distorted base year, not a real trend. Must NOT be averaged.
+    fundamentals = {"growth_0y": 0.6567, "growth_1y": -0.0862}
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    assert scenarios["normal"]["g1"] == 0.08
+
+
+def test_build_scenarios_falls_back_to_generic_when_consensus_missing():
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {"growth_0y": None, "growth_1y": None})
+    assert scenarios["normal"]["g1"] == 0.08
+
+
+def test_build_scenarios_works_without_ticker():
+    scenarios = build_scenarios(None, {})
+    assert scenarios["normal"]["g1"] == 0.08
+
+
 # --- intrinsic_value ---
-# Reference: same independent loop as above, run once per SCENARIOS entry
-# (normal: g1=g2=0.08, exit=15x; best: g1=g2=0.10, exit=30x; worst:
-# g1=g2=0.04, exit=10x; discount_rate=0.10 fixed across all three) and
-# weighted 0.60/0.20/0.20: normal ~= 215.379972, best = 400.0 exactly
-# (10 x 1.10^10 x 30, discounted back 10 years at 10% - the discount
-# factor and growth factor cancel exactly since g=r=0.10, leaving
-# cf0 x exit_multiple = 10 x 30 = 300 plus the smaller annual-cashflow PV
-# terms), worst ~= 131.482128 -> weighted ~= 235.524409.
+# Reference values below are the curated-scenario results for the real
+# tickers they were sourced from, confirmed live against the analyst's own
+# target prices (see valuation.py module history, point 3): NVDA ~11.8% off
+# ($270.71 vs $242.24), MSFT ~2.2% off ($397.20 vs $405.97) - both large
+# improvements over the old flat model's 40-70%+ errors, not exact matches
+# (the analyst's own per-company judgment isn't fully recoverable - see
+# build_scenarios).
 
 
-def test_intrinsic_value_matches_independent_reference_calc():
-    iv = intrinsic_value(cf0=10.0)
-    assert round(iv, 4) == 235.5244
+def test_intrinsic_value_matches_curated_nvda_reference_calc():
+    scenarios = build_scenarios("NVDA", {})
+    iv = intrinsic_value(cf0=6.53, basis="eps", scenarios=scenarios)
+    assert round(iv, 2) == 270.71
+
+
+def test_intrinsic_value_matches_curated_pep_reference_calc():
+    scenarios = build_scenarios("PEP", {})
+    iv = intrinsic_value(cf0=5.86, basis="dividends", scenarios=scenarios)
+    assert round(iv, 2) == 102.83
 
 
 def test_intrinsic_value_none_for_missing_cf0():
-    assert intrinsic_value(cf0=None) is None
+    scenarios = build_scenarios(None, {})
+    assert intrinsic_value(cf0=None, basis="eps", scenarios=scenarios) is None
 
 
 def test_intrinsic_value_none_for_zero_cf0():
-    assert intrinsic_value(cf0=0.0) is None
+    scenarios = build_scenarios(None, {})
+    assert intrinsic_value(cf0=0.0, basis="eps", scenarios=scenarios) is None
 
 
 def test_intrinsic_value_none_for_negative_cf0():
-    assert intrinsic_value(cf0=-5.0) is None
+    scenarios = build_scenarios(None, {})
+    assert intrinsic_value(cf0=-5.0, basis="eps", scenarios=scenarios) is None
 
 
 # --- valuation_block ---
@@ -202,14 +302,14 @@ def test_valuation_block_data_unavailable_when_price_missing():
 def test_valuation_block_for_computes_from_fundamentals_dict():
     fundamentals = {
         "price": 300.0,
-        "eps_trailing": 10.0,
+        "eps_trailing": 6.53,
         "payout_ratio": 0.10,
         "sector": "Technology",
         "free_cash_flow": None,
         "market_cap": 3.0e12,
     }
-    block = valuation_block_for(fundamentals)
-    assert "Intrinsic Value (EPS-based): $235.52" in block
+    block = valuation_block_for(fundamentals, ticker="NVDA")
+    assert "Intrinsic Value (EPS-based): $270.71" in block
 
 
 def test_valuation_block_for_uses_dividends_basis_for_high_payout_company():

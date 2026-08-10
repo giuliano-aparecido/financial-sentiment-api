@@ -5,6 +5,43 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 
+def _fetch_growth_consensus(ticker: str) -> dict:
+    """Best-effort near-term consensus growth from yfinance's
+    earnings_estimate table (0y/+1y analyst EPS estimates), used by
+    valuation.py to derive a per-company g1 (see that module's
+    build_scenarios). All-None on any failure or missing data - this is
+    deliberately independent of fetch_fundamentals' own try/except, since a
+    growth-estimate outage shouldn't fail the whole fundamentals fetch (the
+    valuation model already has a generic-growth fallback for exactly this
+    case).
+
+    growth_0y/growth_1y are the current-year/next-year consensus EPS growth
+    rates (yfinance's own precomputed "growth" column). growth_0y_low/_high
+    are derived from the SAME 0y row's low/high analyst estimates vs its
+    yearAgoEps - confirmed live against 5 analyst-provided examples to
+    approximate a best/worst-case growth spread for companies whose
+    consensus isn't already distorted by a rebound/giveback (see
+    valuation.py's reliability check for how that distortion is detected).
+    """
+    empty = {"growth_0y": None, "growth_1y": None, "growth_0y_low": None, "growth_0y_high": None}
+    try:
+        estimate = yf.Ticker(ticker).earnings_estimate
+        row_0y = estimate.loc["0y"]
+        row_1y = estimate.loc["+1y"]
+        year_ago = row_0y["yearAgoEps"]
+        if not year_ago:
+            return empty
+        return {
+            "growth_0y": row_0y["growth"],
+            "growth_1y": row_1y["growth"],
+            "growth_0y_low": (row_0y["low"] - year_ago) / abs(year_ago),
+            "growth_0y_high": (row_0y["high"] - year_ago) / abs(year_ago),
+        }
+    except Exception as e:
+        logger.warning("yfinance growth-estimate fetch failed for %s: %s", ticker, e)
+        return empty
+
+
 def fetch_fundamentals(ticker: str) -> dict | None:
     """Fetches current fundamentals for `ticker` via yfinance's .info dict.
     Returns None on any fetch failure or if price itself is missing (the
@@ -23,7 +60,7 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     if price is None:
         return None
 
-    return {
+    fundamentals = {
         "price": price,
         "market_cap": info.get("marketCap"),
         "pe_trailing": info.get("trailingPE"),
@@ -47,6 +84,8 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "industry": info.get("industry"),
         "payout_ratio": info.get("payoutRatio"),
     }
+    fundamentals.update(_fetch_growth_consensus(ticker))
+    return fundamentals
 
 
 def format_market_cap(value: float) -> str:
