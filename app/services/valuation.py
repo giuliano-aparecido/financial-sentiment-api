@@ -67,6 +67,19 @@ STAGE_2_YEARS = 5
 ASSET_HEAVY_SECTORS = {"Energy", "Industrials", "Basic Materials", "Utilities"}
 DIVIDEND_PAYOUT_THRESHOLD = 0.40  # payout_ratio >= this -> treated as a mature dividend payer
 
+# A payout_ratio above this means the company is paying out MORE than its
+# entire trailing earnings - confirmed live (DSM-Firmenich, mid its 2023
+# merger, showed payout_ratio=1.79) that this isn't a genuine "mature
+# cash-cow" payout POLICY like Kinder Morgan's stable ~0.76, it's a
+# mechanical artifact of a transiently earnings-crushed company holding
+# its dividend flat. Above this ceiling, the payout-ratio check below is
+# skipped so the company falls through to the asset-heavy/fcf or eps
+# checks instead, same fail-soft reasoning as the rest of this
+# classifier. Chosen a little above 1.0 (not exactly 1.0) so a company
+# paying out fractionally more than one bad quarter's earnings isn't
+# needlessly excluded - the DSM case (1.79) is nowhere near this edge.
+DIVIDEND_PAYOUT_CEILING = 1.20
+
 # REITs are legally required to distribute ~90% of TAXABLE income as
 # dividends, but yfinance's payoutRatio is computed against GAAP earnings,
 # which real-estate accounting depresses with large non-cash depreciation
@@ -190,9 +203,16 @@ def classify_valuation_basis(
     2. Unprofitable or unknown profitability -> "revenue" (can't project
        earnings/FCF/dividends that don't exist yet - matches early-stage
        growth companies like Beyond Meat).
-    3. High payout ratio (pays out a large share of earnings) -> "dividends"
-       (mature cash-cow-style payers - matches Kinder Morgan/Coca-Cola
-       Europacific-style examples).
+    3. High but PLAUSIBLE payout ratio (pays out a large share of earnings,
+       without exceeding DIVIDEND_PAYOUT_CEILING) -> "dividends" (mature
+       cash-cow-style payers - matches Kinder Morgan/Coca-Cola
+       Europacific-style examples). A payout ratio ABOVE the ceiling is
+       deliberately excluded here, not treated as an even-more-obvious
+       dividends case - see DIVIDEND_PAYOUT_CEILING's comment for why
+       (confirmed live: DSM-Firmenich's transiently earnings-crushed
+       1.79 payout ratio would otherwise have been misrouted to
+       "dividends" instead of falling through to "fcf" below, which is
+       what an asset-heavy chemicals company should actually use).
     4. Asset-heavy sector AND a real positive FCF figure -> "fcf" (matches
        industrial/asset-heavy examples). The FCF check isn't redundant with
        the sector check - confirmed live that yfinance's freeCashflow is
@@ -207,7 +227,7 @@ def classify_valuation_basis(
         return "dividends"
     if eps_trailing is None or eps_trailing <= 0:
         return "revenue"
-    if payout_ratio is not None and payout_ratio >= DIVIDEND_PAYOUT_THRESHOLD:
+    if payout_ratio is not None and DIVIDEND_PAYOUT_THRESHOLD <= payout_ratio <= DIVIDEND_PAYOUT_CEILING:
         return "dividends"
     if sector in ASSET_HEAVY_SECTORS and free_cash_flow is not None and free_cash_flow > 0:
         return "fcf"

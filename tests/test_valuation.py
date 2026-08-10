@@ -50,6 +50,28 @@ def test_classify_payout_exactly_at_threshold_uses_dividends_basis():
     assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=0.40, sector="Technology", free_cash_flow=None) == "dividends"
 
 
+def test_classify_payout_above_ceiling_falls_through_to_fcf_not_dividends():
+    # Confirmed live: DSM-Firmenich, mid its 2023 merger, showed
+    # payout_ratio=1.79 - paying out more than its entire trailing
+    # earnings. That's a transiently earnings-crushed asset-heavy
+    # chemicals company holding its dividend flat, not a genuine
+    # Kinder-Morgan-style cash-cow payout policy - it should fall through
+    # to the asset-heavy/fcf check, not get caught by the payout check.
+    assert classify_valuation_basis(eps_trailing=1.4, payout_ratio=1.79, sector="Basic Materials", free_cash_flow=5e8) == "fcf"
+
+
+def test_classify_payout_above_ceiling_falls_through_to_eps_when_fcf_unusable():
+    # Same DSM-style distorted payout ratio, but this time FCF is also
+    # currently negative (also confirmed live for DSM-Firmenich) - must
+    # land on "eps", not get stuck on "dividends" via the excluded payout
+    # check, and not misfire into "fcf" with an unusable negative figure.
+    assert classify_valuation_basis(eps_trailing=1.4, payout_ratio=1.79, sector="Basic Materials", free_cash_flow=-1.4e8) == "eps"
+
+
+def test_classify_payout_at_ceiling_still_uses_dividends_basis():
+    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=1.20, sector="Technology", free_cash_flow=None) == "dividends"
+
+
 def test_classify_asset_heavy_sector_with_positive_fcf_uses_fcf_basis():
     assert classify_valuation_basis(eps_trailing=5.0, payout_ratio=0.10, sector="Industrials", free_cash_flow=2e9) == "fcf"
 
