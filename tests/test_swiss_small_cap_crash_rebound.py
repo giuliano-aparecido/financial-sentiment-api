@@ -1,0 +1,121 @@
+import pandas as pd
+import pytest
+
+import app.services.swiss_small_cap_crash_rebound as crash_rebound_module
+from app.services.swiss_small_cap_crash_rebound import attach_news, find_crash_then_rebound, run_scan
+
+
+def _ohlcv_frame(dates, closes, volumes):
+    # Open/High/Low set equal to Close - none of this module's logic reads
+    # them for anything except passthrough display, so exact values don't
+    # matter for these tests, only that the columns exist.
+    return pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes, "Close": closes, "Volume": volumes},
+        index=pd.DatetimeIndex(dates, name="Date"),
+    )
+
+
+def _fake_download(symbols, **kwargs):
+    # Matches real yf.download's actual shape: FLAT (no ticker level) for
+    # a single symbol, multi-indexed ({ticker: {OHLCV}}) for more than
+    # one - find_crash_then_rebound's own single-symbol normalization
+    # step (pd.concat) exists specifically to paper over this asymmetry,
+    # so a fake that returns the multi-indexed shape unconditionally would
+    # get double-wrapped for the single-symbol case and break indexing.
+    if len(symbols) == 1:
+        return crash_rebound_module._TEST_FRAMES[symbols[0]]
+    frames = {symbol: crash_rebound_module._TEST_FRAMES[symbol] for symbol in symbols}
+    return pd.concat(frames, axis=1)
+
+
+@pytest.fixture
+def today():
+    return pd.Timestamp.today().normalize()
+
+
+def test_find_crash_then_rebound_detects_a_match(monkeypatch, today):
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    # Day -2: drop 6% (100 -> 94), Day -1: gain 6% (94 -> 99.64)
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    volumes = [1000] * 8 + [5000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    assert len(results) == 1
+    row = results.iloc[0]
+    assert row["ticker"] == "TEST.SW"
+    assert row["drop_pct"] == -6.0
+    assert row["gain_pct"] == 6.0
+    assert row["loss_close"] == 94.0
+    assert row["gain_close"] == 99.64
+    assert row["loss_volume"] == 5000
+    assert row["gain_volume"] == 8000
+
+
+def test_find_crash_then_rebound_no_match_when_gain_too_small(monkeypatch, today):
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    # Drop 6%, but only a 2% rebound - shouldn't qualify.
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 95.88]
+    volumes = [1000] * 10
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    assert results.empty
+
+
+def test_find_crash_then_rebound_excludes_matches_outside_lookback_window(monkeypatch, today):
+    # 4 months of history (buffer for the lookback window - see module
+    # docstring), but the crash+rebound pair happened right at the START,
+    # well outside the 1-month lookback used in this test.
+    dates = pd.date_range(end=today, periods=80, freq="B")
+    closes = [100.0] * 80
+    closes[1] = 94.0    # -6% - old, outside a 1-month lookback
+    closes[2] = 99.64   # +6% - old, outside a 1-month lookback
+    volumes = [1000] * 80
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=1,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    assert results.empty
+
+
+def test_find_crash_then_rebound_pe_approx_none_for_lossmaking_company(monkeypatch, today):
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    volumes = [1000] * 10
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": -1.5}}  # loss-making - no meaningful P/E
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    assert results.iloc[0]["loss_pe_approx"] is None
+    assert results.iloc[0]["gain_pe_approx"] is None
+
+
+def test_attach_news_matches_on_ticker_and_gain_date():
+    results = pd.DataFrame([
+        {"ticker": "INRN.SW", "gain_date": "2026-08-04"},
+        {"ticker": "UNKNOWN.SW", "gain_date": "2026-01-01"},
+    ])
+    with_news = attach_news(results)
+    assert with_news.iloc[0]["news_headline"] is not None
+    assert with_news.iloc[0]["news_source"] is not None
+    # pandas represents "no match" as NaN here (not None) internally - the
+    # JSON-safety conversion to a real None happens one layer up, at
+    # research_job._json_safe_records, not inside attach_news itself.
+    assert pd.isna(with_news.iloc[1]["news_headline"])
+    assert pd.isna(with_news.iloc[1]["news_source"])
+
+
+def test_run_scan_returns_empty_dataframe_when_no_symbols():
+    assert run_scan({}).empty
