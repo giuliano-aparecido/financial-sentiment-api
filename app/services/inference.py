@@ -29,7 +29,17 @@ def set_hf_inference_url(url: str) -> None:
 
 async def start_client() -> None:
     global _client
-    _client = httpx.AsyncClient(timeout=45.0)
+    # 45.0 -> 280.0: too short for a scale-to-zero backend (financial-
+    # sentiment-model's modal/serve_model.py) - confirmed live, a cold
+    # start alone (container boot + model load) measured ~120s, well past
+    # the old 45s, and the actual max_new_tokens=512 generation adds more
+    # on top. 280s stays under Modal's own 300s per-call cap so a genuine
+    # hang there still surfaces as Modal's error rather than this client
+    # giving up first with no detail. financial-sentiment-web's proxy
+    # (AbortSignal/maxDuration) had to move together with this - a
+    # shorter timeout anywhere upstream just relocates where the same
+    # request dies.
+    _client = httpx.AsyncClient(timeout=280.0)
 
 
 async def stop_client() -> None:
