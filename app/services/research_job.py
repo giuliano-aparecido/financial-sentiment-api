@@ -31,6 +31,16 @@ needing a lock around every read (CPython's GIL makes the rebind itself
 atomic). The lock below only guards the "is one already running, if not
 start one" check in start_scan(), which is the one place two threads could
 otherwise race to both start a scan.
+
+Crash-rebound caching: its 3-month lookback barely changes day to day -
+once a trading day closes, that day's OHLCV doesn't change - so
+_crash_rebound_result below only recomputes it (paying the yf.download
+historical batch call) once per UTC calendar day, reusing the cached
+result for same-day re-scans. today_screener is NEVER cached - it reports
+live intraday quotes and always re-runs against the freshly-discovered
+`domestic` dict. No lock needed around the cache itself: _run only ever
+executes one at a time (see start_scan's single-job-slot reasoning above),
+so there's no concurrent writer to race against.
 """
 
 import datetime
@@ -59,12 +69,39 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
         return []
     return df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
+
 _job: dict = {"status": "idle"}
 _job_lock = threading.Lock()
+
+_crash_rebound_cache: dict = {"date": None, "result": None}
 
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _today() -> datetime.date:
+    # Factored out (instead of inlining datetime.datetime.now(...).date()
+    # in _crash_rebound_result below) so tests can monkeypatch "today"
+    # directly rather than faking the datetime module. UTC, not CET/Swiss-
+    # market-day - a simple daily boundary, not an exact trading-session
+    # cutoff; a cache miss right at the UTC/CET offset just costs one
+    # extra recompute, not a correctness problem.
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def _crash_rebound_result(domestic: dict) -> pd.DataFrame:
+    """Cached per calendar day (see module docstring) - returns today's
+    already-computed result if this is a same-day re-scan, otherwise
+    recomputes and caches it."""
+    global _crash_rebound_cache
+    today = _today()
+    if _crash_rebound_cache["date"] == today:
+        logger.info("Reusing cached crash-rebound result from %s", today)
+        return _crash_rebound_cache["result"]
+    result = swiss_small_cap_crash_rebound.run_scan(domestic)
+    _crash_rebound_cache = {"date": today, "result": result}
+    return result
 
 
 def _run(started_at: str) -> None:
@@ -72,7 +109,7 @@ def _run(started_at: str) -> None:
     try:
         candidates = swiss_universe.discover_candidates()
         domestic = swiss_universe.filter_domestic(candidates)
-        crash_rebound_df = swiss_small_cap_crash_rebound.run_scan(domestic)
+        crash_rebound_df = _crash_rebound_result(domestic)
         today_df = swiss_small_cap_today_screener.run_scan(domestic)
         _job = {
             "status": "done",
