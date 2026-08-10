@@ -38,9 +38,17 @@ _crash_rebound_result below only recomputes it (paying the yf.download
 historical batch call) once per UTC calendar day, reusing the cached
 result for same-day re-scans. today_screener is NEVER cached - it reports
 live intraday quotes and always re-runs against the freshly-discovered
-`domestic` dict. No lock needed around the cache itself: _run only ever
-executes one at a time (see start_scan's single-job-slot reasoning above),
-so there's no concurrent writer to race against.
+`domestic` dict. Since the only way to trigger a scan at all is the
+Refresh button (no auto-poll timer), this already means today_screener's
+result is "refreshed on demand via the button, or naturally on the next
+day" - the exact behavior wanted, with no extra caching logic needed for
+it specifically. What IS cached (the job's _job dict) just holds the most
+recently computed result until the next scan overwrites it - not a TTL,
+just normal state.
+
+No lock needed around the crash-rebound cache: _run only ever executes
+one at a time (see start_scan's single-job-slot reasoning above), so
+there's no concurrent writer to race against.
 """
 
 import datetime
