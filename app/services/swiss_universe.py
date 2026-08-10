@@ -17,6 +17,7 @@ companies":
      foreign - the region/exchange filters alone do not.
 """
 
+import datetime
 import time
 import yfinance as yf
 
@@ -79,14 +80,30 @@ def discover_candidates(min_market_cap=MIN_MARKET_CAP_CHF, max_market_cap=MAX_MA
     return candidates
 
 
+def _ex_dividend_date(info: dict) -> str | None:
+    # yfinance's exDividendDate is a Unix timestamp (seconds), not a date
+    # string - confirmed live. None for companies with no dividend history
+    # (the key is simply absent from .info), which utcfromtimestamp(None)
+    # would raise on, so this checks first rather than catching.
+    ts = info.get("exDividendDate")
+    if not ts:
+        return None
+    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).date().isoformat()
+
+
 def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
     """Keeps only candidates whose own `country` field is Switzerland -
     the one field that actually reflects company domicile rather than
     exchange/listing region (see module docstring). Fetched per-ticker via
     Ticker.info since the screener response doesn't include this field.
     Returns (symbol -> dict) with the original screener `quote` retained
-    (for live/"today" fields) alongside domicile-confirmed extras
-    (sector, trailing_eps) that only .info has. Fails soft per ticker: a
+    (for live/"today" fields) alongside domicile-confirmed extras that
+    only .info has - sector/trailing_eps (used by the valuation-adjacent
+    scripts) plus a handful of extra current-snapshot fields (dividend
+    yield, ex-dividend date, trailing/forward P/E, beta, 52-week range)
+    pulled from this SAME .info call at no extra request cost, for
+    scripts that want a fuller company profile (see
+    swiss_small_cap_crash_rebound.py's run_scan). Fails soft per ticker: a
     fetch error just excludes that ticker with a warning, rather than
     aborting the whole scan.
     """
@@ -101,6 +118,13 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
                     "sector": info.get("sector"),
                     "market_cap": quote.get("marketCap"),
                     "trailing_eps": info.get("trailingEps"),
+                    "trailing_pe": info.get("trailingPE"),
+                    "forward_pe": info.get("forwardPE"),
+                    "dividend_yield": info.get("dividendYield"),
+                    "ex_dividend_date": _ex_dividend_date(info),
+                    "beta": info.get("beta"),
+                    "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+                    "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
                     "quote": quote,
                 }
             else:

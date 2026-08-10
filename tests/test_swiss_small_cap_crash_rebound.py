@@ -119,3 +119,34 @@ def test_attach_news_matches_on_ticker_and_gain_date():
 
 def test_run_scan_returns_empty_dataframe_when_no_symbols():
     assert run_scan({}).empty
+
+
+def test_run_scan_attaches_current_snapshot_company_fields(monkeypatch, today):
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    volumes = [1000] * 8 + [5000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {
+        "TEST.SW": {
+            "name": "Test AG", "sector": "Industrials", "market_cap": 1e9, "trailing_eps": 5.0,
+            "trailing_pe": 20.0, "forward_pe": 17.5, "dividend_yield": 2.24,
+            "ex_dividend_date": "2026-06-13", "beta": 1.27,
+            "fifty_two_week_high": 2590.0, "fifty_two_week_low": 1258.0,
+        },
+    }
+    results = run_scan(domestic)
+
+    row = results.iloc[0]
+    assert row["trailing_pe"] == 20.0
+    assert row["forward_pe"] == 17.5
+    assert row["dividend_yield"] == 2.24
+    assert row["ex_dividend_date"] == "2026-06-13"
+    assert row["beta"] == 1.27
+    assert row["fifty_two_week_high"] == 2590.0
+    assert row["fifty_two_week_low"] == 1258.0
+    # Raw volume (not just the vs-3mo-average ratio) is present for both
+    # the loss day and the gain day.
+    assert row["loss_volume"] == 5000
+    assert row["gain_volume"] == 8000

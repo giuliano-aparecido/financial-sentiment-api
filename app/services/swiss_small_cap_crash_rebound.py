@@ -202,9 +202,23 @@ def run_scan(domestic: dict) -> pd.DataFrame:
     results["name"] = results["ticker"].map(lambda t: domestic[t]["name"])
     results["sector"] = results["ticker"].map(lambda t: domestic[t]["sector"])
     results["market_cap"] = results["ticker"].map(lambda t: domestic[t]["market_cap"])
+    # Current-snapshot company fields (not day-specific like loss_pe_approx/
+    # gain_pe_approx above, which use the historical close - these are
+    # today's values, pulled from the SAME .info call swiss_universe.
+    # filter_domestic already makes, no extra yfinance request) - see that
+    # function's docstring for the full field list.
+    results["trailing_pe"] = results["ticker"].map(lambda t: domestic[t]["trailing_pe"])
+    results["forward_pe"] = results["ticker"].map(lambda t: domestic[t]["forward_pe"])
+    results["dividend_yield"] = results["ticker"].map(lambda t: domestic[t]["dividend_yield"])
+    results["ex_dividend_date"] = results["ticker"].map(lambda t: domestic[t]["ex_dividend_date"])
+    results["beta"] = results["ticker"].map(lambda t: domestic[t]["beta"])
+    results["fifty_two_week_high"] = results["ticker"].map(lambda t: domestic[t]["fifty_two_week_high"])
+    results["fifty_two_week_low"] = results["ticker"].map(lambda t: domestic[t]["fifty_two_week_low"])
     results = results.sort_values("loss_date", ascending=False).reset_index(drop=True)
     results = results[[
         "ticker", "name", "sector", "market_cap",
+        "trailing_pe", "forward_pe", "dividend_yield", "ex_dividend_date",
+        "beta", "fifty_two_week_high", "fifty_two_week_low",
         "loss_date", "loss_open", "loss_high", "loss_low", "loss_close",
         "loss_volume", "loss_volume_vs_3mo_avg", "loss_pe_approx", "drop_pct",
         "gain_date", "gain_open", "gain_high", "gain_low", "gain_close",
