@@ -135,24 +135,41 @@ CURATED_SCENARIOS = {
     },
 }
 
-# Fallback for any ticker not in CURATED_SCENARIOS. exit_multiple/g2 are
-# used as-is regardless of consensus data availability - confirmed live
-# that the analyst's exit multiples cluster tightly around 20x (normal) and
-# 25x (best) across unrelated companies (4-5 of 5 examples each), so those
-# look like genuine fixed defaults rather than per-company judgment. g2
-# (years 6-10 growth), by contrast, showed NO consistent pattern even
-# within the SAME company across scenarios (e.g. NVDA's best case fades to
-# 15%, not the 10% its normal case fades to) - so it's kept as a flat
-# generic default rather than pretending to derive it. g1 here is only the
-# FALLBACK for when a per-ticker consensus growth estimate isn't available
-# or isn't trustworthy (see build_scenarios) - reuses this model's
-# pre-existing "average company" growth assumptions rather than inventing
-# new numbers.
-GENERIC_SCENARIOS = {
-    "normal": {"g1": 0.08, "g2": 0.08, "exit_multiple": 20.0},
-    "best": {"g1": 0.10, "g2": 0.10, "exit_multiple": 25.0},
-    "worst": {"g1": 0.04, "g2": 0.04, "exit_multiple": 12.0},
-}
+# Fallback for any ticker not in CURATED_SCENARIOS, segmented by basis and
+# sector along the two axes that were actually confirmed live rather than
+# invented - see build_scenarios for how these combine with a per-ticker
+# derived g1.
+#
+# Exit multiples: normal (20.0x) and best (25.0x) cluster tightly across
+# ALL 5 analyst examples regardless of company - genuine fixed defaults.
+# Worst-case is the one exit multiple with a confirmed (if partial) sector
+# signal: XOM (Energy, commodity-cycle exposed) got 12.0x vs PEP (Consumer
+# Defensive, non-cyclical) at 15.0x - asset-heavy/cyclical sectors get the
+# lower figure. This does NOT explain the full spread (NVDA 10.0x vs MSFT
+# 12.0x are both Technology and still differ by 2 points with no available
+# signal to split them further) - that residual is deliberately averaged
+# over via WORST_EXIT_MULTIPLE_DEFAULT rather than guessed at.
+WORST_EXIT_MULTIPLE_ASSET_HEAVY = 12.0
+WORST_EXIT_MULTIPLE_DEFAULT = 13.0
+NORMAL_EXIT_MULTIPLE = 20.0
+BEST_EXIT_MULTIPLE = 25.0
+
+# g2 (years 6-10 growth): confirmed live that for "eps"/"fcf"/"revenue"
+# bases, the NORMAL scenario fades to exactly 10% regardless of g1 in all 3
+# non-dividend examples (NVDA 30%->10%, MSFT 15%->10%, NFLX 12%->10%) - a
+# genuine, confirmed rule. Best/worst g2 are NOT as clean (NVDA/NFLX's best
+# cases fade to 15%/12%, not 10%) so those two stay at a coarser
+# approximation. For "dividends", g2 is set equal to g1 in build_scenarios
+# below (not fixed here) - PEP/XOM's normal and best cases both show
+# g2 == g1, i.e. a mature dividend payer is already near its steady-state
+# rate, nothing further to fade toward.
+GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
+
+# g1 FALLBACK for when a per-ticker consensus growth estimate isn't
+# available or isn't trustworthy (see build_scenarios) - reuses this
+# model's pre-existing "average company" growth assumptions rather than
+# inventing new numbers.
+G1_FALLBACK = {"normal": 0.08, "best": 0.10, "worst": 0.04}
 
 
 def classify_valuation_basis(
@@ -232,24 +249,32 @@ def cash_flow_basis_value(basis: str, fundamentals: dict) -> float | None:
     return None
 
 
-def build_scenarios(ticker: str | None, fundamentals: dict) -> dict[str, dict]:
+def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[str, dict]:
     """Assembles this company's normal/best/worst g1/g2/exit_multiple/
     probability. Curated tickers (CURATED_SCENARIOS) use the analyst's
-    exact numbers verbatim. Everyone else starts from GENERIC_SCENARIOS and,
-    if a same-direction 0y/+1y consensus growth estimate is available (see
-    fundamentals.fetch_fundamentals' growth_0y/growth_1y/growth_0y_low/
-    growth_0y_high), overrides just g1 per scenario - g2/exit_multiple stay
-    generic regardless (see GENERIC_SCENARIOS' comment for why).
+    exact numbers verbatim. Everyone else is assembled from three
+    independently-sourced pieces, each confirmed live rather than a single
+    invented "generic" bundle:
 
-    "Same-direction" is the reliability gate: confirmed live that when 0y
-    and +1y consensus growth point in OPPOSITE directions (e.g. XOM's
-    +65.7% this year / -8.6% next year), that's not a real growth trend -
-    it's a rebound-then-giveback around a distorted (commodity-cycle,
-    one-off) base year, and no combination of those two numbers recovers
-    the analyst's actual 4% long-run assumption. Falling back to the
-    generic g1 in that case is a deliberate "don't know" rather than a
-    confidently wrong derived number - same fail-soft philosophy as the
-    rest of this module.
+    - g1 (years 1-5 growth): derived from a same-direction 0y/+1y consensus
+      growth estimate when available (see fundamentals.fetch_fundamentals'
+      growth_0y/growth_1y/growth_0y_low/growth_0y_high), else G1_FALLBACK.
+      "Same-direction" is the reliability gate: confirmed live that when 0y
+      and +1y point in OPPOSITE directions (e.g. XOM's +65.7% this year /
+      -8.6% next year), that's not a real growth trend - it's a
+      rebound-then-giveback around a distorted (commodity-cycle, one-off)
+      base year, and no combination of those two numbers recovers the
+      analyst's actual 4% long-run assumption. Falling back to G1_FALLBACK
+      in that case is a deliberate "don't know", not a confidently wrong
+      derived number.
+    - g2 (years 6-10 growth): GROWTH_BASIS_G2 for "eps"/"fcf"/"revenue"
+      (confirmed pattern - see its comment), or set equal to this
+      scenario's own g1 for "dividends" (a mature payer doesn't fade
+      further - also confirmed, see GROWTH_BASIS_G2's comment).
+    - exit_multiple: NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE always; worst
+      case uses WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity
+      sectors (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT (see
+      that constant's comment for the limits of this signal).
     """
     if ticker and ticker in CURATED_SCENARIOS:
         return {
@@ -257,24 +282,36 @@ def build_scenarios(ticker: str | None, fundamentals: dict) -> dict[str, dict]:
             for name, scenario in CURATED_SCENARIOS[ticker].items()
         }
 
-    scenarios = {
-        name: {**scenario, "probability": SCENARIO_PROBABILITY} for name, scenario in GENERIC_SCENARIOS.items()
-    }
-
+    g1_values = dict(G1_FALLBACK)
     growth_0y = fundamentals.get("growth_0y")
     growth_1y = fundamentals.get("growth_1y")
     consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
-    if not consensus_reliable:
-        return scenarios
+    if consensus_reliable:
+        g1_values["normal"] = (growth_0y + growth_1y) / 2
+        growth_0y_high = fundamentals.get("growth_0y_high")
+        growth_0y_low = fundamentals.get("growth_0y_low")
+        if growth_0y_high is not None:
+            g1_values["best"] = growth_0y_high
+        if growth_0y_low is not None:
+            g1_values["worst"] = growth_0y_low
 
-    scenarios["normal"]["g1"] = (growth_0y + growth_1y) / 2
-    growth_0y_high = fundamentals.get("growth_0y_high")
-    growth_0y_low = fundamentals.get("growth_0y_low")
-    if growth_0y_high is not None:
-        scenarios["best"]["g1"] = growth_0y_high
-    if growth_0y_low is not None:
-        scenarios["worst"]["g1"] = growth_0y_low
-    return scenarios
+    g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
+
+    worst_exit_multiple = (
+        WORST_EXIT_MULTIPLE_ASSET_HEAVY if fundamentals.get("sector") in ASSET_HEAVY_SECTORS
+        else WORST_EXIT_MULTIPLE_DEFAULT
+    )
+    exit_multiples = {"normal": NORMAL_EXIT_MULTIPLE, "best": BEST_EXIT_MULTIPLE, "worst": worst_exit_multiple}
+
+    return {
+        name: {
+            "g1": g1_values[name],
+            "g2": g2_values[name],
+            "exit_multiple": exit_multiples[name],
+            "probability": SCENARIO_PROBABILITY,
+        }
+        for name in ("normal", "best", "worst")
+    }
 
 
 def scenario_dcf_value(cf0: float, g1: float, g2: float, exit_multiple: float, discount_rate: float) -> float:
@@ -432,7 +469,7 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
         fundamentals.get("free_cash_flow"),
     )
     cf0 = cash_flow_basis_value(basis, fundamentals)
-    scenarios = build_scenarios(ticker, fundamentals)
+    scenarios = build_scenarios(ticker, fundamentals, basis)
     intrinsic = intrinsic_value(cf0, basis, scenarios)
     block = valuation_block(fundamentals["price"], intrinsic, basis)
     _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block)

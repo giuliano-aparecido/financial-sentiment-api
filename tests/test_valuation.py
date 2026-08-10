@@ -168,33 +168,36 @@ def test_scenario_terminal_value_higher_growth_produces_higher_pv():
 
 
 def test_build_scenarios_uses_curated_table_verbatim_for_known_ticker():
-    scenarios = build_scenarios("NVDA", {"growth_0y": 999.0, "growth_1y": 999.0})  # would-be consensus, ignored
+    fundamentals = {"growth_0y": 999.0, "growth_1y": 999.0}  # would-be consensus, ignored
+    scenarios = build_scenarios("NVDA", fundamentals, basis="eps")
     assert scenarios["normal"]["g1"] == CURATED_SCENARIOS["NVDA"]["normal"]["g1"]
     assert scenarios["normal"]["g2"] == CURATED_SCENARIOS["NVDA"]["normal"]["g2"]
     assert scenarios["normal"]["exit_multiple"] == CURATED_SCENARIOS["NVDA"]["normal"]["exit_multiple"]
 
 
 def test_build_scenarios_curated_tickers_use_equal_probability():
-    scenarios = build_scenarios("NVDA", {})
+    scenarios = build_scenarios("NVDA", {}, basis="eps")
     assert scenarios["normal"]["probability"] == 1 / 3
     assert scenarios["best"]["probability"] == 1 / 3
     assert scenarios["worst"]["probability"] == 1 / 3
 
 
 def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
-    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {})
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
-    assert scenarios["normal"]["g2"] == 0.08
+    # Growth-basis normal-scenario g2 is the confirmed 10% fade ceiling, not
+    # a flat copy of g1 (see GROWTH_BASIS_G2's comment).
+    assert scenarios["normal"]["g2"] == 0.10
     assert scenarios["normal"]["exit_multiple"] == 20.0
 
 
 def test_build_scenarios_derives_normal_g1_from_same_direction_consensus():
     # MSFT-style: 0y=13.87%, +1y=19.30%, both positive -> average = 16.585%.
     fundamentals = {"growth_0y": 0.1387, "growth_1y": 0.1930}
-    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
     assert round(scenarios["normal"]["g1"], 4) == round((0.1387 + 0.1930) / 2, 4)
     # g2/exit_multiple stay generic even when g1 is derived.
-    assert scenarios["normal"]["g2"] == 0.08
+    assert scenarios["normal"]["g2"] == 0.10
     assert scenarios["normal"]["exit_multiple"] == 20.0
 
 
@@ -205,7 +208,7 @@ def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
         "growth_0y_high": 0.25,
         "growth_0y_low": 0.05,
     }
-    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
     assert scenarios["best"]["g1"] == 0.25
     assert scenarios["worst"]["g1"] == 0.05
 
@@ -214,18 +217,46 @@ def test_build_scenarios_falls_back_to_generic_when_consensus_reverses_direction
     # XOM-style: 0y strongly positive (rebound), +1y negative (giveback) -
     # a distorted base year, not a real trend. Must NOT be averaged.
     fundamentals = {"growth_0y": 0.6567, "growth_1y": -0.0862}
-    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals)
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="dividends")
     assert scenarios["normal"]["g1"] == 0.08
 
 
 def test_build_scenarios_falls_back_to_generic_when_consensus_missing():
-    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {"growth_0y": None, "growth_1y": None})
+    fundamentals = {"growth_0y": None, "growth_1y": None}
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
 
 
 def test_build_scenarios_works_without_ticker():
-    scenarios = build_scenarios(None, {})
+    scenarios = build_scenarios(None, {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
+
+
+def test_build_scenarios_dividends_basis_g2_matches_g1_not_a_fixed_fade():
+    # PEP/XOM both showed g2 == g1 for normal/best under the dividends
+    # basis (a mature payer is already near its steady-state rate) - the
+    # generic fallback should reproduce that shape, not the growth-basis
+    # 10% fade ceiling.
+    fundamentals = {"growth_0y": 0.05, "growth_1y": 0.03}
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="dividends")
+    assert scenarios["normal"]["g2"] == scenarios["normal"]["g1"]
+    assert scenarios["best"]["g2"] == scenarios["best"]["g1"]
+    assert scenarios["worst"]["g2"] == scenarios["worst"]["g1"]
+
+
+def test_build_scenarios_worst_exit_multiple_lower_for_asset_heavy_sector():
+    # Confirmed live: XOM (Energy, cyclical) got 12.0x vs PEP (Consumer
+    # Defensive) at 15.0x for the same worst-case scenario shape.
+    cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Energy"}, basis="dividends")
+    non_cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Consumer Defensive"}, basis="dividends")
+    assert cyclical["worst"]["exit_multiple"] < non_cyclical["worst"]["exit_multiple"]
+
+
+def test_build_scenarios_worst_exit_multiple_unaffected_by_sector_for_normal_and_best():
+    cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Energy"}, basis="eps")
+    non_cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="eps")
+    assert cyclical["normal"]["exit_multiple"] == non_cyclical["normal"]["exit_multiple"] == 20.0
+    assert cyclical["best"]["exit_multiple"] == non_cyclical["best"]["exit_multiple"] == 25.0
 
 
 # --- intrinsic_value ---
@@ -239,29 +270,29 @@ def test_build_scenarios_works_without_ticker():
 
 
 def test_intrinsic_value_matches_curated_nvda_reference_calc():
-    scenarios = build_scenarios("NVDA", {})
+    scenarios = build_scenarios("NVDA", {}, basis="eps")
     iv = intrinsic_value(cf0=6.53, basis="eps", scenarios=scenarios)
     assert round(iv, 2) == 270.71
 
 
 def test_intrinsic_value_matches_curated_pep_reference_calc():
-    scenarios = build_scenarios("PEP", {})
+    scenarios = build_scenarios("PEP", {}, basis="dividends")
     iv = intrinsic_value(cf0=5.86, basis="dividends", scenarios=scenarios)
     assert round(iv, 2) == 102.83
 
 
 def test_intrinsic_value_none_for_missing_cf0():
-    scenarios = build_scenarios(None, {})
+    scenarios = build_scenarios(None, {}, basis="eps")
     assert intrinsic_value(cf0=None, basis="eps", scenarios=scenarios) is None
 
 
 def test_intrinsic_value_none_for_zero_cf0():
-    scenarios = build_scenarios(None, {})
+    scenarios = build_scenarios(None, {}, basis="eps")
     assert intrinsic_value(cf0=0.0, basis="eps", scenarios=scenarios) is None
 
 
 def test_intrinsic_value_none_for_negative_cf0():
-    scenarios = build_scenarios(None, {})
+    scenarios = build_scenarios(None, {}, basis="eps")
     assert intrinsic_value(cf0=-5.0, basis="eps", scenarios=scenarios) is None
 
 
