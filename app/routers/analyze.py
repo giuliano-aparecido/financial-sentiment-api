@@ -30,6 +30,12 @@ async def analyze_stock(req: QueryRequest):
     # valuation_block_for's scenario-DCF math is pure/in-memory - no
     # to_thread needed, it just consumes fundamentals' already-fetched dict.
     market_data = market_data_block(fundamentals)
-    valuation = valuation_block_for(fundamentals, ticker=ticker)
+    # fundamentals may have resolved a bare extracted ticker to its real
+    # Yahoo symbol internally (e.g. "NESN" -> "NESN.SW" - see
+    # fundamentals.resolve_ticker) - use that resolved form here too, so
+    # CURATED_SCENARIOS lookups and the audit log line up with what was
+    # actually fetched, not the raw extracted text.
+    valuation_ticker = fundamentals.get("resolved_ticker", ticker) if fundamentals else ticker
+    valuation = valuation_block_for(fundamentals, ticker=valuation_ticker)
     earnings = earnings_block(earnings_data)
     return await analyze_with_hf(ticker, req.user_query, live_context, market_data, valuation, earnings)

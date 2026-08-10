@@ -3,9 +3,27 @@ import logging
 
 import yfinance as yf
 
-from app.services.fundamentals import format_market_cap
+from app.services.fundamentals import format_market_cap, resolve_ticker
 
 logger = logging.getLogger(__name__)
+
+
+def _fetch_quarterly_statements(ticker: str):
+    """(income, earnings_dates) if the ticker resolves to real quarterly
+    data, else None - factored out so fetch_earnings can retry once with a
+    resolve_ticker()-corrected symbol, same pattern as
+    fundamentals._fetch_price_info (see that function's docstring for why
+    this retry is needed for most non-US listings)."""
+    try:
+        t = yf.Ticker(ticker)
+        income = t.quarterly_income_stmt
+        earnings_dates = t.earnings_dates
+    except Exception as e:
+        logger.warning("yfinance earnings fetch failed for %s: %s", ticker, e)
+        return None
+    if income is None or income.empty or "Total Revenue" not in income.index:
+        return None
+    return income, earnings_dates
 
 
 def fetch_earnings(ticker: str) -> dict | None:
@@ -19,17 +37,23 @@ def fetch_earnings(ticker: str) -> dict | None:
     failure; individual missing pieces (e.g. no YoY comparator available,
     no scheduled next date) are represented as None inside the dict rather
     than failing the whole fetch.
-    """
-    try:
-        t = yf.Ticker(ticker)
-        income = t.quarterly_income_stmt
-        earnings_dates = t.earnings_dates
-    except Exception as e:
-        logger.warning("yfinance earnings fetch failed for %s: %s", ticker, e)
-        return None
 
-    if income is None or income.empty or "Total Revenue" not in income.index:
+    If the bare ticker doesn't resolve, retries once via resolve_ticker
+    (e.g. "NESN" -> "NESN.SW") - this runs independently of
+    fundamentals.fetch_fundamentals' own resolution (the two are fetched
+    concurrently via asyncio.gather in analyze.py, so neither can reuse the
+    other's result), which just means the resolve_ticker lookup happens
+    twice on the fallback path - an acceptable cost since both fetches
+    still run in parallel threads, not one blocking the other.
+    """
+    statements = _fetch_quarterly_statements(ticker)
+    if statements is None:
+        resolved_ticker = resolve_ticker(ticker)
+        if resolved_ticker != ticker:
+            statements = _fetch_quarterly_statements(resolved_ticker)
+    if statements is None:
         return None
+    income, earnings_dates = statements
 
     revenue_row = income.loc["Total Revenue"].dropna()
     if revenue_row.empty:
