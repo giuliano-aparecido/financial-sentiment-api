@@ -167,6 +167,29 @@ WORST_EXIT_MULTIPLE_DEFAULT = 13.0
 NORMAL_EXIT_MULTIPLE = 20.0
 BEST_EXIT_MULTIPLE = 25.0
 
+# Separate, much lower exit multiples for the "revenue" basis specifically -
+# reusing NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE/WORST_EXIT_MULTIPLE_* here
+# was a bug: those are P/E- and P/FCF-grade multiples, confirmed only
+# against NVDA/MSFT/PEP/NFLX/XOM (all eps/dividends-basis companies), and
+# applying a 20-25x earnings-style multiple to per-share REVENUE instead
+# massively overstates intrinsic value - confirmed live: FLUT (routed to
+# "revenue" because it's unprofitable) came back ~94% undervalued at a
+# $1747.78 intrinsic value against a ~$99 price, i.e. priced as if its
+# SALES traded at Nvidia's earnings multiple. The "revenue" basis exists
+# specifically for UNPROFITABLE companies (see classify_valuation_basis
+# rule 2) - exactly the group that deserves the LEAST generous multiple,
+# not the same one as a profitable mega-cap.
+#
+# These are a conservative, general P/S-multiple heuristic (typical
+# real-world P/S ratios run roughly 1-6x outside of high-margin, hyper-
+# growth SaaS names) - NOT yet confirmed against a real analyst's own
+# revenue-basis DCF the way the constants above are. Revisit if a real
+# example surfaces to calibrate against, same as this module's other
+# constants.
+REVENUE_WORST_EXIT_MULTIPLE = 1.0
+REVENUE_NORMAL_EXIT_MULTIPLE = 3.0
+REVENUE_BEST_EXIT_MULTIPLE = 6.0
+
 # g2 (years 6-10 growth): confirmed live that for "eps"/"fcf"/"revenue"
 # bases, the NORMAL scenario fades to exactly 10% regardless of g1 in all 3
 # non-dividend examples (NVDA 30%->10%, MSFT 15%->10%, NFLX 12%->10%) - a
@@ -291,10 +314,13 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
       (confirmed pattern - see its comment), or set equal to this
       scenario's own g1 for "dividends" (a mature payer doesn't fade
       further - also confirmed, see GROWTH_BASIS_G2's comment).
-    - exit_multiple: NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE always; worst
-      case uses WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity
-      sectors (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT (see
-      that constant's comment for the limits of this signal).
+    - exit_multiple: for "revenue", the flat REVENUE_*_EXIT_MULTIPLE
+      constants (a P/S-style multiple - see their comment for why this
+      basis can't share the eps/fcf/dividends multiples). Otherwise
+      NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE always; worst case uses
+      WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity sectors
+      (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT (see that
+      constant's comment for the limits of this signal).
     """
     if ticker and ticker in CURATED_SCENARIOS:
         return {
@@ -317,11 +343,18 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
 
     g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
 
-    worst_exit_multiple = (
-        WORST_EXIT_MULTIPLE_ASSET_HEAVY if fundamentals.get("sector") in ASSET_HEAVY_SECTORS
-        else WORST_EXIT_MULTIPLE_DEFAULT
-    )
-    exit_multiples = {"normal": NORMAL_EXIT_MULTIPLE, "best": BEST_EXIT_MULTIPLE, "worst": worst_exit_multiple}
+    if basis == "revenue":
+        exit_multiples = {
+            "normal": REVENUE_NORMAL_EXIT_MULTIPLE,
+            "best": REVENUE_BEST_EXIT_MULTIPLE,
+            "worst": REVENUE_WORST_EXIT_MULTIPLE,
+        }
+    else:
+        worst_exit_multiple = (
+            WORST_EXIT_MULTIPLE_ASSET_HEAVY if fundamentals.get("sector") in ASSET_HEAVY_SECTORS
+            else WORST_EXIT_MULTIPLE_DEFAULT
+        )
+        exit_multiples = {"normal": NORMAL_EXIT_MULTIPLE, "best": BEST_EXIT_MULTIPLE, "worst": worst_exit_multiple}
 
     return {
         name: {

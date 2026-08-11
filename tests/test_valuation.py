@@ -281,6 +281,29 @@ def test_build_scenarios_worst_exit_multiple_unaffected_by_sector_for_normal_and
     assert cyclical["best"]["exit_multiple"] == non_cyclical["best"]["exit_multiple"] == 25.0
 
 
+def test_build_scenarios_revenue_basis_uses_ps_style_exit_multiples_not_earnings_style():
+    # Regression test: revenue-basis exit multiples used to reuse
+    # NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE (20x/25x) - P/E-grade
+    # multiples never confirmed for a revenue metric - which produced
+    # nonsense intrinsic values (confirmed live: FLUT came back "94%
+    # undervalued" at $1747.78 vs a ~$99 price). A P/S-style multiple must
+    # be far lower than the eps/fcf/dividends multiples for the same
+    # scenario tier.
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="revenue")
+    eps_scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="eps")
+    assert scenarios["normal"]["exit_multiple"] < eps_scenarios["normal"]["exit_multiple"]
+    assert scenarios["best"]["exit_multiple"] < eps_scenarios["best"]["exit_multiple"]
+    assert scenarios["worst"]["exit_multiple"] < eps_scenarios["worst"]["exit_multiple"]
+
+
+def test_build_scenarios_revenue_basis_exit_multiples_unaffected_by_sector():
+    # Unlike eps/fcf/dividends, the revenue-basis multiples are flat -
+    # no asset-heavy-sector split (see REVENUE_*_EXIT_MULTIPLE's comment).
+    cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Energy"}, basis="revenue")
+    non_cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="revenue")
+    assert cyclical["worst"]["exit_multiple"] == non_cyclical["worst"]["exit_multiple"]
+
+
 # --- intrinsic_value ---
 # Reference values below are the curated-scenario results for the real
 # tickers they were sourced from, confirmed live against the analyst's own
@@ -316,6 +339,18 @@ def test_intrinsic_value_none_for_zero_cf0():
 def test_intrinsic_value_none_for_negative_cf0():
     scenarios = build_scenarios(None, {}, basis="eps")
     assert intrinsic_value(cf0=-5.0, basis="eps", scenarios=scenarios) is None
+
+
+def test_intrinsic_value_revenue_basis_far_lower_than_eps_basis_for_same_cf0():
+    # Confirms the exit-multiple fix actually lowers the final weighted
+    # intrinsic value, not just the individual scenario constants - same
+    # per-share cash-flow figure, revenue basis must land well below eps
+    # basis now that it no longer shares eps's 20-25x multiples.
+    revenue_scenarios = build_scenarios(None, {}, basis="revenue")
+    eps_scenarios = build_scenarios(None, {}, basis="eps")
+    revenue_iv = intrinsic_value(cf0=76.9, basis="revenue", scenarios=revenue_scenarios)
+    eps_iv = intrinsic_value(cf0=76.9, basis="eps", scenarios=eps_scenarios)
+    assert revenue_iv < eps_iv
 
 
 # --- valuation_block ---
