@@ -18,8 +18,58 @@ companies":
 """
 
 import datetime
+import json
+import logging
+import os
 import time
 import yfinance as yf
+from yfinance.data import YfData
+
+logger = logging.getLogger(__name__)
+
+# Escape hatch, off by default: seeds yfinance's process-wide crumb/cookie
+# jar (YfData is a true singleton - yfinance.data.YfData, one per process,
+# metaclass=SingletonMeta) from externally-obtained values instead of
+# letting yfinance fetch its own. Confirmed live: this server's outbound IP
+# is currently blocked specifically at Yahoo's crumb-fetch endpoint
+# (yfinance.data.YfData._get_crumb_csrf -> query2.finance.yahoo.com/v1/
+# test/getcrumb), which raises YFRateLimitError - and since a fresh process
+# has no cached crumb (never persisted to disk, and yfinance never re-
+# fetches once it HAS one - no expiry check in _get_crumb_csrf), every
+# scan on a freshly-restarted process re-attempts that same blocked fetch
+# and fails immediately, even though the actual data endpoints
+# (screener/download/quoteSummary) were never even reached to know if
+# THEY'D have worked. This is why the scan worked for a long time, then
+# broke right after a run of unrelated redeploys: an old process had
+# already cached a working crumb from before the block started and never
+# needed to ask again; each restart throws that away.
+#
+# Seeding a crumb+cookie pair captured from a DIFFERENT, unblocked network
+# lets this process skip the blocked fetch entirely (verified: a captured
+# crumb+cookies pair authenticates real Yahoo calls with no re-fetch - see
+# the PR that added this). NOT guaranteed to work here: Yahoo may bind a
+# crumb/cookie pair to the IP that requested it, in which case using it
+# from a different IP fails too - that's genuinely unknown without trying
+# it live. If the exact same YFRateLimitError keeps happening after
+# setting these, that's the answer: IP-bound, and this doesn't help. A
+# different error afterward means it worked and something else is going
+# on. Remove YF_SEED_CRUMB/YF_SEED_COOKIES once Yahoo's block on this IP's
+# own crumb-fetch lifts and a real fetch starts working again - this is a
+# stop-gap, not a permanent fix (the seeded crumb/cookies will themselves
+# eventually expire on Yahoo's side, at an unknown time).
+def _seed_yf_session_from_env():
+    seed_crumb = os.environ.get("YF_SEED_CRUMB")
+    seed_cookies_json = os.environ.get("YF_SEED_COOKIES")
+    if not seed_crumb or not seed_cookies_json:
+        return
+    data = YfData()
+    if data._crumb:
+        return  # already seeded or already fetched its own this process - don't clobber either
+    for name, value in json.loads(seed_cookies_json).items():
+        data._session.cookies.set(name, value)
+    data._crumb = seed_crumb
+    logger.info("Seeded yfinance crumb/cookies from YF_SEED_CRUMB/YF_SEED_COOKIES (Yahoo crumb-fetch workaround)")
+
 
 # Small-cap band in CHF. SIX's own tiers: SMI (~20 largest) and SMIM (next
 # ~30) together cover roughly down to CHF ~1-1.5B; below that is broadly
@@ -54,6 +104,8 @@ def discover_candidates(min_market_cap=MIN_MARKET_CAP_CHF, max_market_cap=MAX_MA
     "today" data (see swiss_small_cap_today_screener.py) can read it
     straight off this dict, no extra fetch needed.
     """
+    _seed_yf_session_from_env()
+
     query = yf.EquityQuery(
         "and",
         [
