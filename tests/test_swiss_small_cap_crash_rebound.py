@@ -102,6 +102,53 @@ def test_find_crash_then_rebound_pe_approx_none_for_lossmaking_company(monkeypat
     assert results.iloc[0]["gain_pe_approx"] is None
 
 
+def test_find_crash_then_rebound_chunks_download_calls(monkeypatch, today):
+    # Regression test: find_crash_then_rebound used to download every
+    # symbol in one single yf.download(..., threads=True) call - a fully
+    # concurrent burst against Yahoo with no pacing, confirmed live as what
+    # was actually tripping "Too Many Requests" on every scan attempt (see
+    # DOWNLOAD_CHUNK_SIZE's own comment). Asserts BOTH that downloading
+    # happens in separate, smaller, sequential (threads=False) calls, AND
+    # that chunking doesn't lose or misattribute any results once combined
+    # back together.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes_match = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    closes_flat = [100] * 10
+    volumes_match = [1000] * 8 + [5000, 8000]
+    volumes_flat = [1000] * 10
+
+    symbols = [f"T{i}.SW" for i in range(5)]
+    crash_rebound_module._TEST_FRAMES = {
+        symbols[0]: _ohlcv_frame(dates, closes_match, volumes_match),  # match, 1st chunk
+        symbols[1]: _ohlcv_frame(dates, closes_flat, volumes_flat),
+        symbols[2]: _ohlcv_frame(dates, closes_flat, volumes_flat),
+        symbols[3]: _ohlcv_frame(dates, closes_match, volumes_match),  # match, 2nd chunk
+        symbols[4]: _ohlcv_frame(dates, closes_flat, volumes_flat),
+    }
+    monkeypatch.setattr(crash_rebound_module, "DOWNLOAD_CHUNK_SIZE", 2)
+    monkeypatch.setattr(crash_rebound_module, "DOWNLOAD_CHUNK_DELAY_SECONDS", 0)
+
+    call_symbol_lists = []
+
+    def _tracking_fake_download(syms, **kwargs):
+        call_symbol_lists.append(list(syms))
+        assert kwargs.get("threads") is False
+        return _fake_download(syms, **kwargs)
+
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _tracking_fake_download)
+
+    domestic = {s: {"trailing_eps": 5.0} for s in symbols}
+    results = find_crash_then_rebound(symbols, domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    # 5 symbols chunked at size 2 -> 3 separate, smaller calls, not one big
+    # burst.
+    assert call_symbol_lists == [symbols[0:2], symbols[2:4], symbols[4:5]]
+    # Matches from both the first AND second chunk survive being combined
+    # back into one result set.
+    assert set(results["ticker"]) == {symbols[0], symbols[3]}
+
+
 def test_attach_news_matches_on_ticker_and_gain_date():
     results = pd.DataFrame([
         {"ticker": "INRN.SW", "gain_date": "2026-08-04"},
