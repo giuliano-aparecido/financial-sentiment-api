@@ -30,6 +30,8 @@ research_job.py) only pays the ~30-60s domicile-filtering cost once, not
 twice.
 """
 
+import time
+
 import pandas as pd
 import yfinance as yf
 
@@ -44,6 +46,23 @@ HISTORY_PERIOD = "4mo"
 
 DROP_THRESHOLD_PCT = -5.0   # day N close-to-close change <= this
 GAIN_THRESHOLD_PCT = 5.0    # day N+1 close-to-close change >= this
+
+# find_crash_then_rebound used to download ALL domestic tickers (100+) in a
+# single yf.download(..., threads=True) call - one burst of fully-concurrent
+# requests against Yahoo's unofficial history endpoint, no pacing at all
+# (unlike swiss_universe.filter_domestic's own per-ticker .info loop, which
+# already paces itself - see INFO_REQUEST_DELAY_SECONDS there). Confirmed
+# live: this is what was actually tripping "Too Many Requests. Rate
+# limited." on every scan attempt, not a longer-lived Yahoo IP block -
+# retrying (even after waiting) reproduced the identical failure every
+# time, because it's the SAME concurrent-burst request pattern being
+# replayed, not an elapsed-time cooldown. Worse, a failure here happens
+# BEFORE _crash_rebound_result caches anything (see research_job.py), so a
+# failed attempt is never cached and gets retried from scratch, burst and
+# all, on the very next scan. Chunking + no internal threading applies the
+# same politeness-delay philosophy already used for the .info loop.
+DOWNLOAD_CHUNK_SIZE = 25
+DOWNLOAD_CHUNK_DELAY_SECONDS = 2.0
 
 # Manually researched via web search (not auto-fetched) - yfinance's
 # Ticker.news only returns whatever is CURRENT news today, not an archive
@@ -101,15 +120,26 @@ def find_crash_then_rebound(symbols, domestic, lookback_months, history_period, 
     if not symbols:
         return pd.DataFrame()
 
-    data = yf.download(
-        symbols, period=history_period, interval="1d",
-        group_by="ticker", auto_adjust=True, threads=True, progress=False,
-    )
-    # yf.download returns a flat (non-multi-indexed) frame when given a
-    # single symbol - normalize to the same multi-indexed shape as the
-    # multi-symbol case so the loop below doesn't need two code paths.
-    if len(symbols) == 1:
-        data = pd.concat({symbols[0]: data}, axis=1)
+    # Chunked + sequential (threads=False) + a delay between chunks - see
+    # DOWNLOAD_CHUNK_SIZE's own comment for why. Each chunk is normalized
+    # the same way the old single-call version was (yf.download returns a
+    # flat, non-multi-indexed frame for a single symbol, multi-indexed for
+    # more than one - a one-symbol final chunk needs the same treatment a
+    # one-symbol overall call used to), then concatenated column-wise since
+    # each chunk covers a disjoint set of symbols.
+    chunks = []
+    for i in range(0, len(symbols), DOWNLOAD_CHUNK_SIZE):
+        chunk_symbols = symbols[i:i + DOWNLOAD_CHUNK_SIZE]
+        chunk_data = yf.download(
+            chunk_symbols, period=history_period, interval="1d",
+            group_by="ticker", auto_adjust=True, threads=False, progress=False,
+        )
+        if len(chunk_symbols) == 1:
+            chunk_data = pd.concat({chunk_symbols[0]: chunk_data}, axis=1)
+        chunks.append(chunk_data)
+        if i + DOWNLOAD_CHUNK_SIZE < len(symbols):
+            time.sleep(DOWNLOAD_CHUNK_DELAY_SECONDS)
+    data = pd.concat(chunks, axis=1)
 
     cutoff = pd.Timestamp.today(tz=data.index.tz) - pd.DateOffset(months=lookback_months)
 
