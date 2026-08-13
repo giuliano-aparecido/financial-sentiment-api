@@ -126,6 +126,13 @@ SCENARIO_PROBABILITY = 1 / 3
 # terminal-only formula (see scenario_terminal_value) for the non-dividend
 # bases - NVDA/MSFT/NFLX/PEP were all 40-70%+ off under the old flat model.
 CURATED_SCENARIOS = {
+    "AAPL": {
+        # Confirmed live: reproduces the analyst's own $128 target within
+        # 2.6% ($124.65 at trailing EPS $8.26, the analyst's own cf0).
+        "normal": {"g1": 0.07, "g2": 0.07, "exit_multiple": 20.0},
+        "best": {"g1": 0.12, "g2": 0.07, "exit_multiple": 25.0},
+        "worst": {"g1": 0.05, "g2": 0.05, "exit_multiple": 10.0},
+    },
     "NVDA": {
         "normal": {"g1": 0.30, "g2": 0.10, "exit_multiple": 20.0},
         "best": {"g1": 0.30, "g2": 0.15, "exit_multiple": 25.0},
@@ -206,11 +213,50 @@ REVENUE_BEST_EXIT_MULTIPLE = 6.0
 # rate, nothing further to fade toward.
 GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
 
-# g1 FALLBACK for when a per-ticker consensus growth estimate isn't
-# available or isn't trustworthy (see build_scenarios) - reuses this
-# model's pre-existing "average company" growth assumptions rather than
-# inventing new numbers.
+# g1 FALLBACK OF LAST RESORT - used only when NEITHER a reliable consensus
+# growth estimate NOR the sustainable-growth-rate calculation below
+# (_sustainable_growth_rate) has usable inputs. "Average company" growth
+# assumptions, not inventing new numbers.
 G1_FALLBACK = {"normal": 0.08, "best": 0.10, "worst": 0.04}
+
+# Spread applied around the sustainable-growth-rate "normal" estimate to
+# get best/worst - the same shape G1_FALLBACK already used (normal 0.08 ->
+# best 0.10 is +0.02, -> worst 0.04 is -0.04), just now anchored to a
+# company-specific rate instead of a flat one.
+SUSTAINABLE_GROWTH_BEST_SPREAD = 0.02
+SUSTAINABLE_GROWTH_WORST_SPREAD = -0.04
+
+
+def _sustainable_growth_rate(fundamentals: dict) -> float | None:
+    """Sustainable growth rate = ROE x retention ratio (1 - payout_ratio) -
+    a company's OWN profitability and reinvestment behavior, not the
+    market's opinion of it. Deliberately NOT P/E-implied growth: P/E
+    already prices in the market's growth expectations, so deriving a DCF
+    growth input from P/E and then valuing the company with it is circular
+    - it will conclude "fairly valued" almost by construction, defeating
+    the point of an independent valuation. This formula only uses
+    fundamentals already fetched for other purposes (eps_trailing,
+    book_value_per_share, payout_ratio), no new data dependency.
+
+    ROE is approximated as eps_trailing / book_value_per_share (both
+    already per-share, so shares outstanding cancels out - standard
+    approximation, not the textbook net-income/total-equity ratio, but
+    equivalent for a per-share model like this one). Returns None (not a
+    fetch failure) when eps_trailing or book_value_per_share isn't usable -
+    caller falls back to G1_FALLBACK, same fail-soft convention as the
+    rest of this module. A missing payout_ratio is NOT treated as
+    unusable - defaults to 0 (full reinvestment), which is the correct
+    assumption for a real company that pays no dividend (payout_ratio is
+    only populated for dividend payers - see fundamentals.py), not a
+    "don't know" case that should abandon the whole calculation.
+    """
+    eps_trailing = fundamentals.get("eps_trailing")
+    book_value_per_share = fundamentals.get("book_value_per_share")
+    if not eps_trailing or eps_trailing <= 0 or not book_value_per_share or book_value_per_share <= 0:
+        return None
+    roe = eps_trailing / book_value_per_share
+    payout_ratio = fundamentals.get("payout_ratio") or 0.0
+    return roe * (1 - payout_ratio)
 
 # Ceiling on the DERIVED g1 (real per-ticker consensus growth estimates,
 # not CURATED_SCENARIOS - see build_scenarios) - confirmed live: an
@@ -229,7 +275,7 @@ G1_FALLBACK = {"normal": 0.08, "best": 0.10, "worst": 0.04}
 # bound: the observed failure mode is specifically upside blowup from high
 # growth, not a symmetric problem needing a floor too. CURATED_SCENARIOS
 # tickers bypass this entirely (see build_scenarios' early return) - this
-# cannot change NVDA/MSFT/PEP/NFLX/XOM's already-calibrated output.
+# cannot change any CURATED_SCENARIOS ticker's already-calibrated output.
 G1_CAP = 0.40
 
 
@@ -324,17 +370,25 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
     independently-sourced pieces, each confirmed live rather than a single
     invented "generic" bundle:
 
-    - g1 (years 1-5 growth): derived from a same-direction 0y/+1y consensus
-      growth estimate when available (see fundamentals.fetch_fundamentals'
-      growth_0y/growth_1y/growth_0y_low/growth_0y_high), else G1_FALLBACK.
-      "Same-direction" is the reliability gate: confirmed live that when 0y
-      and +1y point in OPPOSITE directions (e.g. XOM's +65.7% this year /
-      -8.6% next year), that's not a real growth trend - it's a
-      rebound-then-giveback around a distorted (commodity-cycle, one-off)
-      base year, and no combination of those two numbers recovers the
-      analyst's actual 4% long-run assumption. Falling back to G1_FALLBACK
-      in that case is a deliberate "don't know", not a confidently wrong
-      derived number.
+    - g1 (years 1-5 growth): a three-tier waterfall, each tier only used
+      when the one before it isn't usable. (1) A same-direction 0y/+1y
+      consensus growth estimate (see fundamentals.fetch_fundamentals'
+      growth_0y/growth_1y/growth_0y_low/growth_0y_high) - real analyst
+      data, the most trustworthy source when it exists. "Same-direction"
+      is the reliability gate: confirmed live that when 0y and +1y point
+      in OPPOSITE directions (e.g. XOM's +65.7% this year / -8.6% next
+      year), that's not a real growth trend - it's a rebound-then-giveback
+      around a distorted (commodity-cycle, one-off) base year, and no
+      combination of those two numbers recovers the analyst's actual 4%
+      long-run assumption. (2) The sustainable growth rate - ROE x
+      retention ratio, see _sustainable_growth_rate - when eps_trailing/
+      book_value_per_share are usable. Company-specific and non-circular
+      (unlike a P/E-implied growth rate - see that function's own comment
+      for why that's the wrong metric), but a formula, not observed
+      analyst data, so it only applies when (1) isn't available. (3)
+      G1_FALLBACK - a flat "average company" assumption, only when neither
+      real data nor fundamentals are usable. Falling back at any tier is a
+      deliberate "don't know", not a confidently wrong derived number.
     - g2 (years 6-10 growth): GROWTH_BASIS_G2 for "eps"/"fcf"/"revenue"
       (confirmed pattern - see its comment), or set equal to this
       scenario's own g1 for "dividends" (a mature payer doesn't fade
@@ -354,6 +408,15 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
         }
 
     g1_values = dict(G1_FALLBACK)
+
+    sustainable_g1 = _sustainable_growth_rate(fundamentals)
+    if sustainable_g1 is not None:
+        g1_values = {
+            "normal": sustainable_g1,
+            "best": sustainable_g1 + SUSTAINABLE_GROWTH_BEST_SPREAD,
+            "worst": sustainable_g1 + SUSTAINABLE_GROWTH_WORST_SPREAD,
+        }
+
     growth_0y = fundamentals.get("growth_0y")
     growth_1y = fundamentals.get("growth_1y")
     consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
