@@ -93,17 +93,152 @@ INFO_REQUEST_DELAY_SECONDS = 0.3
 EXCLUDED_TICKERS = {"SNBN.SW"}
 
 
-def discover_candidates(min_market_cap=MIN_MARKET_CAP_CHF, max_market_cap=MAX_MARKET_CAP_CHF):
-    """Screens Yahoo's CH-region universe for equities in the market-cap
-    band. Returns (symbol -> quote dict) for quoteType == 'EQUITY' only,
-    excluding EXCLUDED_TICKERS - the region+market-cap query alone still
-    returns ETFs/structured products/bonds mixed in (confirmed live), so
-    quoteType is filtered here rather than trusted from the query. Each
-    quote dict is the FULL raw screener response for that symbol (price,
-    live change%, volume, 3-month average volume, etc.) - callers needing
-    "today" data (see swiss_small_cap_today_screener.py) can read it
-    straight off this dict, no extra fetch needed.
-    """
+# Static fallback for when Yahoo's screener endpoint (yf.screen, used by
+# _discover_candidates_live below) is unavailable - confirmed live as the
+# ONLY endpoint that has ever failed across every "Too Many Requests"
+# incident in this scan's history. filter_domestic's own per-ticker .info
+# calls and find_crash_then_rebound's yf.download() have never failed in
+# any of those incidents - this fallback exists specifically because the
+# discovery STEP, not the whole pipeline, is what breaks.
+#
+# Captured live on 2026-08-13 via discover_candidates() itself, from a
+# working (non-blocked) network - name/sector only, NOT live price/
+# change%/volume, which the real screener response also carries (see
+# discover_candidates' own docstring) but a static snapshot fundamentally
+# can't provide. Downstream effect: filter_domestic and
+# swiss_small_cap_crash_rebound both work fully off this fallback (neither
+# needs the screener's own live quote fields - filter_domestic makes its
+# own live .info call per ticker regardless, crash_rebound uses a
+# separate yf.download() history call). swiss_small_cap_today_screener
+# does NOT - it reads today's change%/volume directly off the screener
+# quote with no separate fetch (see that module's own docstring) - so it
+# degrades to genuinely empty results (not a crash - find_big_loss already
+# fails soft on missing fields) whenever this fallback is in use, since
+# there is no live "today" data to give it.
+#
+# Will drift from reality over time (new listings, delistings, M&A) since
+# it's not auto-refreshed. Refresh by running discover_candidates()/
+# filter_domestic() from a working, non-blocked network and regenerating
+# this dict - ticker -> (name, sector).
+STATIC_DOMESTIC_TICKER_SNAPSHOT = {
+    "AERO.SW": ("Montana Aerospace AG", "Industrials"),
+    "AEVS.SW": ("Aevis Victoria SA", "Healthcare"),
+    "ALPN.SW": ("Alpine Select AG", "Financial Services"),
+    "APGN.SW": ("APG|SGA SA", "Communication Services"),
+    "ARBN.SW": ("Arbonia AG", "Industrials"),
+    "ARYN.SW": ("ARYZTA AG", "Consumer Defensive"),
+    "ASCN.SW": ("Ascom Holding AG", "Healthcare"),
+    "AUTN.SW": ("Autoneum Holding AG", "Consumer Cyclical"),
+    "BBN.SW": ("Bellevue Group AG", "Financial Services"),
+    "BCHN.SW": ("Burckhardt Compression Holding AG", "Industrials"),
+    "BCJ.SW": ("Banque Cantonale du Jura SA", "Financial Services"),
+    "BELL.SW": ("Bell Food Group AG", "Consumer Defensive"),
+    "BIOV.SW": ("BioVersys AG", "Healthcare"),
+    "BLKB.SW": ("Basellandschaftliche Kantonalbank", "Financial Services"),
+    "BOSN.SW": ("Bossard Holding AG", "Industrials"),
+    "BRKN.SW": ("Burkhalter Holding AG", "Industrials"),
+    "BSKP.SW": ("Basler Kantonalbank", "Financial Services"),
+    "BSLN.SW": ("Basilea Pharmaceutica AG", "Healthcare"),
+    "BVZN.SW": ("BVZ Holding AG", "Industrials"),
+    "BYS.SW": ("Bystronic AG", "Industrials"),
+    "CALN.SW": ("CALIDA Holding AG", "Consumer Cyclical"),
+    "CHAM.SW": ("Cham Swiss Properties AG", "Real Estate"),
+    "CICN.SW": ("Cicor Technologies Ltd.", "Technology"),
+    "CLTN.SW": ("COLTENE Holding AG", "Healthcare"),
+    "CNTL.SW": ("Centiel N", "Industrials"),
+    "CPHN.SW": ("CPH Group AG", "Basic Materials"),
+    "CURN.SW": ("Curatis Holding AG", "Healthcare"),
+    "DOCM.SW": ("DocMorris AG", "Healthcare"),
+    "EPIC.SW": ("EPIC Suisse AG", "Real Estate"),
+    "ESUN.SW": ("Edisun Power Europe AG", "Utilities"),
+    "FORN.SW": ("Forbo Holding AG", "Industrials"),
+    "FREN.SW": ("Fundamenta Real Estate AG", "Real Estate"),
+    "FTON.SW": ("Feintool International Holding AG", "Industrials"),
+    "GAM.SW": ("GAM Holding AG", "Financial Services"),
+    "GAV.SW": ("Carlo Gavazzi Holding AG", "Industrials"),
+    "GLKBN.SW": ("Glarner Kantonalbank", "Financial Services"),
+    "GMI.SW": ("Groupe Minoteries SA", "Consumer Defensive"),
+    "GRKP.SW": ("Graubündner Kantonalbank", "Financial Services"),
+    "GURN.SW": ("Gurit Holding AG", "Basic Materials"),
+    "HBLN.SW": ("Hypothekarbank Lenzburg AG", "Financial Services"),
+    "HBMN.SW": ("HBM Healthcare Investments AG", "Financial Services"),
+    "HBMNE.SW": ("HBM Healthcare Investments AG", "Financial Services"),
+    "HIAG.SW": ("HIAG Immobilien Holding AG", "Real Estate"),
+    "HLEE.SW": ("Highlight Event and Entertainment AG", "Communication Services"),
+    "IDIA.SW": ("Idorsia Ltd", "Healthcare"),
+    "IMPN.SW": ("Implenia AG", "Industrials"),
+    "INFRAC.SW": ("INFRACORE N", "Real Estate"),
+    "INRN.SW": ("Interroll Holding AG", "Industrials"),
+    "IREN.SW": ("Investis Holding SA", "Real Estate"),
+    "ISN.SW": ("Intershop Holding AG", "Real Estate"),
+    "JFN.SW": ("Jungfraubahn Holding AG", "Industrials"),
+    "KARN.SW": ("Kardex Holding AG", "Industrials"),
+    "KLIN.SW": ("Klingelnberg AG", "Industrials"),
+    "KOMN.SW": ("Komax Holding AG", "Industrials"),
+    "KUD.SW": ("Kudelski SA", "Technology"),
+    "KURN.SW": ("Kuros Biosciences AG", "Healthcare"),
+    "LAND.SW": ("Landis+Gyr Group AG", "Industrials"),
+    "LEHN.SW": ("LEM Holding SA", "Technology"),
+    "LEON.SW": ("Leonteq AG", "Financial Services"),
+    "MCHN.SW": ("MCH Group AG", "Communication Services"),
+    "MED.SW": ("Medartis Holding AG", "Healthcare"),
+    "MEDX.SW": ("medmix AG", "Industrials"),
+    "METN.SW": ("Metall Zug AG", "Healthcare"),
+    "MIKN.SW": ("Mikron Holding AG", "Industrials"),
+    "MOLN.SW": ("Molecular Partners AG", "Healthcare"),
+    "MOZN.SW": ("mobilezone holding ag", "Consumer Cyclical"),
+    "MTG.SW": ("Meier Tobler Group AG", "Industrials"),
+    "NBEN.SW": ("nebag ag", "Financial Services"),
+    "NEAG.SW": ("naturenergie holding AG", "Utilities"),
+    "NREN.SW": ("Novavest Real Estate AG", "Real Estate"),
+    "OERL.SW": ("OC Oerlikon Corporation AG", "Industrials"),
+    "OFN.SW": ("Orell Füssli AG", "Industrials"),
+    "ORON.SW": ("ORIOR AG", "Consumer Defensive"),
+    "PEAN.SW": ("Peach Property Group AG", "Real Estate"),
+    "PEHN.SW": ("Private Equity Holding AG", "Financial Services"),
+    "PLAN.SW": ("Plazza AG", "Real Estate"),
+    "PMN.SW": ("Phoenix Mecano AG", "Industrials"),
+    "PPGN.SW": ("PolyPeptide Group AG", "Healthcare"),
+    "REHN.SW": ("Romande Energie Holding SA", "Utilities"),
+    "RIEN.SW": ("Rieter Holding AG", "Industrials"),
+    "RSGN.SW": ("R&S Group Holding AG", "Industrials"),
+    "SANN.SW": ("Santhera Pharmaceuticals Holding AG", "Healthcare"),
+    "SENS.SW": ("Sensirion Holding AG", "Technology"),
+    "SFPN.SW": ("SF Urban Properties AG", "Real Estate"),
+    "SKAN.SW": ("SKAN Group AG", "Healthcare"),
+    "STGN.SW": ("StarragTornos Group AG", "Industrials"),
+    "SWON.SW": ("SoftwareOne Holding AG", "Technology"),
+    "SWTQ.SW": ("Schweiter Technologies AG", "Industrials"),
+    "TIBN.SW": ("Bergbahnen Engelberg-Trübsee-Titlis AG", "Consumer Cyclical"),
+    "TKBP.SW": ("Thurgauer Kantonalbank", "Financial Services"),
+    "TXGN.SW": ("TX Group AG", "Communication Services"),
+    "TXGNE.SW": ("TX Group AG", "Communication Services"),
+    "VARN.SW": ("Varia US Properties AG", "Real Estate"),
+    "VBSN.SW": ("IVF Hartmann Holding AG", "Healthcare"),
+    "VETN.SW": ("Vetropack Holding AG", "Consumer Cyclical"),
+    "VILN.SW": ("Villars Holding S.A.", "Consumer Defensive"),
+    "VZUG.SW": ("V-ZUG Holding AG", "Consumer Cyclical"),
+    "WARN.SW": ("Warteck Invest AG", "Real Estate"),
+    "WIHN.SW": ("WISeKey International Holding AG", "Technology"),
+    "XLS.SW": ("Xlife Sciences AG", "Healthcare"),
+    "ZEHN.SW": ("Zehnder Group AG", "Industrials"),
+    "ZUBN.SW": ("Züblin Immobilien Holding AG", "Real Estate"),
+    "ZUGN.SW": ("Zug Estates Holding AG", "Real Estate"),
+}
+
+
+def _discover_candidates_live(min_market_cap, max_market_cap):
+    """The real screener call - see discover_candidates for the public
+    entry point (tries this first, falls back to
+    STATIC_DOMESTIC_TICKER_SNAPSHOT on failure). Returns (symbol -> quote
+    dict) for quoteType == 'EQUITY' only, excluding EXCLUDED_TICKERS - the
+    region+market-cap query alone still returns ETFs/structured products/
+    bonds mixed in (confirmed live), so quoteType is filtered here rather
+    than trusted from the query. Each quote dict is the FULL raw screener
+    response for that symbol (price, live change%, volume, 3-month average
+    volume, etc.) - callers needing "today" data (see
+    swiss_small_cap_today_screener.py) can read it straight off this dict,
+    no extra fetch needed."""
     _seed_yf_session_from_env()
 
     query = yf.EquityQuery(
@@ -130,6 +265,32 @@ def discover_candidates(min_market_cap=MIN_MARKET_CAP_CHF, max_market_cap=MAX_MA
         if offset >= page.get("total", 0):
             break
     return candidates
+
+
+def discover_candidates(min_market_cap=MIN_MARKET_CAP_CHF, max_market_cap=MAX_MARKET_CAP_CHF):
+    """Tries the live screener first, falls back to
+    STATIC_DOMESTIC_TICKER_SNAPSHOT on ANY failure (broad except
+    deliberate - this is a resilience fallback, not trying to distinguish
+    which specific failure mode occurred) so a Yahoo-side outage degrades
+    this scan instead of failing it outright. Self-healing: no redeploy or
+    manual toggle needed - the next scan after Yahoo's block lifts just
+    uses the live path again automatically, since this always tries live
+    first. See STATIC_DOMESTIC_TICKER_SNAPSHOT's own comment for what
+    downstream callers lose (today_screener specifically) when running off
+    the fallback."""
+    try:
+        return _discover_candidates_live(min_market_cap, max_market_cap)
+    except Exception as e:
+        logger.warning(
+            "discover_candidates: live screener failed (%r), falling back to "
+            "STATIC_DOMESTIC_TICKER_SNAPSHOT (%d tickers, no live quote data)",
+            e, len(STATIC_DOMESTIC_TICKER_SNAPSHOT),
+        )
+        return {
+            symbol: {"symbol": symbol, "quoteType": "EQUITY", "longName": name, "sector": sector}
+            for symbol, (name, sector) in STATIC_DOMESTIC_TICKER_SNAPSHOT.items()
+            if symbol not in EXCLUDED_TICKERS
+        }
 
 
 def _ex_dividend_date(info: dict) -> str | None:

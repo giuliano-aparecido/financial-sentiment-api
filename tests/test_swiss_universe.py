@@ -104,6 +104,79 @@ def test_discover_candidates_excludes_configured_tickers(monkeypatch):
     assert "REAL.SW" in candidates
 
 
+def test_discover_candidates_falls_back_to_static_snapshot_on_screener_failure(monkeypatch):
+    # Regression test: confirmed live, yf.screen (the live screener) is the
+    # ONLY endpoint that has ever failed across every "Too Many Requests"
+    # incident this scan has hit - this fallback exists specifically so a
+    # screener-only outage degrades the scan instead of failing it
+    # outright.
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates()
+    assert candidates == {
+        symbol: {"symbol": symbol, "quoteType": "EQUITY", "longName": name, "sector": sector}
+        for symbol, (name, sector) in swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT.items()
+    }
+
+
+def test_discover_candidates_static_fallback_excludes_configured_tickers(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module, "STATIC_DOMESTIC_TICKER_SNAPSHOT",
+        {"SNBN.SW": ("Swiss National Bank", "Financial Services"), "REAL.SW": ("Real Co", "Industrials")},
+    )
+
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates()
+    assert "SNBN.SW" not in candidates
+    assert "REAL.SW" in candidates
+
+
+def test_discover_candidates_prefers_live_screener_when_it_works(monkeypatch):
+    # The fallback must not be used when the live screener succeeds -
+    # self-healing depends on always trying live first.
+    def fake_screen(query, offset, size, sortField, sortAsc):
+        if offset > 0:
+            return {"quotes": [], "total": 1}
+        return {"quotes": [{"symbol": "REAL.SW", "quoteType": "EQUITY"}], "total": 1}
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", fake_screen)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates()
+    assert set(candidates) == {"REAL.SW"}
+    # Live quote shape (no "longName"/"sector" keys forced in) confirms this
+    # came from the live path, not the fallback's synthesized quote dict.
+    assert candidates["REAL.SW"] == {"symbol": "REAL.SW", "quoteType": "EQUITY"}
+
+
+def test_discover_candidates_fallback_quotes_are_usable_by_filter_domestic(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module, "STATIC_DOMESTIC_TICKER_SNAPSHOT",
+        {"REAL.SW": ("Real Co", "Industrials")},
+    )
+
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
+    monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda *a: None)
+
+    candidates = discover_candidates()
+    domestic = filter_domestic(candidates)
+    assert domestic["REAL.SW"]["name"] == "Real Co"
+
+
 class _FakeCookies(dict):
     def set(self, name, value):
         self[name] = value
