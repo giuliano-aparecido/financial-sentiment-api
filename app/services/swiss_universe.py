@@ -1,10 +1,10 @@
 """
-Shared "find Swiss small caps, excluding foreign companies" logic, used by
-both swiss_small_cap_crash_rebound.py and swiss_small_cap_today_screener.py.
-Free tools only: yfinance (no API key).
+Shared "find volatile Swiss stocks, excluding foreign companies and SMI
+mega-caps" logic, used by both swiss_crash_rebound.py and
+swiss_today_screener.py. Free tools only: yfinance (no API key).
 
-Two filters matter for "small caps in Switzerland, excluding foreign
-companies":
+Two filters matter for "[small/all-cap] stocks in Switzerland, excluding
+foreign companies":
   1. Market-cap range (MIN/MAX_MARKET_CAP_CHF below) - Yahoo's region='ch'
      screener field means "listed in the CH region", not "domiciled in
      Switzerland", and it includes ETFs/bonds/structured products
@@ -123,7 +123,7 @@ INFO_REQUEST_DELAY_SECONDS = 0.3
 # meaningful speedup (roughly INFO_MAX_WORKERS-x) over one ticker at a
 # time without going back to the fully-unbounded burst that's already
 # bitten this scan once (see DOWNLOAD_CHUNK_SIZE/DOWNLOAD_CHUNK_DELAY_
-# SECONDS in swiss_small_cap_crash_rebound.py - a single fully-concurrent
+# SECONDS in swiss_crash_rebound.py - a single fully-concurrent
 # yf.download(..., threads=True) call over 100+ tickers is what was
 # actually tripping "Too Many Requests" there, confirmed live). YfData is
 # a thread-safe singleton (its crumb/cookie fetch is guarded by its own
@@ -217,10 +217,10 @@ EXCLUDED_TICKERS = {"SNBN.SW"} | SMI_TICKERS
 # request falling back to this during an outage will see some non-small-
 # cap names mixed in too; accepted tradeoff for one shared list instead of
 # two to keep in sync. Downstream effect: filter_domestic and
-# swiss_small_cap_crash_rebound both work fully off this fallback (neither
+# swiss_crash_rebound both work fully off this fallback (neither
 # needs the screener's own live quote fields - filter_domestic makes its
 # own live .info call per ticker regardless, crash_rebound uses a
-# separate yf.download() history call). swiss_small_cap_today_screener
+# separate yf.download() history call). swiss_today_screener
 # does NOT - it reads today's change%/volume directly off the screener
 # quote with no separate fetch (see that module's own docstring) - so it
 # degrades to genuinely empty results (not a crash - find_big_loss already
@@ -466,7 +466,7 @@ def _discover_candidates_live(min_market_cap, max_market_cap):
     than trusted from the query. Each quote dict is the FULL raw screener
     response for that symbol (price, live change%, volume, 3-month average
     volume, etc.) - callers needing "today" data (see
-    swiss_small_cap_today_screener.py) can read it straight off this dict,
+    swiss_today_screener.py) can read it straight off this dict,
     no extra fetch needed."""
     _seed_yf_session_from_env()
 
@@ -592,7 +592,7 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
     yield, ex-dividend date, trailing/forward P/E, beta, 52-week range)
     pulled from this SAME .info call at no extra request cost, for
     scripts that want a fuller company profile (see
-    swiss_small_cap_crash_rebound.py's run_scan). Fails soft per ticker: a
+    swiss_crash_rebound.py's run_scan). Fails soft per ticker: a
     fetch error just excludes that ticker with a warning, rather than
     aborting the whole scan.
 

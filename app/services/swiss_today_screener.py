@@ -1,21 +1,29 @@
 """
-Swiss small-cap "big loss" screener - TODAY only.
+Swiss "big loss" volatility screener - TODAY only.
 
-Finds SIX Swiss Exchange-listed, Switzerland-domiciled small-cap stocks
-that are down >= LOSS_THRESHOLD_PCT today. No volume filtering - volume
-vs. each stock's own 3-month average is shown and used to SORT the
-results (thinnest first), but never excludes a row: a big loss on
-unusually thin volume vs. one on heavy volume tell different stories,
-and both are worth seeing, not just one of them.
+Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that are
+down >= LOSS_THRESHOLD_PCT today. Universe defaults to a small-cap band
+but can widen to include mid/large caps too (SMI's 20 largest excluded
+either way) - see swiss_crash_rebound.py's module docstring for the same
+volatility-vs-small-cap framing, which applies here identically since
+both scans share the same universe discovery. This module's OWN logic
+does no volume filtering of its own - volume vs. each stock's own
+3-month average is shown and used to SORT the results (thinnest first),
+but never excludes a row here: a big loss on unusually thin volume vs.
+one on heavy volume tell different stories, and both are worth seeing,
+not just one of them. (A separate, absolute liquidity floor IS applied
+upstream, in swiss_universe.filter_domestic - see MIN_INTRADAY_VOLUME -
+that's excluding unreliably-thin prints entirely, a different concern
+from this module's own thin-vs-heavy sort.)
 
 Ported from the standalone research/ project (D:\\projects\\research) - see
-swiss_small_cap_crash_rebound.py's module docstring for why this now runs
+swiss_crash_rebound.py's module docstring for why this now runs
 as a FastAPI background job (app/services/research_job.py) instead of a
 Colab/Kaggle notebook.
 
 Free tools only: yfinance's public screener (no API key). Universe
 discovery (market-cap band + domicile filter) lives in swiss_universe.py,
-shared with swiss_small_cap_crash_rebound.py.
+shared with swiss_crash_rebound.py.
 
 Unlike that other script, this one needs no separate price-history
 download: the screener's own live quote already carries today's change%,

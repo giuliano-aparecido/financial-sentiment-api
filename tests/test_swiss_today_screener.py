@@ -1,4 +1,4 @@
-from app.services.swiss_small_cap_today_screener import find_big_loss, run_scan
+from app.services.swiss_today_screener import find_big_loss, run_scan
 
 
 def _domestic_entry(name, sector, market_cap, change_pct, volume_today, avg_volume_3mo, price=100.0):
