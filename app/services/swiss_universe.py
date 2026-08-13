@@ -96,6 +96,19 @@ MAX_MARKET_CAP_CHF = 2_000_000_000
 ALL_CAPS_MIN_MARKET_CAP_CHF = 50_000_000
 ALL_CAPS_MAX_MARKET_CAP_CHF = 1_000_000_000_000
 
+# Liquidity floor, applied in filter_domestic below: a ticker trading
+# fewer shares than this today is too thin to trust either the price
+# itself (a handful of trades can swing "close" arbitrarily) or the crash-
+# rebound/big-loss signals this scan is built to find - a >=5% move on
+# ~1,000 shares traded isn't the same finding as the same move on
+# 500,000. Read from Ticker.info's regularMarketVolume (confirmed live to
+# be the same field today_screener.py already reads off the live
+# screener quote) rather than the 3-month average, since the goal is
+# excluding thin trading TODAY, not thin trading generally - a normally
+# liquid name having one unusually quiet day is exactly the kind of
+# unreliable-print day this is meant to catch.
+MIN_INTRADAY_VOLUME = 50_000
+
 # Politeness delay between per-ticker yfinance .info calls - this is an
 # unofficial/undocumented API, not a documented rate limit to size against
 # (unlike the Gemini API elsewhere in this project's sibling repo), so this
@@ -500,8 +513,15 @@ def _ex_dividend_date(info: dict) -> str | None:
 def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
     """Keeps only candidates whose own `country` field is Switzerland -
     the one field that actually reflects company domicile rather than
-    exchange/listing region (see module docstring). Fetched per-ticker via
-    Ticker.info since the screener response doesn't include this field.
+    exchange/listing region (see module docstring) - AND whose today's
+    trading volume clears MIN_INTRADAY_VOLUME (see that constant's own
+    comment for why). Fetched per-ticker via Ticker.info since the
+    screener response doesn't include the country field (it does carry
+    volume too, but info's regularMarketVolume is read here regardless,
+    since it's already being fetched for the domicile check at no extra
+    request cost, and unlike the screener quote it's present for BOTH
+    discovery paths - the static fallback's synthesized quote (see
+    STATIC_DOMESTIC_TICKER_SNAPSHOT) has no volume field at all).
     Returns (symbol -> dict) with the original screener `quote` retained
     (for live/"today" fields) alongside domicile-confirmed extras that
     only .info has - sector/trailing_eps (used by the valuation-adjacent
@@ -518,7 +538,12 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
         try:
             info = yf.Ticker(symbol).info
             country = info.get("country")
-            if country == "Switzerland":
+            volume = info.get("regularMarketVolume")
+            if country != "Switzerland":
+                print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
+            elif volume is None or volume < MIN_INTRADAY_VOLUME:
+                print(f"  skip {symbol}: intraday volume {volume!r} below {MIN_INTRADAY_VOLUME} floor")
+            else:
                 domestic[symbol] = {
                     "name": quote.get("longName") or quote.get("shortName") or symbol,
                     "sector": info.get("sector"),
@@ -533,8 +558,6 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
                     "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
                     "quote": quote,
                 }
-            else:
-                print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
         except Exception as e:
             print(f"  skip {symbol}: info fetch failed ({e!r})")
         time.sleep(delay_seconds)

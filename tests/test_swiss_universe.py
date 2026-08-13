@@ -21,6 +21,7 @@ def _base_info(**overrides):
         "beta": 1.27,
         "fiftyTwoWeekHigh": 2590.0,
         "fiftyTwoWeekLow": 1258.0,
+        "regularMarketVolume": 100_000,  # comfortably above MIN_INTRADAY_VOLUME (50k)
     }
     info.update(overrides)
     return info
@@ -79,6 +80,38 @@ def test_filter_domestic_new_fields_are_none_when_missing(monkeypatch):
 def test_filter_domestic_excludes_foreign_domiciled(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info(country="Germany")))
     candidates = {"FOREIGN.SW": {"longName": "Foreign SE", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+
+
+def test_filter_domestic_excludes_below_min_intraday_volume(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME - 1)),
+    )
+    candidates = {"THIN.SW": {"longName": "Thin AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+
+
+def test_filter_domestic_includes_at_exactly_min_intraday_volume(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME)),
+    )
+    candidates = {"EDGE.SW": {"longName": "Edge AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert "EDGE.SW" in domestic
+
+
+def test_filter_domestic_excludes_missing_intraday_volume(monkeypatch):
+    info = _base_info()
+    del info["regularMarketVolume"]
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    candidates = {"NOVOL.SW": {"longName": "No Volume AG", "marketCap": 1e9}}
 
     domestic = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
