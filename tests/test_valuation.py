@@ -207,6 +207,28 @@ def test_build_scenarios_curated_tickers_use_equal_probability():
     assert scenarios["worst"]["probability"] == 1 / 3
 
 
+def test_build_scenarios_ignores_curated_table_when_basis_does_not_match():
+    # Regression test: classify_valuation_basis's result for a real ticker
+    # can legitimately differ call to call (e.g. a payout ratio that lands
+    # in the dividends band this time) - confirmed live that applying
+    # AAPL's EPS-calibrated growth/exit-multiple assumptions to a
+    # "dividends" cf0 (its much smaller dividend rate) produces a number
+    # with no relationship to the analyst's actual target, not just a less
+    # accurate one. AAPL is calibrated for "eps" (CURATED_SCENARIOS_BASIS),
+    # so a "dividends" call must NOT use its curated table.
+    fundamentals = {"growth_0y": None, "growth_1y": None}
+    scenarios = build_scenarios("AAPL", fundamentals, basis="dividends")
+    assert scenarios["normal"]["g1"] != CURATED_SCENARIOS["AAPL"]["normal"]["g1"]
+    assert scenarios["normal"]["g1"] == 0.08  # falls through to G1_FALLBACK
+
+
+def test_build_scenarios_pep_curated_only_applies_to_dividends_basis():
+    # PEP is the one CURATED_SCENARIOS ticker actually calibrated for
+    # "dividends", not "eps" - the inverse case from the AAPL test above.
+    scenarios = build_scenarios("PEP", {}, basis="eps")
+    assert scenarios["normal"]["g1"] != CURATED_SCENARIOS["PEP"]["normal"]["g1"]
+
+
 def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08

@@ -160,6 +160,28 @@ CURATED_SCENARIOS = {
     },
 }
 
+# The basis each CURATED_SCENARIOS ticker's growth/exit-multiple
+# assumptions were actually calibrated against. Confirmed live: a given
+# ticker's classify_valuation_basis result can legitimately differ call to
+# call (payout_ratio/sector/free_cash_flow can vary - e.g. a payout ratio
+# that happens to land in the dividends band this time), and applying
+# growth assumptions calibrated for one basis's cash flow (e.g. AAPL's
+# trailing EPS) to a DIFFERENT basis's cash flow (e.g. its much smaller
+# dividend rate) doesn't produce a "less accurate" number, it produces one
+# with no relationship to the analyst's actual target at all - the
+# growth/exit-multiple assumptions and the cf0 they're meant to compound
+# have to come from the same DCF. build_scenarios below only uses a
+# ticker's curated table when the basis classified for THIS call matches
+# what it was actually calibrated for.
+CURATED_SCENARIOS_BASIS = {
+    "AAPL": "eps",
+    "NVDA": "eps",
+    "MSFT": "eps",
+    "PEP": "dividends",
+    "NFLX": "eps",
+    "XOM": "eps",
+}
+
 # Fallback for any ticker not in CURATED_SCENARIOS, segmented by basis and
 # sector along the two axes that were actually confirmed live rather than
 # invented - see build_scenarios for how these combine with a per-ticker
@@ -401,7 +423,7 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
       (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT (see that
       constant's comment for the limits of this signal).
     """
-    if ticker and ticker in CURATED_SCENARIOS:
+    if ticker and ticker in CURATED_SCENARIOS and CURATED_SCENARIOS_BASIS.get(ticker) == basis:
         return {
             name: {**scenario, "probability": SCENARIO_PROBABILITY}
             for name, scenario in CURATED_SCENARIOS[ticker].items()
