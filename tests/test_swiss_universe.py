@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import app.services.swiss_universe as swiss_universe_module
 from app.services.swiss_universe import _ex_dividend_date, discover_candidates, filter_domestic
@@ -115,6 +117,49 @@ def test_filter_domestic_excludes_missing_intraday_volume(monkeypatch):
 
     domestic = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
+
+
+def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkeypatch):
+    # Not a timing/speed assertion - just confirms results are complete
+    # and correct (nothing dropped/duplicated/mixed up between symbols)
+    # when run through the thread pool instead of a serial loop.
+    def fake_ticker(symbol):
+        return _FakeTicker(_base_info(sector=symbol))  # sector encodes which symbol answered
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(12)}
+
+    domestic = filter_domestic(candidates, delay_seconds=0, max_workers=5)
+
+    assert set(domestic.keys()) == set(candidates.keys())
+    for symbol, entry in domestic.items():
+        assert entry["sector"] == symbol  # each entry answered for itself, not a neighbor's data
+
+
+def test_filter_domestic_runs_fetches_concurrently(monkeypatch):
+    # Proves the thread pool is actually overlapping requests, not just
+    # preserving correct results while secretly still serialized - each
+    # fake fetch blocks briefly and records how many were in-flight at
+    # once; with max_workers=3 over 3 tickers that each take longer than
+    # the gaps between submissions, at least 2 should overlap.
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max_in_flight": 0}
+
+    def fake_ticker(symbol):
+        with lock:
+            state["in_flight"] += 1
+            state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        time.sleep(0.05)
+        with lock:
+            state["in_flight"] -= 1
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(3)}
+
+    filter_domestic(candidates, delay_seconds=0, max_workers=3)
+
+    assert state["max_in_flight"] >= 2
 
 
 def test_discover_candidates_excludes_configured_tickers(monkeypatch):

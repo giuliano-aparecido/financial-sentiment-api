@@ -24,6 +24,7 @@ SMI's 20 largest/most-liquid names are the opposite of that, so they're
 excluded on purpose rather than just being an unlikely match.
 """
 
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -112,8 +113,30 @@ MIN_INTRADAY_VOLUME = 50_000
 # Politeness delay between per-ticker yfinance .info calls - this is an
 # unofficial/undocumented API, not a documented rate limit to size against
 # (unlike the Gemini API elsewhere in this project's sibling repo), so this
-# is a conservative default, not a measured cap.
+# is a conservative default, not a measured cap. Applied PER WORKER (see
+# INFO_MAX_WORKERS below), not globally - each worker still paces its own
+# sequential requests by this much, concurrency just runs several such
+# paced streams at once instead of one.
 INFO_REQUEST_DELAY_SECONDS = 0.3
+
+# Bounded concurrency for filter_domestic's per-ticker .info loop - a
+# meaningful speedup (roughly INFO_MAX_WORKERS-x) over one ticker at a
+# time without going back to the fully-unbounded burst that's already
+# bitten this scan once (see DOWNLOAD_CHUNK_SIZE/DOWNLOAD_CHUNK_DELAY_
+# SECONDS in swiss_small_cap_crash_rebound.py - a single fully-concurrent
+# yf.download(..., threads=True) call over 100+ tickers is what was
+# actually tripping "Too Many Requests" there, confirmed live). YfData is
+# a thread-safe singleton (its crumb/cookie fetch is guarded by its own
+# lock - see yfinance.data.YfData._cookie_lock), so concurrent
+# Ticker.info calls sharing one session are safe with respect to auth
+# state; what's NOT yet validated is how many concurrent requests this
+# SPECIFIC endpoint (quoteSummary, not the download/screener endpoints
+# that already have their own tuned limits) actually tolerates before
+# Yahoo starts rate-limiting it - this number is a reasoned starting
+# guess, not something stress-tested the way DOWNLOAD_CHUNK_SIZE was.
+# Watch Render logs for a rise in "info fetch failed" lines after
+# deploying this; lower it if so.
+INFO_MAX_WORKERS = 5
 
 # SMI (Swiss Market Index) constituents - the 20 largest, most liquid,
 # most heavily analyst-covered names on SIX. Excluded from discovery, not
@@ -510,7 +533,47 @@ def _ex_dividend_date(info: dict) -> str | None:
     return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).date().isoformat()
 
 
-def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
+def _fetch_domestic_entry(symbol, quote, delay_seconds):
+    """One ticker's worth of filter_domestic's work - fetch .info, decide
+    keep/skip, sleep the politeness delay - factored out so it can run as
+    a unit inside a worker thread (see filter_domestic below). Returns
+    (symbol, entry_dict_or_None); the caller does the printing/assembly,
+    this only computes. Sleeps unconditionally at the end, success or
+    failure, same as the original serial loop did - each worker still
+    paces its OWN sequential requests by delay_seconds, concurrency just
+    runs several such paced streams at once (see INFO_MAX_WORKERS)."""
+    try:
+        info = yf.Ticker(symbol).info
+        country = info.get("country")
+        volume = info.get("regularMarketVolume")
+        if country != "Switzerland":
+            print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
+            return symbol, None
+        if volume is None or volume < MIN_INTRADAY_VOLUME:
+            print(f"  skip {symbol}: intraday volume {volume!r} below {MIN_INTRADAY_VOLUME} floor")
+            return symbol, None
+        return symbol, {
+            "name": quote.get("longName") or quote.get("shortName") or symbol,
+            "sector": info.get("sector"),
+            "market_cap": quote.get("marketCap"),
+            "trailing_eps": info.get("trailingEps"),
+            "trailing_pe": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "dividend_yield": info.get("dividendYield"),
+            "ex_dividend_date": _ex_dividend_date(info),
+            "beta": info.get("beta"),
+            "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+            "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+            "quote": quote,
+        }
+    except Exception as e:
+        print(f"  skip {symbol}: info fetch failed ({e!r})")
+        return symbol, None
+    finally:
+        time.sleep(delay_seconds)
+
+
+def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_workers=INFO_MAX_WORKERS):
     """Keeps only candidates whose own `country` field is Switzerland -
     the one field that actually reflects company domicile rather than
     exchange/listing region (see module docstring) - AND whose today's
@@ -532,33 +595,18 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS):
     swiss_small_cap_crash_rebound.py's run_scan). Fails soft per ticker: a
     fetch error just excludes that ticker with a warning, rather than
     aborting the whole scan.
+
+    Runs the per-ticker fetches across max_workers threads (see
+    INFO_MAX_WORKERS's own comment for the safety reasoning) instead of
+    one ticker at a time - roughly a max_workers-x wall-clock speedup for
+    this step, which is I/O-bound (waiting on Yahoo's response, not CPU),
+    so threads (not processes) are the right tool despite the GIL.
     """
     domestic = {}
-    for symbol, quote in candidates.items():
-        try:
-            info = yf.Ticker(symbol).info
-            country = info.get("country")
-            volume = info.get("regularMarketVolume")
-            if country != "Switzerland":
-                print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
-            elif volume is None or volume < MIN_INTRADAY_VOLUME:
-                print(f"  skip {symbol}: intraday volume {volume!r} below {MIN_INTRADAY_VOLUME} floor")
-            else:
-                domestic[symbol] = {
-                    "name": quote.get("longName") or quote.get("shortName") or symbol,
-                    "sector": info.get("sector"),
-                    "market_cap": quote.get("marketCap"),
-                    "trailing_eps": info.get("trailingEps"),
-                    "trailing_pe": info.get("trailingPE"),
-                    "forward_pe": info.get("forwardPE"),
-                    "dividend_yield": info.get("dividendYield"),
-                    "ex_dividend_date": _ex_dividend_date(info),
-                    "beta": info.get("beta"),
-                    "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
-                    "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
-                    "quote": quote,
-                }
-        except Exception as e:
-            print(f"  skip {symbol}: info fetch failed ({e!r})")
-        time.sleep(delay_seconds)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch_domestic_entry, symbol, quote, delay_seconds) for symbol, quote in candidates.items()]
+        for future in concurrent.futures.as_completed(futures):
+            symbol, entry = future.result()
+            if entry is not None:
+                domestic[symbol] = entry
     return domestic
