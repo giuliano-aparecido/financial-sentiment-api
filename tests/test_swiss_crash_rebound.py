@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 import app.services.swiss_crash_rebound as crash_rebound_module
-from app.services.swiss_crash_rebound import attach_news, find_crash_then_rebound, run_scan
+from app.services.swiss_crash_rebound import find_crash_then_rebound, run_scan
 
 
 def _ohlcv_frame(dates, closes, volumes):
@@ -244,21 +244,6 @@ def test_find_crash_then_rebound_chunks_download_calls(monkeypatch, today):
     # Matches from both the first AND second chunk survive being combined
     # back into one result set.
     assert set(results["ticker"]) == {symbols[0], symbols[3]}
-
-
-def test_attach_news_matches_on_ticker_and_gain_date():
-    results = pd.DataFrame([
-        {"ticker": "INRN.SW", "gain_date": "2026-08-04"},
-        {"ticker": "UNKNOWN.SW", "gain_date": "2026-01-01"},
-    ])
-    with_news = attach_news(results)
-    assert with_news.iloc[0]["news_headline"] is not None
-    assert with_news.iloc[0]["news_source"] is not None
-    # pandas represents "no match" as NaN here (not None) internally - the
-    # JSON-safety conversion to a real None happens one layer up, at
-    # research_job._json_safe_records, not inside attach_news itself.
-    assert pd.isna(with_news.iloc[1]["news_headline"])
-    assert pd.isna(with_news.iloc[1]["news_source"])
 
 
 def test_run_scan_returns_empty_dataframe_when_no_symbols():

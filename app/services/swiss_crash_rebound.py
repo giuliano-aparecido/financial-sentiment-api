@@ -83,44 +83,6 @@ REBOUND_WINDOW_TRADING_DAYS = 3
 DOWNLOAD_CHUNK_SIZE = 25
 DOWNLOAD_CHUNK_DELAY_SECONDS = 2.0
 
-# NOTE: these gain_date entries were researched against the OLD
-# immediate-next-day-only rebound logic. REBOUND_WINDOW_TRADING_DAYS
-# widened what counts as a match and changed the baseline (crash-day
-# close, not previous-day close) - for events that were previously a
-# same-day match this changes nothing (day-1 is still checked first,
-# same result), but re-verify against the next live scan rather than
-# assuming these three still line up unchanged.
-#
-# Manually researched via web search (not auto-fetched) - yfinance's
-# Ticker.news only returns whatever is CURRENT news today, not an archive
-# of what was published on a specific past date, so it can't answer "what
-# news landed on the gain_date of this specific historical event." Keyed
-# by (ticker, gain_date as "YYYY-MM-DD") since that's the day the news
-# actually needs to line up with for a "smart money re-entry" read - add
-# more entries here as you research more events; anything not in this
-# dict just gets blank news columns rather than a guess.
-NEWS_RESEARCH = {
-    ("INRN.SW", "2026-08-04"): {
-        "headline": "UBS raises Interroll price target to CHF 2,400 (from 2,295), reiterates Buy, "
-                    "after H1 2026 results (sales +14% local currency, EBIT -2.2%, net income missed "
-                    "consensus ~7%) - management cites 'solid basis for the remainder of the year' "
-                    "and share gains in China.",
-        "source": "https://www.streetinsider.com/Analyst+PT+Change/Interroll+Holding+AG+(INRN:SW)+PT+Raised+to+CHF2,400+at+UBS/26860350.html",
-    },
-    ("CNTL.SW", "2026-07-13"): {
-        "headline": "Centiel secures its first U.S. market order, worth USD 8.7 million, under the Neo "
-                    "Critical Power framework agreement for a data-center UPS project.",
-        "source": "https://www.tradingview.com/news/eqs:57fd04b09094b:0-centiel-secures-first-order-in-the-u-s-market-worth-usd-8-7-million-under-the-neo-critical-power-framework-agreement/",
-    },
-    ("SWTQ.SW", "2026-07-28"): {
-        "headline": "No specific headline confirmed for this date - an earnings report fell close to "
-                    "this window (~July 24) and gain-day volume was 5.4x the 3-month average, "
-                    "consistent with a post-earnings repricing, but not verified against a dated source.",
-        "source": None,
-    },
-}
-
-
 def find_crash_then_rebound(
     symbols, domestic, lookback_months, history_period, drop_threshold, gain_threshold,
     rebound_window_days=REBOUND_WINDOW_TRADING_DAYS,
@@ -266,20 +228,6 @@ def find_crash_then_rebound(
     return pd.DataFrame(matches)
 
 
-def attach_news(results):
-    """Adds news_headline/news_source columns from NEWS_RESEARCH, matched
-    on (ticker, gain_date) - blank for any row not manually researched
-    (most of them, by design - see NEWS_RESEARCH's comment)."""
-    def lookup(row, field):
-        entry = NEWS_RESEARCH.get((row["ticker"], row["gain_date"]))
-        return entry[field] if entry else None
-
-    results = results.copy()
-    results["news_headline"] = results.apply(lambda r: lookup(r, "headline"), axis=1)
-    results["news_source"] = results.apply(lambda r: lookup(r, "source"), axis=1)
-    return results
-
-
 def run_scan(domestic: dict) -> pd.DataFrame:
     """Runs the full crash-then-rebound scan against an already-discovered/
     domicile-filtered `domestic` dict (see swiss_universe.filter_domestic) -
@@ -321,4 +269,4 @@ def run_scan(domestic: dict) -> pd.DataFrame:
         "gain_date", "gain_open", "gain_high", "gain_low", "gain_close",
         "gain_volume", "gain_volume_vs_3mo_avg", "gain_pe_approx", "gain_pct",
     ]]
-    return attach_news(results)
+    return results
