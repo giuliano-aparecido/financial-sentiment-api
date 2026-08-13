@@ -2,8 +2,11 @@
 Swiss "crash then rebound" volatility scanner.
 
 Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that had a
-day with a >=5% loss followed IMMEDIATELY (next trading day) by a >=5%
-gain, within the last N months. Universe defaults to a small-cap band but
+day with a >=5% loss followed, within the next REBOUND_WINDOW_TRADING_DAYS
+trading days, by a close that's >=5% ABOVE THE CRASH DAY'S OWN CLOSE (not
+the previous day's close - see find_crash_then_rebound's own docstring for
+why that distinction matters), within the last N months. Universe defaults
+to a small-cap band but
 can widen to include mid/large caps too (SMI's 20 largest excluded either
 way) - see swiss_universe.py's ALL_CAPS_MIN/MAX_MARKET_CAP_CHF and
 research_job.start_scan's all_caps parameter. Either way this is looking
@@ -51,7 +54,17 @@ LOOKBACK_MONTHS = 3
 HISTORY_PERIOD = "4mo"
 
 DROP_THRESHOLD_PCT = -5.0   # day N close-to-close change <= this
-GAIN_THRESHOLD_PCT = 5.0    # day N+1 close-to-close change >= this
+GAIN_THRESHOLD_PCT = 5.0    # rebound-day close vs CRASH DAY's close >= this
+
+# How many trading days after the crash day to look for a qualifying
+# rebound - was hardcoded to "the immediate next day" before this;
+# widened to a window since a real rebound often takes a couple of days
+# to show up, not necessarily tomorrow. The FIRST day within this window
+# whose close clears GAIN_THRESHOLD_PCT above the crash day's own close
+# is the one recorded (see find_crash_then_rebound below) - later days
+# within the window aren't separately reported once an earlier one
+# already qualifies.
+REBOUND_WINDOW_TRADING_DAYS = 3
 
 # find_crash_then_rebound used to download ALL domestic tickers (100+) in a
 # single yf.download(..., threads=True) call - one burst of fully-concurrent
@@ -70,6 +83,14 @@ GAIN_THRESHOLD_PCT = 5.0    # day N+1 close-to-close change >= this
 DOWNLOAD_CHUNK_SIZE = 25
 DOWNLOAD_CHUNK_DELAY_SECONDS = 2.0
 
+# NOTE: these gain_date entries were researched against the OLD
+# immediate-next-day-only rebound logic. REBOUND_WINDOW_TRADING_DAYS
+# widened what counts as a match and changed the baseline (crash-day
+# close, not previous-day close) - for events that were previously a
+# same-day match this changes nothing (day-1 is still checked first,
+# same result), but re-verify against the next live scan rather than
+# assuming these three still line up unchanged.
+#
 # Manually researched via web search (not auto-fetched) - yfinance's
 # Ticker.news only returns whatever is CURRENT news today, not an archive
 # of what was published on a specific past date, so it can't answer "what
@@ -100,7 +121,10 @@ NEWS_RESEARCH = {
 }
 
 
-def find_crash_then_rebound(symbols, domestic, lookback_months, history_period, drop_threshold, gain_threshold):
+def find_crash_then_rebound(
+    symbols, domestic, lookback_months, history_period, drop_threshold, gain_threshold,
+    rebound_window_days=REBOUND_WINDOW_TRADING_DAYS,
+):
     """Batch-downloads daily OHLCV for all `symbols` at once (one bulk
     request rather than one per ticker - yfinance/Yahoo handles this far
     better than a per-symbol loop for price history specifically, unlike
@@ -111,6 +135,19 @@ def find_crash_then_rebound(symbols, domestic, lookback_months, history_period, 
     loss day's and rebound day's own OHLCV - VOLUME in particular, since a
     move on thin volume vs. heavy volume tells very different stories
     about how real/tradeable it was - plus an approximate P/E.
+
+    The rebound check looks up to `rebound_window_days` trading days ahead
+    of the crash day for the FIRST day whose close is >= gain_threshold%
+    above the CRASH DAY'S close - deliberately the crash day's close, not
+    a rolling previous-day close, on every day checked within the window.
+    This is what makes "still going down" not quietly count as progress
+    toward a rebound: if day N+1 is DOWN another 3% from the crash close,
+    day N+2 doesn't just need +5% over day N+1 (which would only be
+    partial recovery) - it needs +5% over day N's original close, i.e. it
+    has to make up its own drop AND day N+1's before it counts at all.
+    `days_to_rebound` in each match row records how many trading days that
+    actually took (1 = the old "immediate next day" behavior, still
+    matched here as the day-1 case of the same window).
 
     P/E is deliberately labeled "_approx": yfinance's quarterly financials
     are EMPTY for most of this small/illiquid universe (confirmed live for
@@ -174,35 +211,57 @@ def find_crash_then_rebound(symbols, domestic, lookback_months, history_period, 
         trailing_eps = domestic[symbol]["trailing_eps"]
         in_window = pct_change.index >= cutoff
 
-        for i in range(len(pct_change) - 1):
-            if not in_window[i + 1]:
+        n = len(close)
+        for i in range(n):
+            if not in_window[i]:
                 continue
             drop_pct = pct_change.iloc[i]
-            gain_pct = pct_change.iloc[i + 1]
-            if drop_pct <= drop_threshold and gain_pct >= gain_threshold:
-                loss_volume = volume.iloc[i]
-                gain_volume = volume.iloc[i + 1]
-                matches.append({
-                    "ticker": symbol,
-                    "loss_date": pct_change.index[i].date().isoformat(),
-                    "loss_open": round(ohlcv["Open"].iloc[i], 2),
-                    "loss_high": round(ohlcv["High"].iloc[i], 2),
-                    "loss_low": round(ohlcv["Low"].iloc[i], 2),
-                    "loss_close": round(close.iloc[i], 2),
-                    "loss_volume": int(loss_volume) if pd.notna(loss_volume) else None,
-                    "loss_volume_vs_3mo_avg": round(loss_volume / avg_volume, 2) if avg_volume else None,
-                    "loss_pe_approx": approx_pe(close.iloc[i], trailing_eps),
-                    "drop_pct": round(drop_pct, 2),
-                    "gain_date": pct_change.index[i + 1].date().isoformat(),
-                    "gain_open": round(ohlcv["Open"].iloc[i + 1], 2),
-                    "gain_high": round(ohlcv["High"].iloc[i + 1], 2),
-                    "gain_low": round(ohlcv["Low"].iloc[i + 1], 2),
-                    "gain_close": round(close.iloc[i + 1], 2),
-                    "gain_volume": int(gain_volume) if pd.notna(gain_volume) else None,
-                    "gain_volume_vs_3mo_avg": round(gain_volume / avg_volume, 2) if avg_volume else None,
-                    "gain_pe_approx": approx_pe(close.iloc[i + 1], trailing_eps),
-                    "gain_pct": round(gain_pct, 2),
-                })
+            if drop_pct > drop_threshold:
+                continue
+            crash_close = close.iloc[i]
+
+            # First trading day within the window whose close clears
+            # gain_threshold% above crash_close - see this function's own
+            # docstring for why crash_close (not a rolling previous-day
+            # close) is the baseline on every day checked, not just day 1.
+            rebound_j = None
+            rebound_pct = None
+            for offset in range(1, rebound_window_days + 1):
+                j = i + offset
+                if j >= n:
+                    break
+                pct_vs_crash = (close.iloc[j] - crash_close) / crash_close * 100
+                if pct_vs_crash >= gain_threshold:
+                    rebound_j = j
+                    rebound_pct = pct_vs_crash
+                    break
+            if rebound_j is None:
+                continue
+
+            loss_volume = volume.iloc[i]
+            gain_volume = volume.iloc[rebound_j]
+            matches.append({
+                "ticker": symbol,
+                "loss_date": pct_change.index[i].date().isoformat(),
+                "loss_open": round(ohlcv["Open"].iloc[i], 2),
+                "loss_high": round(ohlcv["High"].iloc[i], 2),
+                "loss_low": round(ohlcv["Low"].iloc[i], 2),
+                "loss_close": round(close.iloc[i], 2),
+                "loss_volume": int(loss_volume) if pd.notna(loss_volume) else None,
+                "loss_volume_vs_3mo_avg": round(loss_volume / avg_volume, 2) if avg_volume else None,
+                "loss_pe_approx": approx_pe(close.iloc[i], trailing_eps),
+                "drop_pct": round(drop_pct, 2),
+                "days_to_rebound": rebound_j - i,
+                "gain_date": pct_change.index[rebound_j].date().isoformat(),
+                "gain_open": round(ohlcv["Open"].iloc[rebound_j], 2),
+                "gain_high": round(ohlcv["High"].iloc[rebound_j], 2),
+                "gain_low": round(ohlcv["Low"].iloc[rebound_j], 2),
+                "gain_close": round(close.iloc[rebound_j], 2),
+                "gain_volume": int(gain_volume) if pd.notna(gain_volume) else None,
+                "gain_volume_vs_3mo_avg": round(gain_volume / avg_volume, 2) if avg_volume else None,
+                "gain_pe_approx": approx_pe(close.iloc[rebound_j], trailing_eps),
+                "gain_pct": round(rebound_pct, 2),
+            })
 
     return pd.DataFrame(matches)
 
@@ -230,7 +289,8 @@ def run_scan(domestic: dict) -> pd.DataFrame:
     never raises for "no results," only for a genuine fetch failure.
     """
     results = find_crash_then_rebound(
-        list(domestic.keys()), domestic, LOOKBACK_MONTHS, HISTORY_PERIOD, DROP_THRESHOLD_PCT, GAIN_THRESHOLD_PCT
+        list(domestic.keys()), domestic, LOOKBACK_MONTHS, HISTORY_PERIOD, DROP_THRESHOLD_PCT, GAIN_THRESHOLD_PCT,
+        REBOUND_WINDOW_TRADING_DAYS,
     )
     if results.empty:
         return results
@@ -257,6 +317,7 @@ def run_scan(domestic: dict) -> pd.DataFrame:
         "beta", "fifty_two_week_high", "fifty_two_week_low",
         "loss_date", "loss_open", "loss_high", "loss_low", "loss_close",
         "loss_volume", "loss_volume_vs_3mo_avg", "loss_pe_approx", "drop_pct",
+        "days_to_rebound",
         "gain_date", "gain_open", "gain_high", "gain_low", "gain_close",
         "gain_volume", "gain_volume_vs_3mo_avg", "gain_pe_approx", "gain_pct",
     ]]

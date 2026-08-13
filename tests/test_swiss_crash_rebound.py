@@ -56,6 +56,103 @@ def test_find_crash_then_rebound_detects_a_match(monkeypatch, today):
     assert row["gain_volume"] == 8000
 
 
+def test_find_crash_then_rebound_matches_rebound_on_day_two(monkeypatch, today):
+    # Day -3: drop 6% (100 -> 94). Day -2: flat (94 -> 94, no rebound yet).
+    # Day -1: +6% vs the CRASH close specifically (94 -> 99.64) - should
+    # still match within the 3-day window even though it's not the
+    # immediate next day.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 94, 94, 99.64]
+    volumes = [1000] * 7 + [5000, 1000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    assert len(results) == 1
+    row = results.iloc[0]
+    assert row["days_to_rebound"] == 2
+    assert row["loss_close"] == 94.0
+    assert row["gain_close"] == 99.64
+    assert row["gain_pct"] == 6.0
+
+
+def test_find_crash_then_rebound_baseline_is_crash_close_not_previous_day(monkeypatch, today):
+    # Day -3: drop 6% (100 -> 94). Day -2: DOWN further, to 90 (still
+    # below the crash close). Day -1: 95.88 - a +6.53% jump over day -2
+    # (90), but only +2% over the CRASH close (94) - must NOT match,
+    # because the baseline for every day in the window is the crash day's
+    # close, not the previous day's close (see the module's own
+    # docstring). A rolling-previous-day comparison would wrongly count
+    # this as a >=5% "rebound."
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 94, 90, 95.88]
+    volumes = [1000] * 10
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    assert results.empty
+
+
+def test_find_crash_then_rebound_no_match_outside_rebound_window(monkeypatch, today):
+    # Rebound happens on day 4 after the crash - outside the default
+    # 3-day window - should NOT match.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 94, 94, 94, 94, 94, 99.64]
+    volumes = [1000] * 10
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    assert results.empty
+
+
+def test_find_crash_then_rebound_respects_custom_rebound_window(monkeypatch, today):
+    # Same day-4 rebound as above, but with rebound_window_days=5 - should
+    # now match.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 94, 94, 94, 94, 94, 99.64]
+    volumes = [1000] * 8 + [5000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+                                       rebound_window_days=5)
+    assert len(results) == 1
+    assert results.iloc[0]["days_to_rebound"] == 5
+
+
+def test_find_crash_then_rebound_first_qualifying_day_wins_not_the_biggest(monkeypatch, today):
+    # Day -3: crash to 94. Day -2: +6% vs crash close (already qualifies).
+    # Day -1: an even bigger +10% vs crash close. The day-2 result should
+    # be recorded, not day-1's larger gain - "first to clear the bar," not
+    # "best in the window."
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 94, 99.64, 103.4]
+    volumes = [1000] * 7 + [5000, 8000, 9000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    assert len(results) == 1
+    row = results.iloc[0]
+    assert row["days_to_rebound"] == 1
+    assert row["gain_close"] == 99.64
+    assert row["gain_pct"] == 6.0
+
+
 def test_find_crash_then_rebound_no_match_when_gain_too_small(monkeypatch, today):
     dates = pd.date_range(end=today, periods=10, freq="B")
     # Drop 6%, but only a 2% rebound - shouldn't qualify.
