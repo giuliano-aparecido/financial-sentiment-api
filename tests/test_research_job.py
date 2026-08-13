@@ -15,17 +15,29 @@ def reset_job_state():
     # them before/after each run or they'd see whatever state a previous
     # test left behind.
     research_job._job = {"status": "idle"}
-    research_job._crash_rebound_cache = {"date": None, "result": None}
+    research_job._crash_rebound_cache = {"date": None, "all_caps": None, "result": None}
     yield
     research_job._job = {"status": "idle"}
-    research_job._crash_rebound_cache = {"date": None, "result": None}
+    research_job._crash_rebound_cache = {"date": None, "all_caps": None, "result": None}
+
+
+class _CallList(list):
+    """Plain list subclass so a second call log (discover_calls) can be
+    attached as an attribute without changing _patch_scan's return type
+    for the many existing tests that do `calls = _patch_scan(...)`."""
 
 
 def _patch_scan(monkeypatch, *, crash_rebound_rows=None, today_rows=None, delay=0.0, raises=None):
-    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"NVDA.SW": {}})
+    discover_calls = []
+
+    def fake_discover(**kwargs):
+        discover_calls.append(kwargs)
+        return {"NVDA.SW": {}}
+
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", fake_discover)
     monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: {"NVDA.SW": {}})
 
-    crash_rebound_calls = []
+    crash_rebound_calls = _CallList()
 
     def fake_crash_rebound(domestic):
         crash_rebound_calls.append(domestic)
@@ -40,6 +52,7 @@ def _patch_scan(monkeypatch, *, crash_rebound_rows=None, today_rows=None, delay=
 
     monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_crash_rebound)
     monkeypatch.setattr(research_job.swiss_small_cap_today_screener, "run_scan", fake_today)
+    crash_rebound_calls.discover_calls = discover_calls  # exposed for all_caps-threading tests
     return crash_rebound_calls
 
 
@@ -153,7 +166,7 @@ def test_empty_results_return_empty_lists_not_missing_keys(monkeypatch):
 
 
 def test_crash_rebound_result_starts_uncached():
-    assert research_job._crash_rebound_cache == {"date": None, "result": None}
+    assert research_job._crash_rebound_cache == {"date": None, "all_caps": None, "result": None}
 
 
 def test_crash_rebound_result_reuses_cache_within_same_day(monkeypatch):
@@ -166,8 +179,8 @@ def test_crash_rebound_result_reuses_cache_within_same_day(monkeypatch):
     monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
 
-    first = research_job._crash_rebound_result({"A.SW": {}})
-    second = research_job._crash_rebound_result({"A.SW": {}})
+    first = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
+    second = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
 
     assert len(calls) == 1
     pd.testing.assert_frame_equal(first, second)
@@ -184,14 +197,91 @@ def test_crash_rebound_result_recomputes_on_a_new_day(monkeypatch):
     monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
 
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
-    first = research_job._crash_rebound_result({"A.SW": {}})
+    first = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
 
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 11))
-    second = research_job._crash_rebound_result({"A.SW": {}})
+    second = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
 
     assert len(calls) == 2
     assert first.iloc[0]["call_number"] == 1
     assert second.iloc[0]["call_number"] == 2
+
+
+def test_crash_rebound_result_recomputes_when_all_caps_mode_changes_same_day(monkeypatch):
+    # Regression guard: a small-cap scan and an all-caps scan cover
+    # different universes, so switching modes within the same UTC day
+    # must NOT reuse the other mode's cached result.
+    calls = []
+
+    def fake_run_scan(domestic):
+        calls.append(domestic)
+        return pd.DataFrame([{"ticker": "A.SW", "call_number": len(calls)}])
+
+    monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
+    monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
+
+    small_cap_result = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
+    all_caps_result = research_job._crash_rebound_result({"A.SW": {}}, all_caps=True)
+
+    assert len(calls) == 2
+    assert small_cap_result.iloc[0]["call_number"] == 1
+    assert all_caps_result.iloc[0]["call_number"] == 2
+
+
+# --- all_caps parameter threading ---
+
+
+def test_start_scan_defaults_to_small_cap_band(monkeypatch):
+    calls = _patch_scan(monkeypatch)
+    research_job.start_scan()
+
+    deadline = time.time() + 2
+    status = research_job.get_status()
+    while status["status"] == "running" and time.time() < deadline:
+        time.sleep(0.02)
+        status = research_job.get_status()
+
+    assert status["all_caps"] is False
+    # No kwargs -> same call shape discover_candidates() had before
+    # all_caps existed, so its own MIN/MAX_MARKET_CAP_CHF defaults apply.
+    assert calls.discover_calls == [{}]
+
+
+def test_start_scan_all_caps_true_passes_wide_market_cap_band(monkeypatch):
+    calls = _patch_scan(monkeypatch)
+    research_job.start_scan(all_caps=True)
+
+    deadline = time.time() + 2
+    status = research_job.get_status()
+    while status["status"] == "running" and time.time() < deadline:
+        time.sleep(0.02)
+        status = research_job.get_status()
+
+    assert status["all_caps"] is True
+    assert calls.discover_calls == [{
+        "min_market_cap": research_job.swiss_universe.ALL_CAPS_MIN_MARKET_CAP_CHF,
+        "max_market_cap": research_job.swiss_universe.ALL_CAPS_MAX_MARKET_CAP_CHF,
+    }]
+
+
+def test_start_scan_running_job_reports_its_own_all_caps_value(monkeypatch):
+    _patch_scan(monkeypatch, delay=0.3)
+    result = research_job.start_scan(all_caps=True)
+    assert result["all_caps"] is True
+
+
+def test_scan_failure_status_includes_all_caps(monkeypatch):
+    _patch_scan(monkeypatch, raises=RuntimeError("yfinance is down"))
+    research_job.start_scan(all_caps=True)
+
+    deadline = time.time() + 2
+    status = research_job.get_status()
+    while status["status"] == "running" and time.time() < deadline:
+        time.sleep(0.02)
+        status = research_job.get_status()
+
+    assert status["status"] == "error"
+    assert status["all_caps"] is True
 
 
 def test_full_scan_via_start_scan_uses_cache_on_second_same_day_run(monkeypatch):

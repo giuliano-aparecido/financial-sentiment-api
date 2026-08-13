@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import app.services.swiss_universe as swiss_universe_module
 from app.services.swiss_universe import _ex_dividend_date, discover_candidates, filter_domestic
@@ -21,6 +23,7 @@ def _base_info(**overrides):
         "beta": 1.27,
         "fiftyTwoWeekHigh": 2590.0,
         "fiftyTwoWeekLow": 1258.0,
+        "regularMarketVolume": 100_000,  # comfortably above MIN_INTRADAY_VOLUME (50k)
     }
     info.update(overrides)
     return info
@@ -84,6 +87,81 @@ def test_filter_domestic_excludes_foreign_domiciled(monkeypatch):
     assert domestic == {}
 
 
+def test_filter_domestic_excludes_below_min_intraday_volume(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME - 1)),
+    )
+    candidates = {"THIN.SW": {"longName": "Thin AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+
+
+def test_filter_domestic_includes_at_exactly_min_intraday_volume(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME)),
+    )
+    candidates = {"EDGE.SW": {"longName": "Edge AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert "EDGE.SW" in domestic
+
+
+def test_filter_domestic_excludes_missing_intraday_volume(monkeypatch):
+    info = _base_info()
+    del info["regularMarketVolume"]
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    candidates = {"NOVOL.SW": {"longName": "No Volume AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+
+
+def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkeypatch):
+    # Not a timing/speed assertion - just confirms results are complete
+    # and correct (nothing dropped/duplicated/mixed up between symbols)
+    # when run through the thread pool instead of a serial loop.
+    def fake_ticker(symbol):
+        return _FakeTicker(_base_info(sector=symbol))  # sector encodes which symbol answered
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(12)}
+
+    domestic = filter_domestic(candidates, delay_seconds=0, max_workers=5)
+
+    assert set(domestic.keys()) == set(candidates.keys())
+    for symbol, entry in domestic.items():
+        assert entry["sector"] == symbol  # each entry answered for itself, not a neighbor's data
+
+
+def test_filter_domestic_runs_fetches_concurrently(monkeypatch):
+    # Proves the thread pool is actually overlapping requests, not just
+    # preserving correct results while secretly still serialized - each
+    # fake fetch blocks briefly and records how many were in-flight at
+    # once; with max_workers=3 over 3 tickers that each take longer than
+    # the gaps between submissions, at least 2 should overlap.
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max_in_flight": 0}
+
+    def fake_ticker(symbol):
+        with lock:
+            state["in_flight"] += 1
+            state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        time.sleep(0.05)
+        with lock:
+            state["in_flight"] -= 1
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(3)}
+
+    filter_domestic(candidates, delay_seconds=0, max_workers=3)
+
+    assert state["max_in_flight"] >= 2
+
+
 def test_discover_candidates_excludes_configured_tickers(monkeypatch):
     def fake_screen(query, offset, size, sortField, sortAsc):
         if offset > 0:
@@ -120,6 +198,7 @@ def test_discover_candidates_falls_back_to_static_snapshot_on_screener_failure(m
     assert candidates == {
         symbol: {"symbol": symbol, "quoteType": "EQUITY", "longName": name, "sector": sector}
         for symbol, (name, sector) in swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT.items()
+        if symbol not in swiss_universe_module.EXCLUDED_TICKERS
     }
 
 
@@ -214,6 +293,100 @@ def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
 
     assert fake._crumb == "test-crumb-123"
     assert dict(fake._session.cookies) == {"A1": "abc", "A3": "def"}
+
+
+def test_smi_tickers_are_excluded_from_excluded_tickers():
+    # SMI_TICKERS must actually take effect via EXCLUDED_TICKERS, not just
+    # exist as an unused set - both discover_candidates code paths filter
+    # on EXCLUDED_TICKERS (see _discover_candidates_live and the static
+    # fallback branch), so this is the one thing that has to be true for
+    # either path to actually exclude them.
+    assert swiss_universe_module.SMI_TICKERS <= swiss_universe_module.EXCLUDED_TICKERS
+
+
+def test_smi_tickers_all_present_in_static_snapshot():
+    # Sanity check against typos in SMI_TICKERS (hand-maintained, see its
+    # own comment) - every symbol in it should be a real ticker that
+    # actually showed up in a live capture, not a guessed/misremembered
+    # one.
+    missing = swiss_universe_module.SMI_TICKERS - set(swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT)
+    assert missing == set()
+
+
+def test_discover_candidates_static_fallback_excludes_smi_names(monkeypatch):
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates(
+        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
+        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
+    )
+    assert "NESN.SW" not in candidates  # Nestle
+    assert "NOVN.SW" not in candidates  # Novartis
+    assert "UBSG.SW" not in candidates  # UBS
+    # A genuinely small/mid-cap name should still be present - this isn't
+    # asserting the fallback returns an empty dict.
+    assert "INRN.SW" in candidates
+
+
+def test_discover_candidates_live_excludes_smi_names(monkeypatch):
+    def fake_screen(query, offset, size, sortField, sortAsc):
+        if offset > 0:
+            return {"quotes": [], "total": 1}
+        return {
+            "quotes": [
+                {"symbol": "NESN.SW", "quoteType": "EQUITY"},
+                {"symbol": "REAL.SW", "quoteType": "EQUITY"},
+            ],
+            "total": 2,
+        }
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", fake_screen)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates()
+    assert "NESN.SW" not in candidates
+    assert "REAL.SW" in candidates
+
+
+def test_all_caps_band_is_wider_than_small_cap_band():
+    assert swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF == swiss_universe_module.MIN_MARKET_CAP_CHF
+    assert swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF > swiss_universe_module.MAX_MARKET_CAP_CHF
+
+
+def test_static_snapshot_includes_smi_large_caps_not_just_small_caps():
+    # Regression guard: the static fallback used to be captured at the
+    # small-cap band only (MIN/MAX_MARKET_CAP_CHF), so it was missing SMI
+    # giants entirely. It's now captured at the wide all-caps band so it
+    # works as a fallback for an all-caps request too - this checks a
+    # couple of well-known large caps are actually present, not just that
+    # the dict got bigger.
+    snapshot = swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT
+    assert "NESN.SW" in snapshot  # Nestle
+    assert "NOVN.SW" in snapshot  # Novartis
+    assert "UBSG.SW" in snapshot  # UBS
+
+
+def test_discover_candidates_static_fallback_still_used_for_all_caps_bounds(monkeypatch):
+    # discover_candidates' fallback doesn't filter STATIC_DOMESTIC_TICKER_
+    # SNAPSHOT by the requested min/max (no market-cap data on static
+    # entries to filter with - see that dict's own comment) - this just
+    # confirms calling with the all-caps bounds still falls back cleanly
+    # rather than erroring.
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates(
+        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
+        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
+    )
+    assert "INRN.SW" in candidates  # non-SMI name, present regardless of band
 
 
 def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):
