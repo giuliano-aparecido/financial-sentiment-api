@@ -1,16 +1,22 @@
 """
-Swiss small-cap "crash then rebound" scanner.
+Swiss "crash then rebound" volatility scanner.
 
-Finds SIX Swiss Exchange-listed, Switzerland-domiciled small-cap stocks
-that had a day with a >=5% loss followed IMMEDIATELY (next trading day) by
-a >=5% gain, within the last N months.
+Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that had a
+day with a >=5% loss followed IMMEDIATELY (next trading day) by a >=5%
+gain, within the last N months. Universe defaults to a small-cap band but
+can widen to include mid/large caps too (SMI's 20 largest excluded either
+way) - see swiss_universe.py's ALL_CAPS_MIN/MAX_MARKET_CAP_CHF and
+research_job.start_scan's all_caps parameter. Either way this is looking
+for VOLATILE movers, not necessarily small companies specifically -
+small-cap is just the more volatile default band, not the point in
+itself.
 
 Ported from the standalone research/ project (D:\\projects\\research) into
 this app so it can run from a real, always-on server (Render) instead of a
 Colab/Kaggle notebook - see app/routers/research.py for why: the original
 research/ version was designed to run in Colab/Kaggle; this repo's version
 is the same logic wired into a FastAPI background job instead (see
-app/services/research_job.py), because the small-cap research page in
+app/services/research_job.py), because the volatility research page in
 financial-sentiment-web needs a persistent Python backend to call, and
 Vercel's serverless functions (where that Next.js app is deployed) can't
 run a script like this at all - no Python runtime, and execution time caps
@@ -20,12 +26,12 @@ Free tools only: yfinance (wraps Yahoo Finance's public screener + price
 history endpoints, no API key).
 
 Universe discovery (market-cap band + domicile filter) lives in
-swiss_universe.py, shared with swiss_small_cap_today_screener.py - see
+swiss_universe.py, shared with swiss_today_screener.py - see
 that module's docstring for why both a market-cap filter AND a per-company
-`country` check are needed to get "small caps in Switzerland, excluding
+`country` check are needed to get "Swiss-domiciled stocks, excluding
 foreign companies." run_scan() below takes an already-discovered/filtered
 `domestic` dict rather than doing its own discovery, so a caller running
-BOTH this scan and swiss_small_cap_today_screener.py's (see
+BOTH this scan and swiss_today_screener.py's (see
 research_job.py) only pays the ~30-60s domicile-filtering cost once, not
 twice.
 """
@@ -219,7 +225,7 @@ def run_scan(domestic: dict) -> pd.DataFrame:
     """Runs the full crash-then-rebound scan against an already-discovered/
     domicile-filtered `domestic` dict (see swiss_universe.filter_domestic) -
     discovery isn't repeated here so a caller running this alongside
-    swiss_small_cap_today_screener.py's scan (see research_job.py) only
+    swiss_today_screener.py's scan (see research_job.py) only
     pays that ~30-60s cost once. Returns a DataFrame, empty if no matches -
     never raises for "no results," only for a genuine fetch failure.
     """

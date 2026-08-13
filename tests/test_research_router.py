@@ -19,12 +19,12 @@ def reset_start_scan_rate_limit():
 
 
 def test_start_scan_requires_api_key(client):
-    response = client.post("/api/research/small-caps/start")
+    response = client.post("/api/research/volatility/start")
     assert response.status_code == 401
 
 
 def test_status_requires_api_key(client):
-    response = client.get("/api/research/small-caps/status")
+    response = client.get("/api/research/volatility/status")
     assert response.status_code == 401
 
 
@@ -33,7 +33,7 @@ def test_start_scan_delegates_to_research_job(client, monkeypatch):
         research_router, "start_scan",
         lambda all_caps=False: {"status": "running", "started_at": "now", "all_caps": all_caps},
     )
-    response = client.post("/api/research/small-caps/start", headers={"X-API-Key": VALID_KEY})
+    response = client.post("/api/research/volatility/start", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == {"status": "running", "started_at": "now", "all_caps": False}
 
@@ -44,7 +44,7 @@ def test_start_scan_passes_all_caps_query_param_through(client, monkeypatch):
         research_router, "start_scan",
         lambda all_caps=False: calls.append(all_caps) or {"status": "running", "started_at": "now", "all_caps": all_caps},
     )
-    response = client.post("/api/research/small-caps/start?all_caps=true", headers={"X-API-Key": VALID_KEY})
+    response = client.post("/api/research/volatility/start?all_caps=true", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert calls == [True]
     assert response.json()["all_caps"] is True
@@ -56,7 +56,7 @@ def test_start_scan_all_caps_defaults_false_when_omitted(client, monkeypatch):
         research_router, "start_scan",
         lambda all_caps=False: calls.append(all_caps) or {"status": "running", "started_at": "now", "all_caps": all_caps},
     )
-    response = client.post("/api/research/small-caps/start", headers={"X-API-Key": VALID_KEY})
+    response = client.post("/api/research/volatility/start", headers={"X-API-Key": VALID_KEY})
     assert calls == [False]
 
 
@@ -67,12 +67,12 @@ def test_status_delegates_to_research_job(client, monkeypatch):
         "today_screener": [],
     }
     monkeypatch.setattr(research_router, "get_status", lambda: fake_status)
-    response = client.get("/api/research/small-caps/status", headers={"X-API-Key": VALID_KEY})
+    response = client.get("/api/research/volatility/status", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == fake_status
 
 
 def test_status_idle_before_any_scan_started(client, monkeypatch):
     monkeypatch.setattr(research_router, "get_status", lambda: {"status": "idle"})
-    response = client.get("/api/research/small-caps/status", headers={"X-API-Key": VALID_KEY})
+    response = client.get("/api/research/volatility/status", headers={"X-API-Key": VALID_KEY})
     assert response.json() == {"status": "idle"}

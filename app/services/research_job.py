@@ -1,6 +1,6 @@
 """
-Background-job runner for the Swiss small-cap research scan
-(swiss_small_cap_crash_rebound.py + swiss_small_cap_today_screener.py),
+Background-job runner for the Swiss volatility research scan
+(swiss_crash_rebound.py + swiss_today_screener.py),
 backing app/routers/research.py's start/status endpoints.
 
 A full scan takes 1-3 minutes (universe discovery + ~100+ per-ticker
@@ -35,7 +35,8 @@ otherwise race to both start a scan.
 all_caps: when True, discover_candidates() is called with
 swiss_universe.ALL_CAPS_MIN/MAX_MARKET_CAP_CHF instead of the default
 small-cap band, so the scan covers the whole SIX-listed, Switzerland-
-domiciled universe (SMI giants included) rather than just small caps.
+domiciled universe (SMI's 20 largest/most-liquid names still EXCLUDED
+either way - see swiss_universe.SMI_TICKERS) rather than just small caps.
 Purely a discovery-time parameter - the crash-rebound and today-screener
 scan logic themselves have no cap-specific thresholds, they just operate
 over whatever `domestic` dict they're handed.
@@ -68,7 +69,7 @@ import threading
 
 import pandas as pd
 
-from app.services import swiss_small_cap_crash_rebound, swiss_small_cap_today_screener, swiss_universe
+from app.services import swiss_crash_rebound, swiss_today_screener, swiss_universe
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def _crash_rebound_result(domestic: dict, all_caps: bool) -> pd.DataFrame:
     if _crash_rebound_cache["date"] == today and _crash_rebound_cache["all_caps"] == all_caps:
         logger.info("Reusing cached crash-rebound result from %s (all_caps=%s)", today, all_caps)
         return _crash_rebound_cache["result"]
-    result = swiss_small_cap_crash_rebound.run_scan(domestic)
+    result = swiss_crash_rebound.run_scan(domestic)
     _crash_rebound_cache = {"date": today, "all_caps": all_caps, "result": result}
     return result
 
@@ -136,7 +137,7 @@ def _run(started_at: str, all_caps: bool) -> None:
             candidates = swiss_universe.discover_candidates()
         domestic = swiss_universe.filter_domestic(candidates)
         crash_rebound_df = _crash_rebound_result(domestic, all_caps)
-        today_df = swiss_small_cap_today_screener.run_scan(domestic)
+        today_df = swiss_today_screener.run_scan(domestic)
         _job = {
             "status": "done",
             "started_at": started_at,

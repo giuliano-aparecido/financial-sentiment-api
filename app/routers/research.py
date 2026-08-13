@@ -7,9 +7,9 @@ from app.services.research_job import get_status, start_scan
 router = APIRouter()
 
 
-@router.post("/api/research/small-caps/start", dependencies=[Depends(verify_api_key)])
+@router.post("/api/research/volatility/start", dependencies=[Depends(verify_api_key)])
 @limiter.limit("1/5minutes")
-async def start_small_caps_scan(request: Request, all_caps: bool = False):
+async def start_volatility_scan(request: Request, all_caps: bool = False):
     # request is required (unused directly) - slowapi's @limiter.limit
     # inspects the endpoint signature for a Request param to extract the
     # rate-limit key from (see app/limiter.py's rate_limit_key).
@@ -30,9 +30,9 @@ async def start_small_caps_scan(request: Request, all_caps: bool = False):
     return start_scan(all_caps=all_caps)
 
 
-@router.get("/api/research/small-caps/status", dependencies=[Depends(verify_api_key)])
+@router.get("/api/research/volatility/status", dependencies=[Depends(verify_api_key)])
 @limiter.limit("30/minute")
-async def small_caps_scan_status(request: Request):
+async def volatility_scan_status(request: Request):
     # Cheap (reads an in-memory dict, no yfinance calls) - overridden to a
     # much higher limit than the 10/minute default specifically so the
     # frontend can poll this every few seconds while a scan is running

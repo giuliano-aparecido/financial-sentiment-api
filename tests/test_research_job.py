@@ -50,8 +50,8 @@ def _patch_scan(monkeypatch, *, crash_rebound_rows=None, today_rows=None, delay=
     def fake_today(domestic):
         return pd.DataFrame(today_rows or [])
 
-    monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_crash_rebound)
-    monkeypatch.setattr(research_job.swiss_small_cap_today_screener, "run_scan", fake_today)
+    monkeypatch.setattr(research_job.swiss_crash_rebound, "run_scan", fake_crash_rebound)
+    monkeypatch.setattr(research_job.swiss_today_screener, "run_scan", fake_today)
     crash_rebound_calls.discover_calls = discover_calls  # exposed for all_caps-threading tests
     return crash_rebound_calls
 
@@ -176,7 +176,7 @@ def test_crash_rebound_result_reuses_cache_within_same_day(monkeypatch):
         calls.append(domestic)
         return pd.DataFrame([{"ticker": "A.SW", "call_number": len(calls)}])
 
-    monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
+    monkeypatch.setattr(research_job.swiss_crash_rebound, "run_scan", fake_run_scan)
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
 
     first = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
@@ -194,7 +194,7 @@ def test_crash_rebound_result_recomputes_on_a_new_day(monkeypatch):
         calls.append(domestic)
         return pd.DataFrame([{"ticker": "A.SW", "call_number": len(calls)}])
 
-    monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
+    monkeypatch.setattr(research_job.swiss_crash_rebound, "run_scan", fake_run_scan)
 
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
     first = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)
@@ -217,7 +217,7 @@ def test_crash_rebound_result_recomputes_when_all_caps_mode_changes_same_day(mon
         calls.append(domestic)
         return pd.DataFrame([{"ticker": "A.SW", "call_number": len(calls)}])
 
-    monkeypatch.setattr(research_job.swiss_small_cap_crash_rebound, "run_scan", fake_run_scan)
+    monkeypatch.setattr(research_job.swiss_crash_rebound, "run_scan", fake_run_scan)
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
 
     small_cap_result = research_job._crash_rebound_result({"A.SW": {}}, all_caps=False)

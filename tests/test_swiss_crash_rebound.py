@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-import app.services.swiss_small_cap_crash_rebound as crash_rebound_module
-from app.services.swiss_small_cap_crash_rebound import attach_news, find_crash_then_rebound, run_scan
+import app.services.swiss_crash_rebound as crash_rebound_module
+from app.services.swiss_crash_rebound import attach_news, find_crash_then_rebound, run_scan
 
 
 def _ohlcv_frame(dates, closes, volumes):
