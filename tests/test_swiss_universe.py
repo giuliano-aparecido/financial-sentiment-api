@@ -120,6 +120,7 @@ def test_discover_candidates_falls_back_to_static_snapshot_on_screener_failure(m
     assert candidates == {
         symbol: {"symbol": symbol, "quoteType": "EQUITY", "longName": name, "sector": sector}
         for symbol, (name, sector) in swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT.items()
+        if symbol not in swiss_universe_module.EXCLUDED_TICKERS
     }
 
 
@@ -216,6 +217,63 @@ def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
     assert dict(fake._session.cookies) == {"A1": "abc", "A3": "def"}
 
 
+def test_smi_tickers_are_excluded_from_excluded_tickers():
+    # SMI_TICKERS must actually take effect via EXCLUDED_TICKERS, not just
+    # exist as an unused set - both discover_candidates code paths filter
+    # on EXCLUDED_TICKERS (see _discover_candidates_live and the static
+    # fallback branch), so this is the one thing that has to be true for
+    # either path to actually exclude them.
+    assert swiss_universe_module.SMI_TICKERS <= swiss_universe_module.EXCLUDED_TICKERS
+
+
+def test_smi_tickers_all_present_in_static_snapshot():
+    # Sanity check against typos in SMI_TICKERS (hand-maintained, see its
+    # own comment) - every symbol in it should be a real ticker that
+    # actually showed up in a live capture, not a guessed/misremembered
+    # one.
+    missing = swiss_universe_module.SMI_TICKERS - set(swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT)
+    assert missing == set()
+
+
+def test_discover_candidates_static_fallback_excludes_smi_names(monkeypatch):
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates(
+        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
+        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
+    )
+    assert "NESN.SW" not in candidates  # Nestle
+    assert "NOVN.SW" not in candidates  # Novartis
+    assert "UBSG.SW" not in candidates  # UBS
+    # A genuinely small/mid-cap name should still be present - this isn't
+    # asserting the fallback returns an empty dict.
+    assert "INRN.SW" in candidates
+
+
+def test_discover_candidates_live_excludes_smi_names(monkeypatch):
+    def fake_screen(query, offset, size, sortField, sortAsc):
+        if offset > 0:
+            return {"quotes": [], "total": 1}
+        return {
+            "quotes": [
+                {"symbol": "NESN.SW", "quoteType": "EQUITY"},
+                {"symbol": "REAL.SW", "quoteType": "EQUITY"},
+            ],
+            "total": 2,
+        }
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", fake_screen)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates()
+    assert "NESN.SW" not in candidates
+    assert "REAL.SW" in candidates
+
+
 def test_all_caps_band_is_wider_than_small_cap_band():
     assert swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF == swiss_universe_module.MIN_MARKET_CAP_CHF
     assert swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF > swiss_universe_module.MAX_MARKET_CAP_CHF
@@ -250,7 +308,7 @@ def test_discover_candidates_static_fallback_still_used_for_all_caps_bounds(monk
         min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
         max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
     )
-    assert "NESN.SW" in candidates
+    assert "INRN.SW" in candidates  # non-SMI name, present regardless of band
 
 
 def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):

@@ -15,6 +15,13 @@ companies":
      region+market-cap+quoteType==EQUITY filters otherwise). Only this
      per-company `country` field actually distinguishes domestic from
      foreign - the region/exchange filters alone do not.
+
+An optional wider ALL_CAPS_MIN/MAX_MARKET_CAP_CHF band (see
+research_job.start_scan's all_caps parameter) extends discovery beyond
+small caps - but always excludes SMI_TICKERS regardless of band (see that
+set's own comment): this scan is looking for VOLATILE tickers, and the
+SMI's 20 largest/most-liquid names are the opposite of that, so they're
+excluded on purpose rather than just being an unlikely match.
 """
 
 import datetime
@@ -95,12 +102,62 @@ ALL_CAPS_MAX_MARKET_CAP_CHF = 1_000_000_000_000
 # is a conservative default, not a measured cap.
 INFO_REQUEST_DELAY_SECONDS = 0.3
 
+# SMI (Swiss Market Index) constituents - the 20 largest, most liquid,
+# most heavily analyst-covered names on SIX. Excluded from discovery, not
+# because they fail any correctness check (they're all honest,
+# Switzerland-domiciled operating companies), but because this scan's
+# whole point - crash-then-rebound and big-daily-loss detection - is
+# finding VOLATILE tickers, and SMI names are the opposite end of that
+# spectrum: heavily traded, closely watched, and structurally the least
+# likely names on the exchange to produce the kind of move this scan is
+# looking for. Applies to BOTH small-cap and all-caps modes, though it's
+# a no-op for small-cap (these names are all far above MAX_MARKET_CAP_CHF
+# already) - only matters once ALL_CAPS_MIN/MAX_MARKET_CAP_CHF widens the
+# band enough to reach them.
+#
+# Confirmed live via Wikipedia's SMI constituent table on 2026-08-13
+# (https://en.wikipedia.org/wiki/Swiss_Market_Index) - SIX itself reviews
+# SMI composition once a year each September, so this WILL drift after
+# the next review; re-check that table (or SIX's own six-group.com
+# constituent listing) and update this set when it does. Multiple tickers
+# per company where a company trades more than one share-class line on
+# SIX (e.g. Novartis' NOVN.SW ordinary line and its NOVNEE.SW second
+# line, confirmed present as distinct symbols in
+# STATIC_DOMESTIC_TICKER_SNAPSHOT below) - both listings are the same
+# company, so both are excluded.
+SMI_TICKERS = {
+    "NOVN.SW", "NOVNEE.SW",  # Novartis
+    "RO.SW", "ROP.SW",       # Roche
+    "NESN.SW",                # Nestle
+    "ABBN.SW", "ABBNE.SW",   # ABB
+    "UBSG.SW", "UBSGE.SW",   # UBS
+    "CFR.SW",                 # Richemont
+    "ZURN.SW",                # Zurich Insurance
+    "HOLN.SW",                # Holcim
+    "SREN.SW", "SRENE.SW",   # Swiss Re
+    "LONN.SW",                # Lonza
+    "SCMN.SW",                # Swisscom
+    "GIVN.SW",                # Givaudan
+    "ALC.SW",                 # Alcon
+    "SIKA.SW",                # Sika
+    "AMRZ.SW", "AMRZE.SW",   # Amrize
+    "SLHN.SW",                # Swiss Life
+    "KNIN.SW",                # Kuehne + Nagel
+    "GEBN.SW", "GEBNE.SW",   # Geberit
+    "PGHN.SW",                # Partners Group
+    "LOGN.SW", "LOGNE.SW",   # Logitech
+}
+
 # Passes the market-cap band and Switzerland-domicile checks but isn't a
 # normal operating company, so it doesn't belong in a "small cap" universe
 # regardless: SNBN.SW is the Swiss National Bank (confirmed live: shows up
 # in the market-cap band, mostly canton-held). Add more symbols here as
-# other non-operating-company edge cases turn up.
-EXCLUDED_TICKERS = {"SNBN.SW"}
+# other non-operating-company edge cases turn up. Merged with SMI_TICKERS
+# (see its own comment) since both are "known good companies that still
+# don't belong in this scan's universe," just for different reasons - one
+# filtering pass covers both (see _discover_candidates_live and
+# discover_candidates' static-fallback branch below).
+EXCLUDED_TICKERS = {"SNBN.SW"} | SMI_TICKERS
 
 
 # Static fallback for when Yahoo's screener endpoint (yf.screen, used by
