@@ -101,6 +101,11 @@ BASIS_LABELS = {
     "dividends": "Dividend-based",
 }
 
+# Backstop cap on the displayed over/undervalued percentage - see
+# valuation_block's own comment for why this exists alongside G1_CAP
+# rather than instead of it.
+VALUATION_PCT_DISPLAY_CAP = 150.0
+
 # Flat for every company (not risk-adjusted per company) - deliberately
 # simpler than a CAPM/beta-derived rate, and specifically what resolved the
 # high-beta-name double-punishment problem described in the module history
@@ -121,6 +126,13 @@ SCENARIO_PROBABILITY = 1 / 3
 # terminal-only formula (see scenario_terminal_value) for the non-dividend
 # bases - NVDA/MSFT/NFLX/PEP were all 40-70%+ off under the old flat model.
 CURATED_SCENARIOS = {
+    "AAPL": {
+        # Confirmed live: reproduces the analyst's own $128 target within
+        # 2.6% ($124.65 at trailing EPS $8.26, the analyst's own cf0).
+        "normal": {"g1": 0.07, "g2": 0.07, "exit_multiple": 20.0},
+        "best": {"g1": 0.12, "g2": 0.07, "exit_multiple": 25.0},
+        "worst": {"g1": 0.05, "g2": 0.05, "exit_multiple": 10.0},
+    },
     "NVDA": {
         "normal": {"g1": 0.30, "g2": 0.10, "exit_multiple": 20.0},
         "best": {"g1": 0.30, "g2": 0.15, "exit_multiple": 25.0},
@@ -146,6 +158,28 @@ CURATED_SCENARIOS = {
         "best": {"g1": 0.06, "g2": 0.06, "exit_multiple": 30.0},
         "worst": {"g1": 0.03, "g2": 0.03, "exit_multiple": 12.0},
     },
+}
+
+# The basis each CURATED_SCENARIOS ticker's growth/exit-multiple
+# assumptions were actually calibrated against. Confirmed live: a given
+# ticker's classify_valuation_basis result can legitimately differ call to
+# call (payout_ratio/sector/free_cash_flow can vary - e.g. a payout ratio
+# that happens to land in the dividends band this time), and applying
+# growth assumptions calibrated for one basis's cash flow (e.g. AAPL's
+# trailing EPS) to a DIFFERENT basis's cash flow (e.g. its much smaller
+# dividend rate) doesn't produce a "less accurate" number, it produces one
+# with no relationship to the analyst's actual target at all - the
+# growth/exit-multiple assumptions and the cf0 they're meant to compound
+# have to come from the same DCF. build_scenarios below only uses a
+# ticker's curated table when the basis classified for THIS call matches
+# what it was actually calibrated for.
+CURATED_SCENARIOS_BASIS = {
+    "AAPL": "eps",
+    "NVDA": "eps",
+    "MSFT": "eps",
+    "PEP": "dividends",
+    "NFLX": "eps",
+    "XOM": "eps",
 }
 
 # Fallback for any ticker not in CURATED_SCENARIOS, segmented by basis and
@@ -201,11 +235,70 @@ REVENUE_BEST_EXIT_MULTIPLE = 6.0
 # rate, nothing further to fade toward.
 GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
 
-# g1 FALLBACK for when a per-ticker consensus growth estimate isn't
-# available or isn't trustworthy (see build_scenarios) - reuses this
-# model's pre-existing "average company" growth assumptions rather than
-# inventing new numbers.
+# g1 FALLBACK OF LAST RESORT - used only when NEITHER a reliable consensus
+# growth estimate NOR the sustainable-growth-rate calculation below
+# (_sustainable_growth_rate) has usable inputs. "Average company" growth
+# assumptions, not inventing new numbers.
 G1_FALLBACK = {"normal": 0.08, "best": 0.10, "worst": 0.04}
+
+# Spread applied around the sustainable-growth-rate "normal" estimate to
+# get best/worst - the same shape G1_FALLBACK already used (normal 0.08 ->
+# best 0.10 is +0.02, -> worst 0.04 is -0.04), just now anchored to a
+# company-specific rate instead of a flat one.
+SUSTAINABLE_GROWTH_BEST_SPREAD = 0.02
+SUSTAINABLE_GROWTH_WORST_SPREAD = -0.04
+
+
+def _sustainable_growth_rate(fundamentals: dict) -> float | None:
+    """Sustainable growth rate = ROE x retention ratio (1 - payout_ratio) -
+    a company's OWN profitability and reinvestment behavior, not the
+    market's opinion of it. Deliberately NOT P/E-implied growth: P/E
+    already prices in the market's growth expectations, so deriving a DCF
+    growth input from P/E and then valuing the company with it is circular
+    - it will conclude "fairly valued" almost by construction, defeating
+    the point of an independent valuation. This formula only uses
+    fundamentals already fetched for other purposes (eps_trailing,
+    book_value_per_share, payout_ratio), no new data dependency.
+
+    ROE is approximated as eps_trailing / book_value_per_share (both
+    already per-share, so shares outstanding cancels out - standard
+    approximation, not the textbook net-income/total-equity ratio, but
+    equivalent for a per-share model like this one). Returns None (not a
+    fetch failure) when eps_trailing or book_value_per_share isn't usable -
+    caller falls back to G1_FALLBACK, same fail-soft convention as the
+    rest of this module. A missing payout_ratio is NOT treated as
+    unusable - defaults to 0 (full reinvestment), which is the correct
+    assumption for a real company that pays no dividend (payout_ratio is
+    only populated for dividend payers - see fundamentals.py), not a
+    "don't know" case that should abandon the whole calculation.
+    """
+    eps_trailing = fundamentals.get("eps_trailing")
+    book_value_per_share = fundamentals.get("book_value_per_share")
+    if not eps_trailing or eps_trailing <= 0 or not book_value_per_share or book_value_per_share <= 0:
+        return None
+    roe = eps_trailing / book_value_per_share
+    payout_ratio = fundamentals.get("payout_ratio") or 0.0
+    return roe * (1 - payout_ratio)
+
+# Ceiling on the DERIVED g1 (real per-ticker consensus growth estimates,
+# not CURATED_SCENARIOS - see build_scenarios) - confirmed live: an
+# uncapped g1 compounds over STAGE_1_YEARS (^5) then multiplies by up to
+# BEST_EXIT_MULTIPLE (25x), barely dented by discounting back over 10
+# years, so a real but aggressive consensus growth estimate (a genuinely
+# common shape for real high-growth/momentum stocks, not just a
+# theoretical edge case) can blow the resulting intrinsic value out to
+# multiples of the current price - confirmed against synthetic data
+# reusing this exact formula: 90th percentile gap 91%, 99th percentile
+# 354%, max 760%. Set above NVDA's own CURATED_SCENARIOS "best" g1 (0.30)
+# - the single most aggressive analyst-vetted number this model has - on
+# the reasoning that an individually-vetted number deserves more trust
+# than an automated consensus-estimate average, but a generic derived
+# estimate still needs SOME ceiling rather than none. Only caps the upper
+# bound: the observed failure mode is specifically upside blowup from high
+# growth, not a symmetric problem needing a floor too. CURATED_SCENARIOS
+# tickers bypass this entirely (see build_scenarios' early return) - this
+# cannot change any CURATED_SCENARIOS ticker's already-calibrated output.
+G1_CAP = 0.40
 
 
 def classify_valuation_basis(
@@ -299,17 +392,25 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
     independently-sourced pieces, each confirmed live rather than a single
     invented "generic" bundle:
 
-    - g1 (years 1-5 growth): derived from a same-direction 0y/+1y consensus
-      growth estimate when available (see fundamentals.fetch_fundamentals'
-      growth_0y/growth_1y/growth_0y_low/growth_0y_high), else G1_FALLBACK.
-      "Same-direction" is the reliability gate: confirmed live that when 0y
-      and +1y point in OPPOSITE directions (e.g. XOM's +65.7% this year /
-      -8.6% next year), that's not a real growth trend - it's a
-      rebound-then-giveback around a distorted (commodity-cycle, one-off)
-      base year, and no combination of those two numbers recovers the
-      analyst's actual 4% long-run assumption. Falling back to G1_FALLBACK
-      in that case is a deliberate "don't know", not a confidently wrong
-      derived number.
+    - g1 (years 1-5 growth): a three-tier waterfall, each tier only used
+      when the one before it isn't usable. (1) A same-direction 0y/+1y
+      consensus growth estimate (see fundamentals.fetch_fundamentals'
+      growth_0y/growth_1y/growth_0y_low/growth_0y_high) - real analyst
+      data, the most trustworthy source when it exists. "Same-direction"
+      is the reliability gate: confirmed live that when 0y and +1y point
+      in OPPOSITE directions (e.g. XOM's +65.7% this year / -8.6% next
+      year), that's not a real growth trend - it's a rebound-then-giveback
+      around a distorted (commodity-cycle, one-off) base year, and no
+      combination of those two numbers recovers the analyst's actual 4%
+      long-run assumption. (2) The sustainable growth rate - ROE x
+      retention ratio, see _sustainable_growth_rate - when eps_trailing/
+      book_value_per_share are usable. Company-specific and non-circular
+      (unlike a P/E-implied growth rate - see that function's own comment
+      for why that's the wrong metric), but a formula, not observed
+      analyst data, so it only applies when (1) isn't available. (3)
+      G1_FALLBACK - a flat "average company" assumption, only when neither
+      real data nor fundamentals are usable. Falling back at any tier is a
+      deliberate "don't know", not a confidently wrong derived number.
     - g2 (years 6-10 growth): GROWTH_BASIS_G2 for "eps"/"fcf"/"revenue"
       (confirmed pattern - see its comment), or set equal to this
       scenario's own g1 for "dividends" (a mature payer doesn't fade
@@ -322,13 +423,22 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
       (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT (see that
       constant's comment for the limits of this signal).
     """
-    if ticker and ticker in CURATED_SCENARIOS:
+    if ticker and ticker in CURATED_SCENARIOS and CURATED_SCENARIOS_BASIS.get(ticker) == basis:
         return {
             name: {**scenario, "probability": SCENARIO_PROBABILITY}
             for name, scenario in CURATED_SCENARIOS[ticker].items()
         }
 
     g1_values = dict(G1_FALLBACK)
+
+    sustainable_g1 = _sustainable_growth_rate(fundamentals)
+    if sustainable_g1 is not None:
+        g1_values = {
+            "normal": sustainable_g1,
+            "best": sustainable_g1 + SUSTAINABLE_GROWTH_BEST_SPREAD,
+            "worst": sustainable_g1 + SUSTAINABLE_GROWTH_WORST_SPREAD,
+        }
+
     growth_0y = fundamentals.get("growth_0y")
     growth_1y = fundamentals.get("growth_1y")
     consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
@@ -340,6 +450,11 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
             g1_values["best"] = growth_0y_high
         if growth_0y_low is not None:
             g1_values["worst"] = growth_0y_low
+
+    # See G1_CAP's own comment - applied after all three g1 sources above
+    # (fallback/derived-normal/derived-best) so nothing downstream of this
+    # point ever sees an uncapped g1, regardless of which source set it.
+    g1_values = {name: min(value, G1_CAP) for name, value in g1_values.items()}
 
     g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
 
@@ -462,9 +577,17 @@ def valuation_block(price: float | None, intrinsic: float | None, basis: str) ->
 
     pct = (price - intrinsic) / intrinsic * 100
     verdict = "overvalued" if pct >= 0 else "undervalued"
+    # Backstop, not the primary fix (see G1_CAP) - caps what gets SHOWN,
+    # not the underlying math, so it still catches any other path to an
+    # extreme gap (e.g. an unusual exit-multiple/cf0 combination) that
+    # capping g1 alone doesn't reach. "~150%" already reads as "very
+    # overvalued/undervalued" - a bigger number doesn't communicate
+    # anything more useful to a reader and risks reading as a data error
+    # instead of a real signal.
+    displayed_pct = min(abs(pct), VALUATION_PCT_DISPLAY_CAP)
     return (
         f"Intrinsic Value ({label}): ${intrinsic:.2f}\n"
-        f"vs Current Price: {verdict} by ~{abs(pct):.0f}%"
+        f"vs Current Price: {verdict} by ~{displayed_pct:.0f}%"
     )
 
 

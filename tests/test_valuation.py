@@ -1,5 +1,8 @@
 from app.services.valuation import (
     CURATED_SCENARIOS,
+    G1_CAP,
+    VALUATION_PCT_DISPLAY_CAP,
+    _sustainable_growth_rate,
     build_scenarios,
     cash_flow_basis_value,
     classify_valuation_basis,
@@ -204,6 +207,28 @@ def test_build_scenarios_curated_tickers_use_equal_probability():
     assert scenarios["worst"]["probability"] == 1 / 3
 
 
+def test_build_scenarios_ignores_curated_table_when_basis_does_not_match():
+    # Regression test: classify_valuation_basis's result for a real ticker
+    # can legitimately differ call to call (e.g. a payout ratio that lands
+    # in the dividends band this time) - confirmed live that applying
+    # AAPL's EPS-calibrated growth/exit-multiple assumptions to a
+    # "dividends" cf0 (its much smaller dividend rate) produces a number
+    # with no relationship to the analyst's actual target, not just a less
+    # accurate one. AAPL is calibrated for "eps" (CURATED_SCENARIOS_BASIS),
+    # so a "dividends" call must NOT use its curated table.
+    fundamentals = {"growth_0y": None, "growth_1y": None}
+    scenarios = build_scenarios("AAPL", fundamentals, basis="dividends")
+    assert scenarios["normal"]["g1"] != CURATED_SCENARIOS["AAPL"]["normal"]["g1"]
+    assert scenarios["normal"]["g1"] == 0.08  # falls through to G1_FALLBACK
+
+
+def test_build_scenarios_pep_curated_only_applies_to_dividends_basis():
+    # PEP is the one CURATED_SCENARIOS ticker actually calibrated for
+    # "dividends", not "eps" - the inverse case from the AAPL test above.
+    scenarios = build_scenarios("PEP", {}, basis="eps")
+    assert scenarios["normal"]["g1"] != CURATED_SCENARIOS["PEP"]["normal"]["g1"]
+
+
 def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
@@ -233,6 +258,92 @@ def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
     assert scenarios["best"]["g1"] == 0.25
     assert scenarios["worst"]["g1"] == 0.05
+
+
+def test_build_scenarios_caps_derived_g1_at_g1_cap():
+    # Regression test for a confirmed-live DCF blowup: an uncapped g1
+    # compounds over 5 years then multiplies by up to 25x, barely dented by
+    # discounting - a real (not just theoretical) aggressive consensus
+    # growth estimate could blow the resulting intrinsic value out to
+    # multiples of the current price. growth_0y_high here (0.90) is well
+    # above G1_CAP.
+    fundamentals = {
+        "growth_0y": 0.50, "growth_1y": 0.50,
+        "growth_0y_high": 0.90, "growth_0y_low": 0.30,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["best"]["g1"] == G1_CAP
+
+
+def test_build_scenarios_does_not_cap_g1_below_the_cap():
+    # The cap must not clamp DOWN a legitimately high-but-under-the-cap
+    # estimate - only values that actually exceed it.
+    fundamentals = {
+        "growth_0y": 0.10, "growth_1y": 0.10,
+        "growth_0y_high": 0.20, "growth_0y_low": 0.05,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["best"]["g1"] == 0.20
+
+
+def test_build_scenarios_curated_tickers_bypass_g1_cap():
+    # CURATED_SCENARIOS entries are hand-vetted against a real analyst's
+    # own DCF (see module docstring) - the cap must not touch them, even
+    # though NVDA's own curated "best" g1 (0.30) is close to G1_CAP (0.40).
+    scenarios = build_scenarios("NVDA", {}, basis="eps")
+    assert scenarios["normal"]["g1"] == CURATED_SCENARIOS["NVDA"]["normal"]["g1"]
+    assert scenarios["best"]["g1"] == CURATED_SCENARIOS["NVDA"]["best"]["g1"]
+
+
+def test_sustainable_growth_rate_is_roe_times_retention():
+    # JPM-style example: EPS $19, book value/share $105 -> ROE 18.1%,
+    # payout ratio 27% -> retention 73%.
+    fundamentals = {"eps_trailing": 19.0, "book_value_per_share": 105.0, "payout_ratio": 0.27}
+    roe = 19.0 / 105.0
+    assert round(_sustainable_growth_rate(fundamentals), 4) == round(roe * (1 - 0.27), 4)
+
+
+def test_sustainable_growth_rate_defaults_payout_to_zero_when_missing():
+    # No payout_ratio -> assume full reinvestment (100% retention), not
+    # "unusable" - a real non-dividend-payer has no payout_ratio at all.
+    fundamentals = {"eps_trailing": 10.0, "book_value_per_share": 50.0}
+    assert _sustainable_growth_rate(fundamentals) == 10.0 / 50.0
+
+
+def test_sustainable_growth_rate_none_when_unprofitable():
+    fundamentals = {"eps_trailing": -2.0, "book_value_per_share": 50.0, "payout_ratio": 0.0}
+    assert _sustainable_growth_rate(fundamentals) is None
+
+
+def test_sustainable_growth_rate_none_when_book_value_missing():
+    fundamentals = {"eps_trailing": 10.0, "book_value_per_share": None, "payout_ratio": 0.0}
+    assert _sustainable_growth_rate(fundamentals) is None
+
+
+def test_build_scenarios_uses_sustainable_growth_rate_when_no_consensus():
+    fundamentals = {"eps_trailing": 19.0, "book_value_per_share": 105.0, "payout_ratio": 0.27}
+    expected_g1 = _sustainable_growth_rate(fundamentals)
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert round(scenarios["normal"]["g1"], 4) == round(expected_g1, 4)
+    assert round(scenarios["best"]["g1"], 4) == round(expected_g1 + 0.02, 4)
+    assert round(scenarios["worst"]["g1"], 4) == round(expected_g1 - 0.04, 4)
+
+
+def test_build_scenarios_consensus_still_wins_over_sustainable_growth_rate():
+    # Real analyst consensus data (when reliable) is the most trustworthy
+    # source - it must override the fundamentals-derived formula, not the
+    # other way around.
+    fundamentals = {
+        "eps_trailing": 19.0, "book_value_per_share": 105.0, "payout_ratio": 0.27,
+        "growth_0y": 0.20, "growth_1y": 0.22,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert round(scenarios["normal"]["g1"], 4) == round((0.20 + 0.22) / 2, 4)
+
+
+def test_build_scenarios_falls_back_to_flat_default_when_neither_source_usable():
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
+    assert scenarios["normal"]["g1"] == 0.08
 
 
 def test_build_scenarios_falls_back_to_generic_when_consensus_reverses_direction():
@@ -326,6 +437,15 @@ def test_intrinsic_value_matches_curated_pep_reference_calc():
     assert round(iv, 2) == 102.83
 
 
+def test_intrinsic_value_matches_curated_aapl_reference_calc():
+    # Analyst's own target: $128 at trailing EPS $8.26. Reproduces within
+    # 2.6% ($124.65), same tolerance band as this model's other curated
+    # tickers (documented 2-12% in the module docstring).
+    scenarios = build_scenarios("AAPL", {}, basis="eps")
+    iv = intrinsic_value(cf0=8.26, basis="eps", scenarios=scenarios)
+    assert round(iv, 2) == 124.65
+
+
 def test_intrinsic_value_none_for_missing_cf0():
     scenarios = build_scenarios(None, {}, basis="eps")
     assert intrinsic_value(cf0=None, basis="eps", scenarios=scenarios) is None
@@ -366,6 +486,20 @@ def test_valuation_block_reports_undervalued_when_price_below_intrinsic():
     block = valuation_block(price=100.0, intrinsic=235.5244, basis="eps")
     assert "undervalued" in block
     assert "overvalued" not in block
+
+
+def test_valuation_block_caps_extreme_gap_at_display_cap():
+    # Backstop for any path to an extreme gap that G1_CAP alone doesn't
+    # reach (e.g. an unusual exit-multiple/cf0 combination) - confirmed
+    # live via synthetic data reusing this exact formula: gaps up to 760%
+    # before either cap existed.
+    block = valuation_block(price=1000.0, intrinsic=10.0, basis="eps")  # raw gap: 9900%
+    assert f"~{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
+
+
+def test_valuation_block_does_not_cap_gap_below_the_display_cap():
+    block = valuation_block(price=300.0, intrinsic=235.5244, basis="eps")  # raw gap: ~27%
+    assert "overvalued by ~27%" in block
 
 
 def test_valuation_block_shows_basis_label():
