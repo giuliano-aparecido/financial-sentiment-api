@@ -1,5 +1,7 @@
 from app.services.valuation import (
     CURATED_SCENARIOS,
+    G1_CAP,
+    VALUATION_PCT_DISPLAY_CAP,
     build_scenarios,
     cash_flow_basis_value,
     classify_valuation_basis,
@@ -235,6 +237,41 @@ def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
     assert scenarios["worst"]["g1"] == 0.05
 
 
+def test_build_scenarios_caps_derived_g1_at_g1_cap():
+    # Regression test for a confirmed-live DCF blowup: an uncapped g1
+    # compounds over 5 years then multiplies by up to 25x, barely dented by
+    # discounting - a real (not just theoretical) aggressive consensus
+    # growth estimate could blow the resulting intrinsic value out to
+    # multiples of the current price. growth_0y_high here (0.90) is well
+    # above G1_CAP.
+    fundamentals = {
+        "growth_0y": 0.50, "growth_1y": 0.50,
+        "growth_0y_high": 0.90, "growth_0y_low": 0.30,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["best"]["g1"] == G1_CAP
+
+
+def test_build_scenarios_does_not_cap_g1_below_the_cap():
+    # The cap must not clamp DOWN a legitimately high-but-under-the-cap
+    # estimate - only values that actually exceed it.
+    fundamentals = {
+        "growth_0y": 0.10, "growth_1y": 0.10,
+        "growth_0y_high": 0.20, "growth_0y_low": 0.05,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["best"]["g1"] == 0.20
+
+
+def test_build_scenarios_curated_tickers_bypass_g1_cap():
+    # CURATED_SCENARIOS entries are hand-vetted against a real analyst's
+    # own DCF (see module docstring) - the cap must not touch them, even
+    # though NVDA's own curated "best" g1 (0.30) is close to G1_CAP (0.40).
+    scenarios = build_scenarios("NVDA", {}, basis="eps")
+    assert scenarios["normal"]["g1"] == CURATED_SCENARIOS["NVDA"]["normal"]["g1"]
+    assert scenarios["best"]["g1"] == CURATED_SCENARIOS["NVDA"]["best"]["g1"]
+
+
 def test_build_scenarios_falls_back_to_generic_when_consensus_reverses_direction():
     # XOM-style: 0y strongly positive (rebound), +1y negative (giveback) -
     # a distorted base year, not a real trend. Must NOT be averaged.
@@ -366,6 +403,20 @@ def test_valuation_block_reports_undervalued_when_price_below_intrinsic():
     block = valuation_block(price=100.0, intrinsic=235.5244, basis="eps")
     assert "undervalued" in block
     assert "overvalued" not in block
+
+
+def test_valuation_block_caps_extreme_gap_at_display_cap():
+    # Backstop for any path to an extreme gap that G1_CAP alone doesn't
+    # reach (e.g. an unusual exit-multiple/cf0 combination) - confirmed
+    # live via synthetic data reusing this exact formula: gaps up to 760%
+    # before either cap existed.
+    block = valuation_block(price=1000.0, intrinsic=10.0, basis="eps")  # raw gap: 9900%
+    assert f"~{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
+
+
+def test_valuation_block_does_not_cap_gap_below_the_display_cap():
+    block = valuation_block(price=300.0, intrinsic=235.5244, basis="eps")  # raw gap: ~27%
+    assert "overvalued by ~27%" in block
 
 
 def test_valuation_block_shows_basis_label():

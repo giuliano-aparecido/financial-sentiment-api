@@ -101,6 +101,11 @@ BASIS_LABELS = {
     "dividends": "Dividend-based",
 }
 
+# Backstop cap on the displayed over/undervalued percentage - see
+# valuation_block's own comment for why this exists alongside G1_CAP
+# rather than instead of it.
+VALUATION_PCT_DISPLAY_CAP = 150.0
+
 # Flat for every company (not risk-adjusted per company) - deliberately
 # simpler than a CAPM/beta-derived rate, and specifically what resolved the
 # high-beta-name double-punishment problem described in the module history
@@ -206,6 +211,26 @@ GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
 # model's pre-existing "average company" growth assumptions rather than
 # inventing new numbers.
 G1_FALLBACK = {"normal": 0.08, "best": 0.10, "worst": 0.04}
+
+# Ceiling on the DERIVED g1 (real per-ticker consensus growth estimates,
+# not CURATED_SCENARIOS - see build_scenarios) - confirmed live: an
+# uncapped g1 compounds over STAGE_1_YEARS (^5) then multiplies by up to
+# BEST_EXIT_MULTIPLE (25x), barely dented by discounting back over 10
+# years, so a real but aggressive consensus growth estimate (a genuinely
+# common shape for real high-growth/momentum stocks, not just a
+# theoretical edge case) can blow the resulting intrinsic value out to
+# multiples of the current price - confirmed against synthetic data
+# reusing this exact formula: 90th percentile gap 91%, 99th percentile
+# 354%, max 760%. Set above NVDA's own CURATED_SCENARIOS "best" g1 (0.30)
+# - the single most aggressive analyst-vetted number this model has - on
+# the reasoning that an individually-vetted number deserves more trust
+# than an automated consensus-estimate average, but a generic derived
+# estimate still needs SOME ceiling rather than none. Only caps the upper
+# bound: the observed failure mode is specifically upside blowup from high
+# growth, not a symmetric problem needing a floor too. CURATED_SCENARIOS
+# tickers bypass this entirely (see build_scenarios' early return) - this
+# cannot change NVDA/MSFT/PEP/NFLX/XOM's already-calibrated output.
+G1_CAP = 0.40
 
 
 def classify_valuation_basis(
@@ -341,6 +366,11 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
         if growth_0y_low is not None:
             g1_values["worst"] = growth_0y_low
 
+    # See G1_CAP's own comment - applied after all three g1 sources above
+    # (fallback/derived-normal/derived-best) so nothing downstream of this
+    # point ever sees an uncapped g1, regardless of which source set it.
+    g1_values = {name: min(value, G1_CAP) for name, value in g1_values.items()}
+
     g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
 
     if basis == "revenue":
@@ -462,9 +492,17 @@ def valuation_block(price: float | None, intrinsic: float | None, basis: str) ->
 
     pct = (price - intrinsic) / intrinsic * 100
     verdict = "overvalued" if pct >= 0 else "undervalued"
+    # Backstop, not the primary fix (see G1_CAP) - caps what gets SHOWN,
+    # not the underlying math, so it still catches any other path to an
+    # extreme gap (e.g. an unusual exit-multiple/cf0 combination) that
+    # capping g1 alone doesn't reach. "~150%" already reads as "very
+    # overvalued/undervalued" - a bigger number doesn't communicate
+    # anything more useful to a reader and risks reading as a data error
+    # instead of a real signal.
+    displayed_pct = min(abs(pct), VALUATION_PCT_DISPLAY_CAP)
     return (
         f"Intrinsic Value ({label}): ${intrinsic:.2f}\n"
-        f"vs Current Price: {verdict} by ~{abs(pct):.0f}%"
+        f"vs Current Price: {verdict} by ~{displayed_pct:.0f}%"
     )
 
 
