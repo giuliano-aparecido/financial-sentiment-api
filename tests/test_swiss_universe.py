@@ -216,6 +216,43 @@ def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
     assert dict(fake._session.cookies) == {"A1": "abc", "A3": "def"}
 
 
+def test_all_caps_band_is_wider_than_small_cap_band():
+    assert swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF == swiss_universe_module.MIN_MARKET_CAP_CHF
+    assert swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF > swiss_universe_module.MAX_MARKET_CAP_CHF
+
+
+def test_static_snapshot_includes_smi_large_caps_not_just_small_caps():
+    # Regression guard: the static fallback used to be captured at the
+    # small-cap band only (MIN/MAX_MARKET_CAP_CHF), so it was missing SMI
+    # giants entirely. It's now captured at the wide all-caps band so it
+    # works as a fallback for an all-caps request too - this checks a
+    # couple of well-known large caps are actually present, not just that
+    # the dict got bigger.
+    snapshot = swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT
+    assert "NESN.SW" in snapshot  # Nestle
+    assert "NOVN.SW" in snapshot  # Novartis
+    assert "UBSG.SW" in snapshot  # UBS
+
+
+def test_discover_candidates_static_fallback_still_used_for_all_caps_bounds(monkeypatch):
+    # discover_candidates' fallback doesn't filter STATIC_DOMESTIC_TICKER_
+    # SNAPSHOT by the requested min/max (no market-cap data on static
+    # entries to filter with - see that dict's own comment) - this just
+    # confirms calling with the all-caps bounds still falls back cleanly
+    # rather than erroring.
+    def _boom(*a, **kw):
+        raise Exception("simulated screener outage")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
+    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
+
+    candidates = discover_candidates(
+        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
+        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
+    )
+    assert "NESN.SW" in candidates
+
+
 def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):
     # A process that already fetched (or already seeded) its own crumb this
     # run shouldn't have it overwritten - guards against a real fetch that

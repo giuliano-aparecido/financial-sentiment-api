@@ -32,11 +32,22 @@ atomic). The lock below only guards the "is one already running, if not
 start one" check in start_scan(), which is the one place two threads could
 otherwise race to both start a scan.
 
+all_caps: when True, discover_candidates() is called with
+swiss_universe.ALL_CAPS_MIN/MAX_MARKET_CAP_CHF instead of the default
+small-cap band, so the scan covers the whole SIX-listed, Switzerland-
+domiciled universe (SMI giants included) rather than just small caps.
+Purely a discovery-time parameter - the crash-rebound and today-screener
+scan logic themselves have no cap-specific thresholds, they just operate
+over whatever `domestic` dict they're handed.
+
 Crash-rebound caching: its 3-month lookback barely changes day to day -
 once a trading day closes, that day's OHLCV doesn't change - so
 _crash_rebound_result below only recomputes it (paying the yf.download
 historical batch call) once per UTC calendar day, reusing the cached
-result for same-day re-scans. today_screener is NEVER cached - it reports
+result for same-day re-scans - now keyed on (date, all_caps) rather than
+just date, since a small-cap scan and an all-caps scan cover different
+universes and would otherwise wrongly share one day's cached result when
+a user switches modes mid-day. today_screener is NEVER cached - it reports
 live intraday quotes and always re-runs against the freshly-discovered
 `domestic` dict. Since the only way to trigger a scan at all is the
 Refresh button (no auto-poll timer), this already means today_screener's
@@ -81,7 +92,7 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
 _job: dict = {"status": "idle"}
 _job_lock = threading.Lock()
 
-_crash_rebound_cache: dict = {"date": None, "result": None}
+_crash_rebound_cache: dict = {"date": None, "all_caps": None, "result": None}
 
 
 def _now() -> str:
@@ -98,57 +109,69 @@ def _today() -> datetime.date:
     return datetime.datetime.now(datetime.timezone.utc).date()
 
 
-def _crash_rebound_result(domestic: dict) -> pd.DataFrame:
-    """Cached per calendar day (see module docstring) - returns today's
-    already-computed result if this is a same-day re-scan, otherwise
-    recomputes and caches it."""
+def _crash_rebound_result(domestic: dict, all_caps: bool) -> pd.DataFrame:
+    """Cached per (calendar day, all_caps) - see module docstring for why
+    all_caps is part of the key - returns today's already-computed result
+    for that mode if this is a same-day re-scan, otherwise recomputes and
+    caches it."""
     global _crash_rebound_cache
     today = _today()
-    if _crash_rebound_cache["date"] == today:
-        logger.info("Reusing cached crash-rebound result from %s", today)
+    if _crash_rebound_cache["date"] == today and _crash_rebound_cache["all_caps"] == all_caps:
+        logger.info("Reusing cached crash-rebound result from %s (all_caps=%s)", today, all_caps)
         return _crash_rebound_cache["result"]
     result = swiss_small_cap_crash_rebound.run_scan(domestic)
-    _crash_rebound_cache = {"date": today, "result": result}
+    _crash_rebound_cache = {"date": today, "all_caps": all_caps, "result": result}
     return result
 
 
-def _run(started_at: str) -> None:
+def _run(started_at: str, all_caps: bool) -> None:
     global _job
     try:
-        candidates = swiss_universe.discover_candidates()
+        if all_caps:
+            candidates = swiss_universe.discover_candidates(
+                min_market_cap=swiss_universe.ALL_CAPS_MIN_MARKET_CAP_CHF,
+                max_market_cap=swiss_universe.ALL_CAPS_MAX_MARKET_CAP_CHF,
+            )
+        else:
+            candidates = swiss_universe.discover_candidates()
         domestic = swiss_universe.filter_domestic(candidates)
-        crash_rebound_df = _crash_rebound_result(domestic)
+        crash_rebound_df = _crash_rebound_result(domestic, all_caps)
         today_df = swiss_small_cap_today_screener.run_scan(domestic)
         _job = {
             "status": "done",
             "started_at": started_at,
             "finished_at": _now(),
+            "all_caps": all_caps,
             "universe_size": len(domestic),
             "crash_rebound": _json_safe_records(crash_rebound_df),
             "today_screener": _json_safe_records(today_df),
         }
         logger.info(
-            "Research scan done: universe=%d crash_rebound_matches=%d today_matches=%d",
-            len(domestic), len(crash_rebound_df), len(today_df),
+            "Research scan done: all_caps=%s universe=%d crash_rebound_matches=%d today_matches=%d",
+            all_caps, len(domestic), len(crash_rebound_df), len(today_df),
         )
     except Exception as e:
         logger.exception("Research scan failed")
-        _job = {"status": "error", "started_at": started_at, "finished_at": _now(), "error": str(e)}
+        _job = {"status": "error", "started_at": started_at, "finished_at": _now(), "all_caps": all_caps, "error": str(e)}
 
 
-def start_scan() -> dict:
+def start_scan(all_caps: bool = False) -> dict:
     """Starts a new scan if none is currently running; otherwise returns
-    the already-in-flight job's current status unchanged. Either way,
-    returns the same shape get_status() does, so callers (see
-    app/routers/research.py) don't need two different response handlers
-    for "just started" vs "already running"."""
+    the already-in-flight job's current status unchanged (including
+    whatever all_caps that in-flight scan was started with - a second
+    call with a different all_caps value while one is already running
+    does NOT change or restart it, same idempotent-while-running behavior
+    as before this parameter existed). Either way, returns the same shape
+    get_status() does, so callers (see app/routers/research.py) don't
+    need two different response handlers for "just started" vs "already
+    running"."""
     global _job
     with _job_lock:
         if _job.get("status") == "running":
             return dict(_job)
         started_at = _now()
-        _job = {"status": "running", "started_at": started_at}
-        threading.Thread(target=_run, args=(started_at,), daemon=True).start()
+        _job = {"status": "running", "started_at": started_at, "all_caps": all_caps}
+        threading.Thread(target=_run, args=(started_at, all_caps), daemon=True).start()
         return dict(_job)
 
 

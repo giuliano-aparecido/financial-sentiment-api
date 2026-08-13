@@ -9,10 +9,15 @@ router = APIRouter()
 
 @router.post("/api/research/small-caps/start", dependencies=[Depends(verify_api_key)])
 @limiter.limit("1/5minutes")
-async def start_small_caps_scan(request: Request):
+async def start_small_caps_scan(request: Request, all_caps: bool = False):
     # request is required (unused directly) - slowapi's @limiter.limit
     # inspects the endpoint signature for a Request param to extract the
     # rate-limit key from (see app/limiter.py's rate_limit_key).
+    #
+    # all_caps: query param (?all_caps=true), default False so existing
+    # callers that don't pass it keep getting the small-cap-only scan
+    # unchanged - see research_job.start_scan's own docstring for what it
+    # does to the discovery band.
     #
     # Deliberately far stricter than this app's normal 10/minute default
     # (see app/limiter.py): a single scan makes ~150+ live calls to
@@ -22,7 +27,7 @@ async def start_small_caps_scan(request: Request):
     # itself is also idempotent while a scan is in flight (see
     # research_job.py), so this limit is a backstop against genuinely
     # repeated NEW scans, not against polling for status.
-    return start_scan()
+    return start_scan(all_caps=all_caps)
 
 
 @router.get("/api/research/small-caps/status", dependencies=[Depends(verify_api_key)])
