@@ -1,5 +1,11 @@
 import app.services.fundamentals as fundamentals_module
-from app.services.fundamentals import fetch_fundamentals, format_market_cap, market_data_block, resolve_ticker
+from app.services.fundamentals import (
+    fetch_fundamentals,
+    format_market_cap,
+    market_data_block,
+    resolve_ticker,
+    value_screen_metrics,
+)
 
 
 def test_format_market_cap_uses_trillions_above_1e12():
@@ -19,6 +25,12 @@ FULL_FUNDAMENTALS = {
     "dividend_yield": 0.55,
     "year_low": 164.08,
     "year_high": 237.23,
+    "book_value_per_share": 4.25,
+    "free_cash_flow": 100e9,
+    "total_revenue": 390e9,
+    "sector": "Technology",
+    "operating_margin": 0.30,
+    "growth_0y": 0.08,
 }
 
 
@@ -28,7 +40,10 @@ def test_market_data_block_renders_full_shape():
         "Price: $189.30 | Market Cap: $2.95T\n"
         "P/E (trailing): 31.2 | P/E (forward): 27.8\n"
         "EPS (trailing): $6.07 | Dividend Yield: 0.55%\n"
-        "52-Week Range: $164.08 - $237.23"
+        "52-Week Range: $164.08 - $237.23\n"
+        "Operating Margin: 30.0% | ROE: 142.8% | Price/Book: 44.5\n"
+        "Price/Sales: 7.6 | FCF Yield: 3.4% | PEG: 3.9\n"
+        "Sector Median P/E: 28.0 (Technology)"
     )
 
 
@@ -50,6 +65,65 @@ def test_market_data_block_data_unavailable_when_none():
 
 def test_market_data_block_data_unavailable_when_market_cap_missing():
     assert market_data_block({"price": 189.30, "market_cap": None}) == "Data unavailable."
+
+
+# --- value_screen_metrics ---
+
+
+def test_value_screen_metrics_computes_all_fields():
+    metrics = value_screen_metrics(FULL_FUNDAMENTALS)
+    assert round(metrics["roe"], 4) == round(6.07 / 4.25, 4)
+    assert metrics["operating_margin"] == 0.30
+    assert round(metrics["price_to_sales"], 4) == round(2.95e12 / 390e9, 4)
+    assert round(metrics["fcf_yield"], 4) == round(100e9 / 2.95e12, 4)
+    assert round(metrics["peg_ratio"], 4) == round(31.2 / 8, 4)
+    assert round(metrics["price_to_book"], 4) == round(189.30 / 4.25, 4)
+    assert metrics["is_reit_sector"] is False
+    assert metrics["sector_median_pe"] == 28.0
+
+
+def test_value_screen_metrics_roe_none_when_book_value_missing():
+    fnd = {**FULL_FUNDAMENTALS, "book_value_per_share": None}
+    assert value_screen_metrics(fnd)["roe"] is None
+    assert value_screen_metrics(fnd)["price_to_book"] is None
+
+
+def test_value_screen_metrics_price_to_sales_none_when_revenue_missing():
+    fnd = {**FULL_FUNDAMENTALS, "total_revenue": None}
+    assert value_screen_metrics(fnd)["price_to_sales"] is None
+
+
+def test_value_screen_metrics_fcf_yield_none_when_fcf_missing():
+    fnd = {**FULL_FUNDAMENTALS, "free_cash_flow": None}
+    assert value_screen_metrics(fnd)["fcf_yield"] is None
+
+
+def test_value_screen_metrics_peg_none_when_growth_not_positive():
+    # A negative/zero growth_0y would produce a negative or undefined PEG
+    # that misleadingly reads as "cheap" under a naive "lower is better"
+    # rule while actually describing a shrinking business - see
+    # value_screen_metrics' own comment.
+    fnd = {**FULL_FUNDAMENTALS, "growth_0y": -0.05}
+    assert value_screen_metrics(fnd)["peg_ratio"] is None
+    fnd_zero = {**FULL_FUNDAMENTALS, "growth_0y": 0.0}
+    assert value_screen_metrics(fnd_zero)["peg_ratio"] is None
+
+
+def test_value_screen_metrics_is_reit_sector_true_for_real_estate():
+    fnd = {**FULL_FUNDAMENTALS, "sector": "Real Estate"}
+    assert value_screen_metrics(fnd)["is_reit_sector"] is True
+
+
+def test_value_screen_metrics_sector_median_pe_none_for_real_estate():
+    # Deliberately omitted from SECTOR_MEDIAN_PE - REITs are valued via
+    # dividends/P/B, not a P/E comparison (see the table's own comment).
+    fnd = {**FULL_FUNDAMENTALS, "sector": "Real Estate"}
+    assert value_screen_metrics(fnd)["sector_median_pe"] is None
+
+
+def test_value_screen_metrics_sector_median_pe_none_for_unknown_sector():
+    fnd = {**FULL_FUNDAMENTALS, "sector": "Some New GICS Category"}
+    assert value_screen_metrics(fnd)["sector_median_pe"] is None
 
 
 # --- resolve_ticker / fetch_fundamentals's resolution fallback ---

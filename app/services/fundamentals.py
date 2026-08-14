@@ -2,7 +2,32 @@ import logging
 
 import yfinance as yf
 
+from app.services.valuation import REIT_SECTORS
+
 logger = logging.getLogger(__name__)
+
+# Rough, illustrative per-sector median trailing P/E - not fetched live (no
+# free, reliable "sector median P/E today" endpoint), so treat these as a
+# starting point to adjust as observed, same spirit as valuation.py's own
+# hardcoded assumptions. Used only to give P/E context relative to peers
+# instead of one flat number across every sector (a flat "P/E < 20 is cheap"
+# rule punishes Technology and flatters Financial Services for no real
+# reason - see value-investing-checklist.md). Real Estate deliberately
+# omitted: REIT_SECTORS already routes those to a dividends/P/B-based
+# valuation instead of P/E, so a sector-median-P/E comparison isn't
+# meaningful there.
+SECTOR_MEDIAN_PE = {
+    "Technology": 28.0,
+    "Healthcare": 22.0,
+    "Financial Services": 13.0,
+    "Consumer Cyclical": 19.0,
+    "Consumer Defensive": 21.0,
+    "Communication Services": 18.0,
+    "Industrials": 19.0,
+    "Energy": 12.0,
+    "Basic Materials": 15.0,
+    "Utilities": 17.0,
+}
 
 
 def resolve_ticker(ticker: str) -> str:
@@ -141,9 +166,78 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "sector": info.get("sector"),
         "industry": info.get("industry"),
         "payout_ratio": info.get("payoutRatio"),
+        # Value-screen metric (see value_screen_metrics below) with no
+        # existing fetched-or-derivable equivalent elsewhere in this dict -
+        # everything else that function needs (ROE, P/S, FCF yield, PEG) is
+        # derived from fields already fetched above, deliberately reusing
+        # the SAME formulas valuation.py already uses internally (e.g. ROE
+        # = eps_trailing / book_value_per_share, matching
+        # _sustainable_growth_rate exactly) rather than fetching yfinance's
+        # own returnOnEquity/pegRatio fields, which use different
+        # methodology and could show a second, disagreeing number for the
+        # same concept in the same prompt.
+        "operating_margin": info.get("operatingMargins"),
     }
     fundamentals.update(_fetch_growth_consensus(resolved_ticker))
     return fundamentals
+
+
+def value_screen_metrics(fundamentals: dict) -> dict:
+    """Derives the value-investing checklist metrics (see
+    value-investing-checklist.md) from fields already in `fundamentals` -
+    ROE, Price/Sales, FCF yield, and PEG are all computed here rather than
+    fetched separately, deliberately reusing the same formulas valuation.py
+    already uses internally (see fetch_fundamentals' comment on
+    operating_margin for why). Each value is None when its inputs are
+    missing/unusable - callers render those as "N/A", same fail-soft
+    convention as the rest of this module.
+    """
+    eps_trailing = fundamentals.get("eps_trailing")
+    book_value_per_share = fundamentals.get("book_value_per_share")
+    roe = None
+    if eps_trailing and book_value_per_share and book_value_per_share > 0:
+        roe = eps_trailing / book_value_per_share
+
+    market_cap = fundamentals.get("market_cap")
+    total_revenue = fundamentals.get("total_revenue")
+    price_to_sales = None
+    if market_cap and total_revenue and total_revenue > 0:
+        price_to_sales = market_cap / total_revenue
+
+    free_cash_flow = fundamentals.get("free_cash_flow")
+    fcf_yield = None
+    if free_cash_flow is not None and market_cap and market_cap > 0:
+        fcf_yield = free_cash_flow / market_cap
+
+    pe_trailing = fundamentals.get("pe_trailing")
+    growth_0y = fundamentals.get("growth_0y")
+    # PEG only means anything against POSITIVE expected growth - a negative
+    # or zero growth_0y would produce a negative/undefined PEG that reads
+    # as "attractively priced" by a naive "lower is better" rule while
+    # actually describing a shrinking business, so it's left None (renders
+    # "N/A") rather than shown as a number that would mislead.
+    peg_ratio = None
+    if pe_trailing and growth_0y and growth_0y > 0:
+        peg_ratio = pe_trailing / (growth_0y * 100)
+
+    price = fundamentals.get("price")
+    price_to_book = None
+    if price and book_value_per_share and book_value_per_share > 0:
+        price_to_book = price / book_value_per_share
+
+    sector = fundamentals.get("sector")
+    sector_median_pe = SECTOR_MEDIAN_PE.get(sector)
+
+    return {
+        "roe": roe,
+        "operating_margin": fundamentals.get("operating_margin"),
+        "price_to_sales": price_to_sales,
+        "fcf_yield": fcf_yield,
+        "peg_ratio": peg_ratio,
+        "price_to_book": price_to_book,
+        "is_reit_sector": sector in REIT_SECTORS,
+        "sector_median_pe": sector_median_pe,
+    }
 
 
 def format_market_cap(value: float) -> str:
@@ -174,9 +268,24 @@ def market_data_block(fundamentals: dict | None) -> str:
     div_yield_str = f"{dividend_yield:.2f}%" if dividend_yield else "0.00%"
     range_str = f"${year_low:.2f} - ${year_high:.2f}" if (year_low and year_high) else "N/A"
 
+    screen = value_screen_metrics(fundamentals)
+    operating_margin_str = f"{screen['operating_margin'] * 100:.1f}%" if screen["operating_margin"] is not None else "N/A"
+    roe_str = f"{screen['roe'] * 100:.1f}%" if screen["roe"] is not None else "N/A"
+    price_to_book_str = f"{screen['price_to_book']:.1f}" if screen["price_to_book"] is not None else "N/A"
+    price_to_sales_str = f"{screen['price_to_sales']:.1f}" if screen["price_to_sales"] is not None else "N/A"
+    fcf_yield_str = f"{screen['fcf_yield'] * 100:.1f}%" if screen["fcf_yield"] is not None else "N/A"
+    peg_ratio_str = f"{screen['peg_ratio']:.1f}" if screen["peg_ratio"] is not None else "N/A"
+    sector_median_pe_str = (
+        f"{screen['sector_median_pe']:.1f} ({fundamentals.get('sector')})"
+        if screen["sector_median_pe"] is not None else "N/A"
+    )
+
     return (
         f"Price: ${fundamentals['price']:.2f} | Market Cap: {format_market_cap(fundamentals['market_cap'])}\n"
         f"P/E (trailing): {pe_trailing_str} | P/E (forward): {pe_forward_str}\n"
         f"EPS (trailing): {eps_str} | Dividend Yield: {div_yield_str}\n"
-        f"52-Week Range: {range_str}"
+        f"52-Week Range: {range_str}\n"
+        f"Operating Margin: {operating_margin_str} | ROE: {roe_str} | Price/Book: {price_to_book_str}\n"
+        f"Price/Sales: {price_to_sales_str} | FCF Yield: {fcf_yield_str} | PEG: {peg_ratio_str}\n"
+        f"Sector Median P/E: {sector_median_pe_str}"
     )
