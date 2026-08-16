@@ -241,10 +241,25 @@ def test_build_scenarios_pep_curated_only_applies_to_dividends_basis():
 def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
-    # Growth-basis normal-scenario g2 is the confirmed 10% fade ceiling, not
-    # a flat copy of g1 (see GROWTH_BASIS_G2's comment).
-    assert scenarios["normal"]["g2"] == 0.10
+    # g2 = min(GROWTH_BASIS_G2's flat default, this scenario's own g1) -
+    # here g1 (0.08, G1_FALLBACK's normal) is BELOW the flat 0.10 default,
+    # so g2 matches g1 rather than the flat ceiling. Confirmed live across
+    # all 6 CURATED_SCENARIOS tickers' 18 g1/g2 pairs that g2 <= g1 always
+    # holds - see GROWTH_BASIS_G2's comment.
+    assert scenarios["normal"]["g2"] == 0.08
     assert scenarios["normal"]["exit_multiple"] == 20.0
+
+
+def test_build_scenarios_g2_matches_flat_default_when_g1_exceeds_it():
+    # The flat default still applies as a CEILING when g1 is comfortably
+    # above it - e.g. a strong sustainable-growth-rate case.
+    scenarios = build_scenarios(
+        "SOME_UNKNOWN_TICKER",
+        {"eps_trailing": 5.0, "book_value_per_share": 20.0, "payout_ratio": 0.0},
+        basis="eps",
+    )
+    assert scenarios["normal"]["g1"] > 0.10
+    assert scenarios["normal"]["g2"] == 0.10
 
 
 def test_build_scenarios_derives_normal_g1_from_same_direction_consensus():

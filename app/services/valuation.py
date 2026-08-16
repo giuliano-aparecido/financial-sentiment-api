@@ -761,22 +761,30 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
         # a raw copy of a deeply negative g1) aren't the same claim.
         g2_values = {name: max(value, G2_DIVIDENDS_FLOOR) for name, value in g1_values.items()}
     else:
-        g2_values = dict(GROWTH_BASIS_G2)
-        # Worst-case g2 used to be a fixed +4% regardless of how negative
-        # the derived worst-case g1 was, making a structurally declining
-        # company (a genuine "value trap" - exactly what a value-investing
-        # model needs to be able to recognize) mathematically
-        # unrepresentable: g2 drives (1+g2)^5 of scenario_terminal_value's
-        # entire answer, so a fixed positive worst-case g2 put a floor
-        # under how bad the worst case could ever look. min() with the
-        # worst-case g1 lets a genuinely negative derived g1 (already
-        # floored at G1_FLOOR) carry through to g2's worst case too,
-        # without moving the confirmed-live normal/best g2 values or
-        # making worst-case g2 MORE negative than g1 already is (a fresh,
-        # separate decade of decline is a stronger claim than continuing
-        # an already-identified near-term one - same "not the same claim"
-        # reasoning as G2_DIVIDENDS_FLOOR).
-        g2_values["worst"] = min(g2_values["worst"], g1_values["worst"])
+        # g2 = min(the flat GROWTH_BASIS_G2 default, this SAME scenario's
+        # own g1) - not the flat default unconditionally. Originally only
+        # applied to the worst tier (a structurally declining company -
+        # a genuine "value trap" - was otherwise mathematically
+        # unrepresentable, since a fixed +4% worst-case g2 put a floor
+        # under how bad the worst case could ever look). Generalized to
+        # normal/best after re-examining what GROWTH_BASIS_G2's own
+        # "confirmed live" calibration actually shows: across all 6
+        # CURATED_SCENARIOS tickers and all 3 tiers (18 g1/g2 pairs
+        # total), g2 <= g1 in EVERY SINGLE case - AAPL/XOM/PEP even show
+        # g2 == g1 at their normal/best tiers. The flat 0.10/0.12 defaults
+        # only ever matched cases where g1 already happened to be
+        # positive and above them (NVDA 30%->10%, MSFT 15%->10%, NFLX
+        # 12%->10%, all real fades DOWN); applying those SAME flat values
+        # when g1 is small or negative was an unevidenced extrapolation
+        # in the untested direction - confirmed live it produced QCOM's
+        # "normal" scenario projecting years 1-5 at -7.8% (QCOM's own
+        # real, negative analyst consensus) then flipping to +10% GROWTH
+        # for years 6-10 with no basis for assuming that reversal. min()
+        # makes "hold at the already-identified rate" the default
+        # assumption instead of "assume an unexplained rebound to a
+        # fixed target" - consistent with every real analyst-vetted
+        # example on file, not just the worst tier's.
+        g2_values = {name: min(GROWTH_BASIS_G2[name], g1_values[name]) for name in GROWTH_BASIS_G2}
 
     if basis == "revenue":
         exit_multiples = {
