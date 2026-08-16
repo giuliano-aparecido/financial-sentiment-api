@@ -1,6 +1,10 @@
+import pytest
+
 from app.services.valuation import (
     CURATED_SCENARIOS,
     G1_CAP,
+    G1_FLOOR,
+    G2_DIVIDENDS_FLOOR,
     VALUATION_PCT_DISPLAY_CAP,
     _sustainable_growth_rate,
     build_scenarios,
@@ -248,7 +252,13 @@ def test_build_scenarios_derives_normal_g1_from_same_direction_consensus():
     assert scenarios["normal"]["exit_multiple"] == 20.0
 
 
-def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
+def test_build_scenarios_derives_best_worst_g1_as_offset_from_blended_normal():
+    # best/worst are OFFSETS from the SAME 2-year-blended "normal" value,
+    # by the analyst range's own spread around growth_0y - not a direct
+    # substitution of growth_0y_high/low (see build_scenarios' own comment
+    # for why: that used to let "best" end up WORSE than "normal" when
+    # growth_1y differed a lot from growth_0y, since best/worst never saw
+    # growth_1y at all under the old derivation).
     fundamentals = {
         "growth_0y": 0.1387,
         "growth_1y": 0.1930,
@@ -256,8 +266,27 @@ def test_build_scenarios_derives_best_worst_g1_from_estimate_spread():
         "growth_0y_low": 0.05,
     }
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
-    assert scenarios["best"]["g1"] == 0.25
-    assert scenarios["worst"]["g1"] == 0.05
+    blended_normal = (0.1387 + 0.1930) / 2
+    assert scenarios["normal"]["g1"] == blended_normal
+    assert scenarios["best"]["g1"] == pytest.approx(blended_normal + (0.25 - 0.1387))
+    assert scenarios["worst"]["g1"] == pytest.approx(blended_normal - (0.1387 - 0.05))
+    # The property that actually matters: best >= normal >= worst always,
+    # not just for this specific example.
+    assert scenarios["best"]["g1"] >= scenarios["normal"]["g1"] >= scenarios["worst"]["g1"]
+
+
+def test_build_scenarios_best_worst_g1_ordering_holds_even_when_growth_1y_diverges():
+    # Regression test for the QCOM case that motivated this fix: this
+    # year's estimate is much worse than next year's, so the OLD
+    # growth_0y_high/low-direct derivation put "best" (using only this
+    # year's still-bad range) below "normal" (which partly saw next
+    # year's recovery via the blend) - inverted scenario ordering.
+    fundamentals = {
+        "growth_0y": -0.1253, "growth_1y": -0.0305,
+        "growth_0y_high": -0.1180, "growth_0y_low": -0.1322,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["best"]["g1"] >= scenarios["normal"]["g1"] >= scenarios["worst"]["g1"]
 
 
 def test_build_scenarios_caps_derived_g1_at_g1_cap():
@@ -273,6 +302,48 @@ def test_build_scenarios_caps_derived_g1_at_g1_cap():
     }
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
     assert scenarios["best"]["g1"] == G1_CAP
+
+
+def test_build_scenarios_floors_derived_g1_at_g1_floor():
+    # Symmetric case to the G1_CAP test above - confirmed live this was a
+    # real gap, not just a theoretical one (see G1_FLOOR's own comment):
+    # QCOM's real consensus derives a g1 around -8%, comfortably above
+    # this floor on its own, but a worse real case is entirely plausible
+    # and previously had no downside bound at all.
+    fundamentals = {
+        "growth_0y": -0.50, "growth_1y": -0.50,
+        "growth_0y_high": -0.30, "growth_0y_low": -0.90,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="eps")
+    assert scenarios["worst"]["g1"] == G1_FLOOR
+
+
+def test_build_scenarios_dividends_g2_floored_even_when_g1_deeply_negative():
+    # The actual QCOM case (see G2_DIVIDENDS_FLOOR's own comment): g2 = g1
+    # for the dividends basis, but g1 alone being negative (a plausible,
+    # real one-bad-year claim) shouldn't justify projecting that SAME
+    # decline rate for a SECOND five-year stage (a much stronger, decade-
+    # long claim a temporary dip doesn't support).
+    fundamentals = {
+        "growth_0y": -0.1253, "growth_1y": -0.0305,
+        "growth_0y_high": -0.1180, "growth_0y_low": -0.1322,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="dividends")
+    for tier in ("normal", "best", "worst"):
+        assert scenarios[tier]["g1"] < G2_DIVIDENDS_FLOOR  # the underlying claim is genuinely worse...
+        assert scenarios[tier]["g2"] == G2_DIVIDENDS_FLOOR  # ...but g2 doesn't inherit it uncapped
+
+
+def test_build_scenarios_dividends_g2_not_floored_when_g1_milder():
+    # G2_DIVIDENDS_FLOOR shouldn't kick in for a mild, plausible decline -
+    # only the extreme case needs bounding.
+    fundamentals = {
+        "growth_0y": -0.01, "growth_1y": -0.01,
+        "growth_0y_high": 0.0, "growth_0y_low": -0.02,
+    }
+    scenarios = build_scenarios("SOME_UNKNOWN_TICKER", fundamentals, basis="dividends")
+    assert scenarios["normal"]["g2"] == scenarios["normal"]["g1"]
+    assert scenarios["normal"]["g2"] > G2_DIVIDENDS_FLOOR
 
 
 def test_build_scenarios_does_not_cap_g1_below_the_cap():

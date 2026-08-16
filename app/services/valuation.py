@@ -235,6 +235,22 @@ REVENUE_BEST_EXIT_MULTIPLE = 6.0
 # rate, nothing further to fade toward.
 GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
 
+# Floor on g2 for the "dividends" basis specifically (build_scenarios sets
+# g2 = g1 there, uncapped, before this applies) - see G1_FLOOR's own
+# comment for the QCOM case this fixes: a g1 that's negative because of
+# ONE bad consensus year is a weak enough basis for a 5-year projection
+# already; copying it into g2 asserts the SAME decline rate holds for a
+# SECOND five years, which is a much stronger, much less defensible claim
+# a temporary dip doesn't support. Set to -0.05, not less negative -
+# that's PEP's own real CURATED_SCENARIOS worst-case g2 (see
+# CURATED_SCENARIOS above), the most negative g2 any analyst-vetted
+# mature-payer number on file actually reaches. A generic derived
+# estimate floors at the worst case real vetted data shows is plausible,
+# not at zero (a genuinely struggling payer's long-term outlook can
+# legitimately be somewhat negative - PEP's own worst case IS - just not
+# QCOM's unfloored -13%).
+G2_DIVIDENDS_FLOOR = -0.05
+
 # g1 FALLBACK OF LAST RESORT - used only when NEITHER a reliable consensus
 # growth estimate NOR the sustainable-growth-rate calculation below
 # (_sustainable_growth_rate) has usable inputs. "Average company" growth
@@ -293,12 +309,31 @@ def _sustainable_growth_rate(fundamentals: dict) -> float | None:
 # - the single most aggressive analyst-vetted number this model has - on
 # the reasoning that an individually-vetted number deserves more trust
 # than an automated consensus-estimate average, but a generic derived
-# estimate still needs SOME ceiling rather than none. Only caps the upper
-# bound: the observed failure mode is specifically upside blowup from high
-# growth, not a symmetric problem needing a floor too. CURATED_SCENARIOS
+# estimate still needs SOME ceiling rather than none. CURATED_SCENARIOS
 # tickers bypass this entirely (see build_scenarios' early return) - this
 # cannot change any CURATED_SCENARIOS ticker's already-calibrated output.
 G1_CAP = 0.40
+
+# Correction to this constant's own earlier comment ("only caps the upper
+# bound... not a symmetric problem needing a floor too"): confirmed live
+# it IS a symmetric problem. QCOM's real consensus (growth_0y -12.5%,
+# growth_1y -3.05%, same-direction so "reliable" by the check above)
+# derived a g1 of -7.79% - not extreme on its own, but for the "dividends"
+# basis g2 is set equal to g1 (see GROWTH_BASIS_G2's comment), and
+# projecting that SAME decline rate for a second 5-year stage compounds
+# to an intrinsic value of $22.90 against a $165.79 price - a raw 624%
+# overvaluation gap, masked down to the misleadingly modest-looking
+# "~150%" by VALUATION_PCT_DISPLAY_CAP (which only bounds the DISPLAYED
+# number, not this one). A single bad consensus year is not evidence a
+# company decays at that rate for a decade. Same "set above the single
+# most aggressive analyst-vetted number" reasoning as G1_CAP: PEP's and
+# XOM's CURATED_SCENARIOS worst-case g1 (both real, analyst-vetted,
+# +0.03) are comfortably above this, so a generic derived g1 still gets a
+# real floor without disagreeing with actually-vetted data. (g2's own
+# floor, for the "dividends" basis specifically, is separate - see
+# G2_DIVIDENDS_FLOOR below; a temporary near-term dip and a decade-long
+# fade aren't the same claim, so they don't share one floor.)
+G1_FLOOR = -0.10
 
 
 def classify_valuation_basis(
@@ -443,20 +478,42 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
     growth_1y = fundamentals.get("growth_1y")
     consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
     if consensus_reliable:
-        g1_values["normal"] = (growth_0y + growth_1y) / 2
+        # best/worst are OFFSETS from the same 2-year blend "normal" uses
+        # (by the analyst range's own spread around growth_0y), not a
+        # wholesale substitution of a different, narrower-window number -
+        # confirmed live this matters: best/worst used to be growth_0y_
+        # high/low directly, which only reflects THIS year's range and
+        # ignores next year's growth_1y entirely. For a company where next
+        # year is expected to look meaningfully different from this year
+        # (QCOM: -12.5% this year, -3.1% next), that let "best" end up
+        # WORSE than "normal" - normal's blend partly saw the better next
+        # year, best's raw high-end didn't see it at all. Offsetting from
+        # the same blended base guarantees best >= normal >= worst always,
+        # for every basis this consensus path feeds (not just dividends).
+        blended_normal = (growth_0y + growth_1y) / 2
+        g1_values["normal"] = blended_normal
         growth_0y_high = fundamentals.get("growth_0y_high")
         growth_0y_low = fundamentals.get("growth_0y_low")
         if growth_0y_high is not None:
-            g1_values["best"] = growth_0y_high
+            g1_values["best"] = blended_normal + (growth_0y_high - growth_0y)
         if growth_0y_low is not None:
-            g1_values["worst"] = growth_0y_low
+            g1_values["worst"] = blended_normal - (growth_0y - growth_0y_low)
 
-    # See G1_CAP's own comment - applied after all three g1 sources above
-    # (fallback/derived-normal/derived-best) so nothing downstream of this
-    # point ever sees an uncapped g1, regardless of which source set it.
-    g1_values = {name: min(value, G1_CAP) for name, value in g1_values.items()}
+    # See G1_CAP's/G1_FLOOR's own comments - applied after all three g1
+    # sources above (fallback/derived-normal/derived-best) so nothing
+    # downstream of this point ever sees an un-bounded g1, regardless of
+    # which source set it.
+    g1_values = {name: max(min(value, G1_CAP), G1_FLOOR) for name, value in g1_values.items()}
 
-    g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
+    # dividends' g2 = g1 (see GROWTH_BASIS_G2's comment for why that's
+    # usually right for a mature payer) gets its OWN, separate floor here
+    # - see G2_DIVIDENDS_FLOOR's own comment for why a temporary dip
+    # (g1's claim) and a decade-long fade (g2's claim, if left as a raw
+    # copy of a deeply negative g1) aren't the same claim.
+    if basis == "dividends":
+        g2_values = {name: max(value, G2_DIVIDENDS_FLOOR) for name, value in g1_values.items()}
+    else:
+        g2_values = dict(GROWTH_BASIS_G2)
 
     if basis == "revenue":
         exit_multiples = {
