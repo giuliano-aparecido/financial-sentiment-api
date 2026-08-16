@@ -106,6 +106,39 @@ def _fetch_growth_consensus(ticker: str) -> dict:
         return empty
 
 
+def _fetch_recent_eps_surprise(ticker: str) -> float | None:
+    """Actual-vs-consensus EPS surprise (as a fraction, e.g. 0.94 for a
+    94% beat) for the most recently REPORTED quarter, from yfinance's
+    earnings_dates table. Used by valuation.py to detect a likely one-
+    time/non-operating item in trailing EPS - confirmed live: GOOG's
+    trailing EPS was inflated by two consecutive quarters beating
+    consensus by +94% and +213% (almost certainly mark-to-market gains
+    on its equity investment stakes, a known recurring GAAP-distortion
+    pattern for it specifically), not organic operating growth. This is
+    the mirror image of the trailing-vs-forward P/E screens in
+    valuation.py (which catch a distorted EPS via an anomalously LOW
+    P/E) - GOOG's P/E looked completely normal precisely BECAUSE the
+    inflated EPS denominator masked it, so neither of those screens
+    fired. Comparing actual-vs-consensus EPS for the most recent quarter
+    is a more direct signal than a P/E ratio for this specific failure
+    mode. None (not necessarily a fetch failure) when no reported row
+    with a usable estimate exists yet."""
+    try:
+        dates = yf.Ticker(ticker).earnings_dates
+        reported = dates.dropna(subset=["Reported EPS"])
+        if reported.empty:
+            return None
+        row = reported.iloc[0]
+        estimate = row["EPS Estimate"]
+        actual = row["Reported EPS"]
+        if not _usable(estimate) or not _usable(actual) or estimate == 0:
+            return None
+        return (actual - estimate) / abs(estimate)
+    except Exception as e:
+        logger.warning("yfinance earnings-surprise fetch failed for %s: %s", ticker, e)
+        return None
+
+
 def _fetch_price_info(ticker: str) -> dict | None:
     """Ticker.info if it resolves to a real quote with a price, else None -
     factored out so fetch_fundamentals can retry once with a
@@ -195,6 +228,7 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "operating_margin": info.get("operatingMargins"),
     }
     fundamentals.update(_fetch_growth_consensus(resolved_ticker))
+    fundamentals["recent_eps_surprise"] = _fetch_recent_eps_surprise(resolved_ticker)
     return fundamentals
 
 

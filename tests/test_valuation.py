@@ -702,3 +702,64 @@ def test_valuation_block_for_curated_ticker_overrides_generic_classification():
         fundamentals["eps_trailing"], fundamentals["payout_ratio"], fundamentals["sector"], fundamentals["free_cash_flow"]
     ) == "fcf"
     assert "EPS-based" in valuation_block_for(fundamentals, ticker="XOM")
+
+
+def test_valuation_block_for_not_applicable_when_eps_distorted_by_earnings_surprise():
+    # Regression test: GOOG's trailing EPS was inflated by two
+    # consecutive quarters beating consensus by +94%/+213% (almost
+    # certainly mark-to-market gains on its equity investment stakes,
+    # not organic growth) - confirmed live this basis produced a wildly
+    # wrong intrinsic value (+227% vs a real analyst's target).
+    # Deliberately renders "Not applicable" rather than falling back to
+    # another basis - confirmed live AMZN (same distortion class, a
+    # 214% surprise) has an ALSO-distorted fcf fallback this same
+    # quarter (a heavy capex cycle crushing free cash flow), so the
+    # fallback chain's "some other basis is probably clean" assumption
+    # doesn't hold for this failure mode specifically.
+    fundamentals = {
+        "price": 343.54,
+        "eps_trailing": 19.93,
+        "pe_trailing": 17.24,
+        "pe_forward": 23.30,
+        "payout_ratio": 0.0426,
+        "sector": "Communication Services",
+        "free_cash_flow": 2.27e10,
+        "market_cap": 4.2e12,
+        "recent_eps_surprise": 2.13,
+    }
+    assert valuation_block_for(fundamentals, ticker="GOOG") == (
+        "Not applicable (insufficient data for the eps-based valuation basis)."
+    )
+
+
+def test_valuation_block_for_ignores_earnings_surprise_for_curated_tickers():
+    # A human already verified curated tickers against real analyst work
+    # - that judgment should win even if this specific ticker's trailing
+    # EPS also happens to show a large earnings surprise.
+    fundamentals = {
+        "price": 165.79,
+        "eps_trailing": 7.65,
+        "pe_trailing": 21.7,
+        "pe_forward": 20.0,
+        "payout_ratio": 0.0,
+        "sector": "Technology",
+        "free_cash_flow": 1.0e10,
+        "market_cap": 1.7e11,
+        "recent_eps_surprise": 2.13,
+    }
+    assert "EPS-based" in valuation_block_for(fundamentals, ticker="NVDA")
+
+
+def test_valuation_block_for_normal_surprise_does_not_trigger_not_applicable():
+    fundamentals = {
+        "price": 165.79,
+        "eps_trailing": 8.75,
+        "pe_trailing": 18.9,
+        "pe_forward": 16.3,
+        "payout_ratio": 0.41,
+        "sector": "Technology",
+        "free_cash_flow": 1.0e10,
+        "market_cap": 1.7e11,
+        "recent_eps_surprise": 0.25,
+    }
+    assert "EPS-based" in valuation_block_for(fundamentals, ticker="QCOM")

@@ -120,10 +120,20 @@ DIVIDEND_PAYOUT_BLEND_HALF_WIDTH = 0.05
 
 # Fallback order tried when the chosen basis (curated override, REIT
 # override, or classify_valuation_basis's own pick) has no usable cf0 for
-# this company right now - see valuation_block_for's fallback loop. Not
-# every basis needs to be reachable from every starting point; this is
-# just an exhaustive, fixed order so the loop terminates deterministically.
-FALLBACK_BASIS_ORDER = ["dividends", "fcf", "eps", "revenue"]
+# this company right now - see valuation_block_for's fallback loop. "fcf"
+# ranked above "dividends" - confirmed live "dividends" ranked first was
+# a real bug: cash_flow_basis_value("dividends", ...) succeeds for ANY
+# company with a nonzero dividend_rate, with no payout-ratio gate at all
+# (unlike classify_valuation_basis's own routing), so a low-yield growth
+# company whose eps got screened out (e.g. GOOG via EARNINGS_SURPRISE_
+# ONE_TIME_ITEM_THRESHOLD) fell back to valuing itself on a token $0.88
+# dividend instead of its real free cash flow - the exact "forced into
+# an inappropriate dividend model" failure DIVIDEND_PAYOUT_THRESHOLD was
+# raised to fix elsewhere in this module, just reached via a different
+# path. Not every basis needs to be reachable from every starting point;
+# this is just an exhaustive, fixed order so the loop terminates
+# deterministically.
+FALLBACK_BASIS_ORDER = ["fcf", "eps", "dividends", "revenue"]
 
 # REITs are legally required to distribute ~90% of TAXABLE income as
 # dividends, but yfinance's payoutRatio is computed against GAAP earnings,
@@ -579,6 +589,29 @@ ONE_TIME_ITEM_PE_RATIO_THRESHOLD = 0.5
 # organic earnings quality regardless of sector.
 PERSISTENTLY_LOW_PE_THRESHOLD = 6.0
 
+# Fraction above consensus EPS estimate, for the most recently reported
+# quarter, that flags a likely one-time/non-operating item - confirmed
+# live: GOOG's trailing EPS ($19.93) was inflated by two consecutive
+# quarters beating consensus by +94% and +213% (almost certainly mark-
+# to-market gains on Alphabet's equity investment stakes, a known
+# recurring GAAP-distortion pattern for it specifically), not organic
+# operating growth. A real analyst's own DCF used a normalized EPS
+# ($8.62, ~43% of the GAAP figure) that reproduced their target within
+# 6.7% once combined with their real growth assumptions; our GAAP-
+# trailing-EPS version overshot by +147%. This is the mirror image of
+# ONE_TIME_ITEM_PE_RATIO_THRESHOLD/PERSISTENTLY_LOW_PE_THRESHOLD above
+# (which catch a distorted EPS via an anomalously LOW P/E) - GOOG's P/E
+# looked completely normal (17.2x) precisely BECAUSE the inflated EPS
+# denominator masked it, so neither existing screen fired. Comparing
+# actual-vs-consensus EPS is a more direct signal than a P/E ratio for
+# this failure mode. 0.75 sits comfortably above GOOG's own historical
+# "large but plausibly organic" beats (its own trailing 5 years show a
+# max of ~68% outside the two anomalous quarters) while catching its
+# 94%/213% pair - a starting threshold, not yet cross-sectionally
+# calibrated the way the P/E-based screens were; revisit if a real
+# non-GOOG example surfaces to calibrate against.
+EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD = 0.75
+
 
 def cash_flow_basis_value(basis: str, fundamentals: dict) -> float | None:
     """Extracts the per-share cash-flow figure for the classified basis.
@@ -613,6 +646,17 @@ def cash_flow_basis_value(basis: str, fundamentals: dict) -> float | None:
             # above there's no "corrected" number to substitute; the
             # caller's fallback chain retries with another basis instead.
             return None
+        # NOT checking recent_eps_surprise here (see
+        # EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD's own comment) -
+        # deliberately, unlike the two checks above. That check lives in
+        # valuation_block_for instead, as a short-circuit BEFORE this
+        # function is ever called: confirmed live doing it here caused a
+        # curated ticker (NVDA, hand-verified against real analyst work)
+        # sharing a large-earnings-surprise profile to still get its cf0
+        # nulled out here, triggering the generic fallback chain and
+        # discarding its curated data - this function has no way to know
+        # "is_curated", which is exactly the context needed to skip the
+        # check correctly.
         return eps_trailing
     if basis == "dividends":
         return fundamentals.get("dividend_rate")
@@ -1107,6 +1151,28 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
     is_curated = bool(ticker and ticker in CURATED_SCENARIOS_BASIS)
     if is_curated:
         basis = CURATED_SCENARIOS_BASIS[ticker]
+
+    # Skips the whole compute/blend/fallback pipeline below entirely when
+    # the eps basis's trailing EPS looks one-time-item-distorted (see
+    # EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD) - deliberately renders
+    # "Not applicable" rather than falling back to another basis, unlike
+    # every OTHER "no usable cf0" case below. Confirmed live the
+    # fallback chain's implicit assumption ("some other basis is
+    # probably clean") doesn't hold here: AMZN shows the same class of
+    # distorted trailing EPS as GOOG (a 214% earnings surprise), but its
+    # fcf fallback was ALSO distorted this same quarter, for an unrelated
+    # reason (a heavy AI-infrastructure capex cycle crushing free cash
+    # flow) - the fallback didn't produce a correct number, just a
+    # DIFFERENTLY wrong one (flipped from wildly overvalued-looking to
+    # wildly undervalued-looking). Not applied to curated tickers - a
+    # human already verified those against real analyst work, which
+    # would have caught a similarly distorted trailing figure.
+    if not is_curated and basis == "eps":
+        recent_eps_surprise = fundamentals.get("recent_eps_surprise")
+        if recent_eps_surprise is not None and recent_eps_surprise > EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD:
+            block = valuation_block(fundamentals["price"], None, "eps")
+            _log_valuation_computation(ticker, fundamentals, "eps", None, {}, None, block)
+            return block
 
     def compute(b: str, include_dividend_pv: bool):
         cf0_ = cash_flow_basis_value(b, fundamentals)
