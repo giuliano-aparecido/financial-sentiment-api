@@ -10,6 +10,24 @@ from app.services.parsing import extract_json_object
 
 logger = logging.getLogger(__name__)
 
+# Strips markdown heading markers and this prompt template's own section-
+# marker words from user-supplied text before interpolating it into the
+# prompt - confirmed live a user_query containing "### Response:" or a
+# counterfeit "Valuation:" line can terminate the real prompt early or
+# overwrite the model's view of the fetched data blocks, since user_query
+# is interpolated upstream of all of them (market_data/valuation/earnings/
+# live_context). Not a full prompt-injection defense (none exists for
+# free-text LLM input) - just removes the cheapest, most direct way to
+# fake a section boundary.
+_QUERY_SANITIZE_HEADING_RE = re.compile(r"#{2,}")
+_QUERY_SANITIZE_MARKER_RE = re.compile(r"(?im)^\s*(instruction|input|response)\s*:\s*$")
+
+
+def _sanitize_user_query(user_query: str) -> str:
+    sanitized = _QUERY_SANITIZE_HEADING_RE.sub("", user_query)
+    sanitized = _QUERY_SANITIZE_MARKER_RE.sub("", sanitized)
+    return sanitized.strip()
+
 # Mutable at runtime via /api/update-inference-url so a Colab/ngrok tunnel can
 # repoint this without a redeploy. Single-process, in-memory by design - this
 # app runs one worker and doesn't need it to survive a restart.
@@ -68,20 +86,56 @@ async def analyze_with_hf(
     # evaluate_*.py copies (see that repo's CONTRIBUTING.md 4-way sync
     # rule). The model is trained on exactly this shape; a drift here
     # trains one prompt and serves another.
+    #
+    # Rules 2-6 below are new (audit-driven prompt fix, bundled with a
+    # retrain so the new instructions and the model's training data agree
+    # - a prompt-only change against the OLD checkpoint would just be
+    # unverified drift). Confirmed live gaps this closes: rule "1." used
+    # to be the ONLY critical rule, and it was about news specifically -
+    # nothing told the model how to weigh a large Valuation-block gap
+    # against a news headline, so it read as decorative (P1). NEUTRAL and
+    # confidence were both used in the instruction with no definition at
+    # all (P2). The output JSON schema the parser actually requires
+    # (impacted_stocks/direction/...) never appeared anywhere in the
+    # prompt, living only in the fine-tune weights - any checkpoint swap
+    # silently degraded to the raw_response fallback (P3). Rule 6 puts
+    # value-investing-checklist.md's graded P/E bands and the REIT
+    # Price/Book override into the prompt itself, not just an external
+    # doc the model never sees (P7, lightweight version - the sector name
+    # now always renders in market_data's Sector Median P/E line, even
+    # when no median exists for that sector, specifically so a Real
+    # Estate-sector company is identifiable without a new parameter).
+    #
+    # Deliberately NOT adding an "As of: <date>" line here (a separate
+    # audit finding, P5) - unlike the rules above, that needs a NEW
+    # per-row training column (neither dataset generator currently has an
+    # as_of_date field), so doing it here alone would silently mismatch
+    # inference's prompt shape against every training example's - the
+    # exact class of bug this repo has hit before (see git history:
+    # fix/training-prompt-whitespace-mismatch). Left for a follow-up that
+    # threads the column through both generators AND all 8 training/eval
+    # template copies together, not shipped half-done under time pressure.
+    sanitized_user_query = _sanitize_user_query(user_query)
     prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
 
-Analyze the following financial data and news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), confidence score, and a direct answer to the user's question.
+Analyze the following financial data and news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), confidence score, and a direct answer to the user's question, in exactly this shape:
+{{"impacted_stocks": [{{"ticker": "...", "reasoning": "...", "direction": "BULLISH|BEARISH|NEUTRAL", "confidence": 0.0-1.0, "answer": "..."}}]}}
 
 CRITICAL SENTIMENT RULES:
 
 1. Weigh guidance cuts and revenue misses higher than minor operational wins.
+2. The Valuation block is a real, structural signal, not decoration - a large over/undervaluation gap should meaningfully shape your direction and confidence, not just recent news. Only let concrete, current news override it when the news describes a specific catalyst (an actual event, not a generic "market volatility" statement) the valuation estimate couldn't have priced in.
+3. NEUTRAL means the available signals genuinely conflict or are too weak/routine to support a directional call - not a default for "I'm not sure." Use it when Valuation, Market Data, Earnings, and News don't converge on one direction, or when nothing in the input is materially new.
+4. confidence is a 0.0-1.0 score for how strongly the evidence supports your direction, not how certain you are a direction exists at all - a NEUTRAL call can still carry moderate confidence when "no clear signal" is itself well-supported.
+5. "Data unavailable." or "Not applicable (...)" in any block means exactly that - treat it as missing information, never invent numbers or events to fill the gap.
+6. P/E under 20 (sector-adjusted via Sector Median P/E) suggests undervaluation; 20-30 is roughly neutral; over 30 suggests a richer valuation that needs a real growth story to justify. For a Real Estate-sector company specifically, Price/Book below 1.0 is the more meaningful signal - GAAP depreciation makes P/E unreliable for that sector.
 
 ### Input:
 
 Target Stock: {ticker}
-User Question: {user_query}
+User Question: {sanitized_user_query}
 
 Current Market Data:
 {market_data}

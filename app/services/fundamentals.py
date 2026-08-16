@@ -1,33 +1,27 @@
 import logging
+import math
 
 import yfinance as yf
 
-from app.services.valuation import REIT_SECTORS
+from app.services.valuation import REIT_SECTORS, SECTOR_MEDIAN_PE
 
 logger = logging.getLogger(__name__)
 
-# Rough, illustrative per-sector median trailing P/E - not fetched live (no
-# free, reliable "sector median P/E today" endpoint), so treat these as a
-# starting point to adjust as observed, same spirit as valuation.py's own
-# hardcoded assumptions. Used only to give P/E context relative to peers
-# instead of one flat number across every sector (a flat "P/E < 20 is cheap"
-# rule punishes Technology and flatters Financial Services for no real
-# reason - see value-investing-checklist.md). Real Estate deliberately
-# omitted: REIT_SECTORS already routes those to a dividends/P/B-based
-# valuation instead of P/E, so a sector-median-P/E comparison isn't
-# meaningful there.
-SECTOR_MEDIAN_PE = {
-    "Technology": 28.0,
-    "Healthcare": 22.0,
-    "Financial Services": 13.0,
-    "Consumer Cyclical": 19.0,
-    "Consumer Defensive": 21.0,
-    "Communication Services": 18.0,
-    "Industrials": 19.0,
-    "Energy": 12.0,
-    "Basic Materials": 15.0,
-    "Utilities": 17.0,
-}
+
+def _usable(value) -> bool:
+    """None and NaN both mean "not usable" - NaN passes yfinance's own
+    truthiness check (`not float('nan')` is False), so a plain `if not
+    value` guard silently lets NaN through. Confirmed live: a NaN
+    yearAgoEps/low/high/growth from earnings_estimate flowed all the way
+    to a rendered "Intrinsic Value: $nan" / "undervalued by ~nan%" in the
+    model prompt (min(nan, X) and max(nan, X) both return nan, so
+    valuation.py's own g1 clamps didn't catch it either)."""
+    if value is None:
+        return False
+    try:
+        return not math.isnan(value)
+    except TypeError:
+        return True
 
 
 def resolve_ticker(ticker: str) -> str:
@@ -87,17 +81,62 @@ def _fetch_growth_consensus(ticker: str) -> dict:
         row_0y = estimate.loc["0y"]
         row_1y = estimate.loc["+1y"]
         year_ago = row_0y["yearAgoEps"]
-        if not year_ago:
+        growth_0y = row_0y["growth"]
+        growth_1y = row_1y["growth"]
+        low = row_0y["low"]
+        high = row_0y["high"]
+        # year_ago==0 would also divide-by-zero below - `not year_ago`
+        # covers None/0/NaN-is-truthy-so-NOT-caught-here, hence the
+        # explicit _usable() check alongside it (see that function's
+        # comment).
+        if not _usable(year_ago) or year_ago == 0 or not _usable(growth_0y) or not _usable(growth_1y):
             return empty
-        return {
-            "growth_0y": row_0y["growth"],
-            "growth_1y": row_1y["growth"],
-            "growth_0y_low": (row_0y["low"] - year_ago) / abs(year_ago),
-            "growth_0y_high": (row_0y["high"] - year_ago) / abs(year_ago),
-        }
+        result = {"growth_0y": growth_0y, "growth_1y": growth_1y, "growth_0y_low": None, "growth_0y_high": None}
+        # low/high degrade independently rather than failing the whole
+        # result - same fail-soft convention as the rest of this module;
+        # build_scenarios' consensus path already handles either being
+        # None (see its own comment on high_offset/low_offset mirroring).
+        if _usable(low):
+            result["growth_0y_low"] = (low - year_ago) / abs(year_ago)
+        if _usable(high):
+            result["growth_0y_high"] = (high - year_ago) / abs(year_ago)
+        return result
     except Exception as e:
         logger.warning("yfinance growth-estimate fetch failed for %s: %s", ticker, e)
         return empty
+
+
+def _fetch_recent_eps_surprise(ticker: str) -> float | None:
+    """Actual-vs-consensus EPS surprise (as a fraction, e.g. 0.94 for a
+    94% beat) for the most recently REPORTED quarter, from yfinance's
+    earnings_dates table. Used by valuation.py to detect a likely one-
+    time/non-operating item in trailing EPS - confirmed live: GOOG's
+    trailing EPS was inflated by two consecutive quarters beating
+    consensus by +94% and +213% (almost certainly mark-to-market gains
+    on its equity investment stakes, a known recurring GAAP-distortion
+    pattern for it specifically), not organic operating growth. This is
+    the mirror image of the trailing-vs-forward P/E screens in
+    valuation.py (which catch a distorted EPS via an anomalously LOW
+    P/E) - GOOG's P/E looked completely normal precisely BECAUSE the
+    inflated EPS denominator masked it, so neither of those screens
+    fired. Comparing actual-vs-consensus EPS for the most recent quarter
+    is a more direct signal than a P/E ratio for this specific failure
+    mode. None (not necessarily a fetch failure) when no reported row
+    with a usable estimate exists yet."""
+    try:
+        dates = yf.Ticker(ticker).earnings_dates
+        reported = dates.dropna(subset=["Reported EPS"])
+        if reported.empty:
+            return None
+        row = reported.iloc[0]
+        estimate = row["EPS Estimate"]
+        actual = row["Reported EPS"]
+        if not _usable(estimate) or not _usable(actual) or estimate == 0:
+            return None
+        return (actual - estimate) / abs(estimate)
+    except Exception as e:
+        logger.warning("yfinance earnings-surprise fetch failed for %s: %s", ticker, e)
+        return None
 
 
 def _fetch_price_info(ticker: str) -> dict | None:
@@ -166,6 +205,16 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "sector": info.get("sector"),
         "industry": info.get("industry"),
         "payout_ratio": info.get("payoutRatio"),
+        # currency = what the stock TRADES in; financial_currency = what
+        # totalRevenue/freeCashflow are REPORTED in - confirmed live these
+        # can differ for a company that reports in one currency but is
+        # cross-listed on an exchange denominated in another (the same
+        # non-US-listing class resolve_ticker exists for). valuation.py's
+        # cash_flow_basis_value uses this to avoid dividing a
+        # financial-currency total by a trading-currency share count for
+        # the fcf/revenue bases - see that function's own comment.
+        "currency": info.get("currency"),
+        "financial_currency": info.get("financialCurrency"),
         # Value-screen metric (see value_screen_metrics below) with no
         # existing fetched-or-derivable equivalent elsewhere in this dict -
         # everything else that function needs (ROE, P/S, FCF yield, PEG) is
@@ -179,7 +228,12 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "operating_margin": info.get("operatingMargins"),
     }
     fundamentals.update(_fetch_growth_consensus(resolved_ticker))
+    fundamentals["recent_eps_surprise"] = _fetch_recent_eps_surprise(resolved_ticker)
     return fundamentals
+
+
+# See value_screen_metrics' own comment on peg_ratio for why this exists.
+PEG_MIN_GROWTH_FOR_COMPUTATION = 0.02
 
 
 def value_screen_metrics(fundamentals: dict) -> dict:
@@ -215,9 +269,14 @@ def value_screen_metrics(fundamentals: dict) -> dict:
     # or zero growth_0y would produce a negative/undefined PEG that reads
     # as "attractively priced" by a naive "lower is better" rule while
     # actually describing a shrinking business, so it's left None (renders
-    # "N/A") rather than shown as a number that would mislead.
+    # "N/A") rather than shown as a number that would mislead. A near-zero
+    # (but positive) growth_0y has the same problem the other direction -
+    # confirmed live PEG values up to 525 in synthetic data purely from
+    # dividing by a growth rate close to 0%, not from any real
+    # over/under-valuation signal. PEG_MIN_GROWTH_FOR_COMPUTATION floors
+    # how small a growth rate this ratio is computed against at all.
     peg_ratio = None
-    if pe_trailing and growth_0y and growth_0y > 0:
+    if pe_trailing and growth_0y and growth_0y > PEG_MIN_GROWTH_FOR_COMPUTATION:
         peg_ratio = pe_trailing / (growth_0y * 100)
 
     price = fundamentals.get("price")
@@ -268,6 +327,16 @@ def market_data_block(fundamentals: dict | None) -> str:
     div_yield_str = f"{dividend_yield:.2f}%" if dividend_yield else "0.00%"
     range_str = f"${year_low:.2f} - ${year_high:.2f}" if (year_low and year_high) else "N/A"
 
+    # Only the Price line's prefix, not EPS/market-cap/range too - a
+    # contained fix, not a full currency-formatting rewrite (see
+    # valuation.py's cash_flow_basis_value for the more consequential half
+    # of the currency problem: FX-mixing in the fcf/revenue bases' actual
+    # math, not just display). A reader seeing "Price: CHF 92.50" already
+    # gets the signal the whole block is non-USD; USD (the overwhelming
+    # common case) renders byte-identical to before.
+    currency = fundamentals.get("currency") or "USD"
+    price_prefix = "$" if currency == "USD" else f"{currency} "
+
     screen = value_screen_metrics(fundamentals)
     operating_margin_str = f"{screen['operating_margin'] * 100:.1f}%" if screen["operating_margin"] is not None else "N/A"
     roe_str = f"{screen['roe'] * 100:.1f}%" if screen["roe"] is not None else "N/A"
@@ -275,13 +344,22 @@ def market_data_block(fundamentals: dict | None) -> str:
     price_to_sales_str = f"{screen['price_to_sales']:.1f}" if screen["price_to_sales"] is not None else "N/A"
     fcf_yield_str = f"{screen['fcf_yield'] * 100:.1f}%" if screen["fcf_yield"] is not None else "N/A"
     peg_ratio_str = f"{screen['peg_ratio']:.1f}" if screen["peg_ratio"] is not None else "N/A"
-    sector_median_pe_str = (
-        f"{screen['sector_median_pe']:.1f} ({fundamentals.get('sector')})"
-        if screen["sector_median_pe"] is not None else "N/A"
-    )
+    # Sector name now renders even when no median exists for it (Real
+    # Estate, deliberately excluded - see SECTOR_MEDIAN_PE's own comment)
+    # rather than a bare "N/A" - the model's prompt has no other reliable
+    # signal that a company is a REIT specifically (the "Dividend-based"
+    # valuation label alone doesn't say why), and the checklist's REIT
+    # Price/Book rule only applies if the sector is actually identifiable.
+    sector = fundamentals.get("sector")
+    if screen["sector_median_pe"] is not None:
+        sector_median_pe_str = f"{screen['sector_median_pe']:.1f} ({sector})"
+    elif sector:
+        sector_median_pe_str = f"N/A ({sector})"
+    else:
+        sector_median_pe_str = "N/A"
 
     return (
-        f"Price: ${fundamentals['price']:.2f} | Market Cap: {format_market_cap(fundamentals['market_cap'])}\n"
+        f"Price: {price_prefix}{fundamentals['price']:.2f} | Market Cap: {format_market_cap(fundamentals['market_cap'])}\n"
         f"P/E (trailing): {pe_trailing_str} | P/E (forward): {pe_forward_str}\n"
         f"EPS (trailing): {eps_str} | Dividend Yield: {div_yield_str}\n"
         f"52-Week Range: {range_str}\n"

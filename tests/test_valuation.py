@@ -241,10 +241,25 @@ def test_build_scenarios_pep_curated_only_applies_to_dividends_basis():
 def test_build_scenarios_falls_back_to_generic_for_unknown_ticker_without_consensus():
     scenarios = build_scenarios("SOME_UNKNOWN_TICKER", {}, basis="eps")
     assert scenarios["normal"]["g1"] == 0.08
-    # Growth-basis normal-scenario g2 is the confirmed 10% fade ceiling, not
-    # a flat copy of g1 (see GROWTH_BASIS_G2's comment).
-    assert scenarios["normal"]["g2"] == 0.10
+    # g2 = min(GROWTH_BASIS_G2's flat default, this scenario's own g1) -
+    # here g1 (0.08, G1_FALLBACK's normal) is BELOW the flat 0.10 default,
+    # so g2 matches g1 rather than the flat ceiling. Confirmed live across
+    # all 6 CURATED_SCENARIOS tickers' 18 g1/g2 pairs that g2 <= g1 always
+    # holds - see GROWTH_BASIS_G2's comment.
+    assert scenarios["normal"]["g2"] == 0.08
     assert scenarios["normal"]["exit_multiple"] == 20.0
+
+
+def test_build_scenarios_g2_matches_flat_default_when_g1_exceeds_it():
+    # The flat default still applies as a CEILING when g1 is comfortably
+    # above it - e.g. a strong sustainable-growth-rate case.
+    scenarios = build_scenarios(
+        "SOME_UNKNOWN_TICKER",
+        {"eps_trailing": 5.0, "book_value_per_share": 20.0, "payout_ratio": 0.0},
+        basis="eps",
+    )
+    assert scenarios["normal"]["g1"] > 0.10
+    assert scenarios["normal"]["g2"] == 0.10
 
 
 def test_build_scenarios_derives_normal_g1_from_same_direction_consensus():
@@ -461,11 +476,19 @@ def test_build_scenarios_worst_exit_multiple_lower_for_asset_heavy_sector():
     assert cyclical["worst"]["exit_multiple"] < non_cyclical["worst"]["exit_multiple"]
 
 
-def test_build_scenarios_worst_exit_multiple_unaffected_by_sector_for_normal_and_best():
+def test_build_scenarios_normal_exit_multiple_sector_anchored_for_eps_and_fcf():
+    # Confirmed live: a flat 20x normal exit multiple for EVERY sector
+    # contradicted SECTOR_MEDIAN_PE shown in the same prompt for
+    # lower-multiple sectors (Energy's median is 12.0) - min(flat
+    # default, sector median) pulls normal/best DOWN for those sectors
+    # while leaving Technology (median 28.0, above the flat default)
+    # exactly at the old flat calibration, matching CURATED_SCENARIOS.
     cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Energy"}, basis="eps")
     non_cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="eps")
-    assert cyclical["normal"]["exit_multiple"] == non_cyclical["normal"]["exit_multiple"] == 20.0
-    assert cyclical["best"]["exit_multiple"] == non_cyclical["best"]["exit_multiple"] == 25.0
+    assert cyclical["normal"]["exit_multiple"] == 12.0
+    assert cyclical["best"]["exit_multiple"] == 17.0  # same +5 absolute spread as the flat default
+    assert non_cyclical["normal"]["exit_multiple"] == 20.0
+    assert non_cyclical["best"]["exit_multiple"] == 25.0
 
 
 def test_build_scenarios_revenue_basis_uses_ps_style_exit_multiples_not_earnings_style():
@@ -568,9 +591,12 @@ def test_valuation_block_caps_extreme_gap_at_display_cap():
     # Backstop for any path to an extreme gap that G1_CAP alone doesn't
     # reach (e.g. an unusual exit-multiple/cf0 combination) - confirmed
     # live via synthetic data reusing this exact formula: gaps up to 760%
-    # before either cap existed.
+    # before either cap existed. Shows ">" (not "~") once actually
+    # capped - confirmed live "~150%" with no marker read as a specific,
+    # calm estimate while silently understating a genuinely extreme gap
+    # (see valuation_block's own comment for the QCOM case this fixes).
     block = valuation_block(price=1000.0, intrinsic=10.0, basis="eps")  # raw gap: 9900%
-    assert f"~{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
+    assert f">{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
 
 
 def test_valuation_block_does_not_cap_gap_below_the_display_cap():
@@ -676,3 +702,64 @@ def test_valuation_block_for_curated_ticker_overrides_generic_classification():
         fundamentals["eps_trailing"], fundamentals["payout_ratio"], fundamentals["sector"], fundamentals["free_cash_flow"]
     ) == "fcf"
     assert "EPS-based" in valuation_block_for(fundamentals, ticker="XOM")
+
+
+def test_valuation_block_for_not_applicable_when_eps_distorted_by_earnings_surprise():
+    # Regression test: GOOG's trailing EPS was inflated by two
+    # consecutive quarters beating consensus by +94%/+213% (almost
+    # certainly mark-to-market gains on its equity investment stakes,
+    # not organic growth) - confirmed live this basis produced a wildly
+    # wrong intrinsic value (+227% vs a real analyst's target).
+    # Deliberately renders "Not applicable" rather than falling back to
+    # another basis - confirmed live AMZN (same distortion class, a
+    # 214% surprise) has an ALSO-distorted fcf fallback this same
+    # quarter (a heavy capex cycle crushing free cash flow), so the
+    # fallback chain's "some other basis is probably clean" assumption
+    # doesn't hold for this failure mode specifically.
+    fundamentals = {
+        "price": 343.54,
+        "eps_trailing": 19.93,
+        "pe_trailing": 17.24,
+        "pe_forward": 23.30,
+        "payout_ratio": 0.0426,
+        "sector": "Communication Services",
+        "free_cash_flow": 2.27e10,
+        "market_cap": 4.2e12,
+        "recent_eps_surprise": 2.13,
+    }
+    assert valuation_block_for(fundamentals, ticker="GOOG") == (
+        "Not applicable (insufficient data for the eps-based valuation basis)."
+    )
+
+
+def test_valuation_block_for_ignores_earnings_surprise_for_curated_tickers():
+    # A human already verified curated tickers against real analyst work
+    # - that judgment should win even if this specific ticker's trailing
+    # EPS also happens to show a large earnings surprise.
+    fundamentals = {
+        "price": 165.79,
+        "eps_trailing": 7.65,
+        "pe_trailing": 21.7,
+        "pe_forward": 20.0,
+        "payout_ratio": 0.0,
+        "sector": "Technology",
+        "free_cash_flow": 1.0e10,
+        "market_cap": 1.7e11,
+        "recent_eps_surprise": 2.13,
+    }
+    assert "EPS-based" in valuation_block_for(fundamentals, ticker="NVDA")
+
+
+def test_valuation_block_for_normal_surprise_does_not_trigger_not_applicable():
+    fundamentals = {
+        "price": 165.79,
+        "eps_trailing": 8.75,
+        "pe_trailing": 18.9,
+        "pe_forward": 16.3,
+        "payout_ratio": 0.41,
+        "sector": "Technology",
+        "free_cash_flow": 1.0e10,
+        "market_cap": 1.7e11,
+        "recent_eps_surprise": 0.25,
+    }
+    assert "EPS-based" in valuation_block_for(fundamentals, ticker="QCOM")
