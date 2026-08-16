@@ -2,6 +2,7 @@ import pytest
 
 from app.services.valuation import (
     CURATED_SCENARIOS,
+    DIVIDEND_PAYOUT_THRESHOLD,
     G1_CAP,
     G1_FLOOR,
     G2_DIVIDENDS_FLOOR,
@@ -49,12 +50,16 @@ def test_classify_zero_eps_uses_revenue_basis():
 
 
 def test_classify_high_payout_uses_dividends_basis():
-    # Matches KO/XOM-style mature payers (real payout ratios ~0.62/~0.68).
+    # Matches KO/VZ/MO-style mature payers (real payout ratios ~0.62-0.89).
+    # XOM is deliberately NOT such an example despite a plausible-looking
+    # payout ratio (~0.525) - see CURATED_SCENARIOS_BASIS's override in
+    # valuation_block_for, which wins for curated tickers regardless of
+    # what this classifier alone would say.
     assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=0.62, sector="Consumer Defensive", free_cash_flow=1e9) == "dividends"
 
 
 def test_classify_payout_exactly_at_threshold_uses_dividends_basis():
-    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=0.40, sector="Technology", free_cash_flow=None) == "dividends"
+    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=DIVIDEND_PAYOUT_THRESHOLD, sector="Technology", free_cash_flow=None) == "dividends"
 
 
 def test_classify_payout_above_ceiling_falls_through_to_fcf_not_dividends():
@@ -648,3 +653,26 @@ def test_valuation_block_for_not_applicable_when_basis_input_missing():
 def test_valuation_block_for_data_unavailable_when_fundamentals_missing():
     assert valuation_block_for(None) == "Data unavailable."
     assert valuation_block_for({"price": None}) == "Data unavailable."
+
+
+def test_valuation_block_for_curated_ticker_overrides_generic_classification():
+    # Regression test: XOM is curated for "eps", but its real profile
+    # (Energy sector, positive free_cash_flow, payout_ratio below
+    # DIVIDEND_PAYOUT_THRESHOLD) makes classify_valuation_basis alone land
+    # on "fcf" - confirmed live this exact fundamentals shape produced
+    # classified=fcf, using_curated=False after DIVIDEND_PAYOUT_THRESHOLD
+    # was raised to fix QCOM. valuation_block_for must override the
+    # classifier's output with CURATED_SCENARIOS_BASIS for curated tickers,
+    # not just check the two happen to agree.
+    fundamentals = {
+        "price": 160.10,
+        "eps_trailing": 7.65,
+        "payout_ratio": 0.525,
+        "sector": "Energy",
+        "free_cash_flow": 3.0e10,
+        "market_cap": 4.5e11,
+    }
+    assert classify_valuation_basis(
+        fundamentals["eps_trailing"], fundamentals["payout_ratio"], fundamentals["sector"], fundamentals["free_cash_flow"]
+    ) == "fcf"
+    assert "EPS-based" in valuation_block_for(fundamentals, ticker="XOM")

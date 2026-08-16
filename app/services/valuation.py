@@ -65,7 +65,30 @@ STAGE_2_YEARS = 5
 
 # Sector strings match yfinance's Ticker.info["sector"] values exactly.
 ASSET_HEAVY_SECTORS = {"Energy", "Industrials", "Basic Materials", "Utilities"}
-DIVIDEND_PAYOUT_THRESHOLD = 0.40  # payout_ratio >= this -> treated as a mature dividend payer
+# Raised 0.40 -> 0.55 after live data across 26 real tickers: names sitting
+# just above the old 0.40 (LOW 0.406, QCOM 0.410, AVGO 0.413, CSCO 0.498)
+# all showed LOW dividend yields (0.66-2.29%) - the market clearly isn't
+# pricing them on dividend income the way it obviously is for names with a
+# higher payout AND higher yield (VZ 0.728/5.84%, MO 0.893/6.45%, PEP
+# 0.753/4.20%). Concretely: QCOM's real consensus derived a plausible-
+# looking-but-wrong "$22.90, overvalued ~150%" (masked by
+# VALUATION_PCT_DISPLAY_CAP - the raw gap was 624%) BECAUSE it landed on
+# this basis at all, not because of any bad growth input - a $3.68
+# dividend against a $165.79 price structurally can't produce anything
+# near that price under a dividend-discount model no matter how the
+# growth rate is bounded (confirmed live: even a flat 0% g1/g2 caps out
+# around $51). This also fixes a separate, real, currently-live bug: XOM
+# (real payout_ratio 0.525) was classified "dividends" here while its
+# CURATED_SCENARIOS entry is calibrated for "eps" (see that dict's own
+# comment - reproduces a real analyst's target within 2-12%) - the
+# mismatch made build_scenarios' basis-match check correctly refuse the
+# curated data and silently fall through to a generic, uncurated
+# valuation instead. 0.55 excludes XOM (0.525) from this basis too,
+# realigning it with its curated "eps" tag without needing to guess new
+# dividends-basis numbers for it. MMM (0.536, 1.71% yield) also moves to
+# "eps" as a side effect - consistent with the same low-yield pattern,
+# and MMM isn't curated so there's no calibration to preserve either way.
+DIVIDEND_PAYOUT_THRESHOLD = 0.55  # payout_ratio >= this -> treated as a mature dividend payer
 
 # A payout_ratio above this means the company is paying out MORE than its
 # entire trailing earnings - confirmed live (DSM-Firmenich, mid its 2023
@@ -161,18 +184,23 @@ CURATED_SCENARIOS = {
 }
 
 # The basis each CURATED_SCENARIOS ticker's growth/exit-multiple
-# assumptions were actually calibrated against. Confirmed live: a given
-# ticker's classify_valuation_basis result can legitimately differ call to
-# call (payout_ratio/sector/free_cash_flow can vary - e.g. a payout ratio
-# that happens to land in the dividends band this time), and applying
-# growth assumptions calibrated for one basis's cash flow (e.g. AAPL's
-# trailing EPS) to a DIFFERENT basis's cash flow (e.g. its much smaller
-# dividend rate) doesn't produce a "less accurate" number, it produces one
-# with no relationship to the analyst's actual target at all - the
-# growth/exit-multiple assumptions and the cf0 they're meant to compound
-# have to come from the same DCF. build_scenarios below only uses a
-# ticker's curated table when the basis classified for THIS call matches
-# what it was actually calibrated for.
+# assumptions were actually calibrated against. Applying growth assumptions
+# calibrated for one basis's cash flow (e.g. AAPL's trailing EPS) to a
+# DIFFERENT basis's cash flow (e.g. its much smaller dividend rate) doesn't
+# produce a "less accurate" number, it produces one with no relationship to
+# the analyst's actual target at all - the growth/exit-multiple assumptions
+# and the cf0 they're meant to compound have to come from the same DCF.
+#
+# valuation_block_for overrides classify_valuation_basis's output with this
+# tag outright for any curated ticker, rather than merely checking the two
+# agree - confirmed live that classify_valuation_basis's result can
+# legitimately drift for reasons that have nothing to do with whether the
+# curated numbers are still valid (e.g. raising DIVIDEND_PAYOUT_THRESHOLD to
+# fix QCOM's misrouting silently reclassified XOM from "dividends" to "fcf",
+# not the "eps" this table was calibrated for, leaving a human-verified
+# ticker's curated data unused as a side effect of an unrelated constant).
+# build_scenarios' own basis-match check below still applies for callers
+# that reach it directly without going through that override (e.g. tests).
 CURATED_SCENARIOS_BASIS = {
     "AAPL": "eps",
     "NVDA": "eps",
@@ -701,6 +729,23 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
         fundamentals.get("sector"),
         fundamentals.get("free_cash_flow"),
     )
+    # Curated tickers override the generic classifier's output rather than
+    # merely being checked against it. Confirmed live: XOM's own real
+    # consensus growth estimates are opposite-direction year-over-year (see
+    # build_scenarios' docstring) - exactly why it was hand-curated in the
+    # first place, since the generic pipeline can't be trusted for it. Tying
+    # curated-data usage to "does today's classify_valuation_basis output
+    # happen to agree" made curated tickers hostage to unrelated constants:
+    # raising DIVIDEND_PAYOUT_THRESHOLD to fix QCOM's misrouting silently
+    # knocked XOM from "dividends" to "fcf" (Energy is in
+    # ASSET_HEAVY_SECTORS and XOM has positive free_cash_flow) - still not
+    # "eps", still using_curated=False, for a ticker whose g1/g2/exit
+    # numbers were calibrated specifically for the "eps" cf0. A human
+    # already verified this ticker's basis against real analyst work; that
+    # judgment should win outright, not just when it coincidentally matches
+    # a sector/payout-ratio heuristic that has nothing to do with it.
+    if ticker and ticker in CURATED_SCENARIOS_BASIS:
+        basis = CURATED_SCENARIOS_BASIS[ticker]
     cf0 = cash_flow_basis_value(basis, fundamentals)
     scenarios = build_scenarios(ticker, fundamentals, basis)
     intrinsic = intrinsic_value(cf0, basis, scenarios)
