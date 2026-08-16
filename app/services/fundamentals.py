@@ -198,6 +198,10 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     return fundamentals
 
 
+# See value_screen_metrics' own comment on peg_ratio for why this exists.
+PEG_MIN_GROWTH_FOR_COMPUTATION = 0.02
+
+
 def value_screen_metrics(fundamentals: dict) -> dict:
     """Derives the value-investing checklist metrics (see
     value-investing-checklist.md) from fields already in `fundamentals` -
@@ -231,9 +235,14 @@ def value_screen_metrics(fundamentals: dict) -> dict:
     # or zero growth_0y would produce a negative/undefined PEG that reads
     # as "attractively priced" by a naive "lower is better" rule while
     # actually describing a shrinking business, so it's left None (renders
-    # "N/A") rather than shown as a number that would mislead.
+    # "N/A") rather than shown as a number that would mislead. A near-zero
+    # (but positive) growth_0y has the same problem the other direction -
+    # confirmed live PEG values up to 525 in synthetic data purely from
+    # dividing by a growth rate close to 0%, not from any real
+    # over/under-valuation signal. PEG_MIN_GROWTH_FOR_COMPUTATION floors
+    # how small a growth rate this ratio is computed against at all.
     peg_ratio = None
-    if pe_trailing and growth_0y and growth_0y > 0:
+    if pe_trailing and growth_0y and growth_0y > PEG_MIN_GROWTH_FOR_COMPUTATION:
         peg_ratio = pe_trailing / (growth_0y * 100)
 
     price = fundamentals.get("price")
