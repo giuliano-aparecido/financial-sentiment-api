@@ -461,11 +461,19 @@ def test_build_scenarios_worst_exit_multiple_lower_for_asset_heavy_sector():
     assert cyclical["worst"]["exit_multiple"] < non_cyclical["worst"]["exit_multiple"]
 
 
-def test_build_scenarios_worst_exit_multiple_unaffected_by_sector_for_normal_and_best():
+def test_build_scenarios_normal_exit_multiple_sector_anchored_for_eps_and_fcf():
+    # Confirmed live: a flat 20x normal exit multiple for EVERY sector
+    # contradicted SECTOR_MEDIAN_PE shown in the same prompt for
+    # lower-multiple sectors (Energy's median is 12.0) - min(flat
+    # default, sector median) pulls normal/best DOWN for those sectors
+    # while leaving Technology (median 28.0, above the flat default)
+    # exactly at the old flat calibration, matching CURATED_SCENARIOS.
     cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Energy"}, basis="eps")
     non_cyclical = build_scenarios("SOME_UNKNOWN_TICKER", {"sector": "Technology"}, basis="eps")
-    assert cyclical["normal"]["exit_multiple"] == non_cyclical["normal"]["exit_multiple"] == 20.0
-    assert cyclical["best"]["exit_multiple"] == non_cyclical["best"]["exit_multiple"] == 25.0
+    assert cyclical["normal"]["exit_multiple"] == 12.0
+    assert cyclical["best"]["exit_multiple"] == 17.0  # same +5 absolute spread as the flat default
+    assert non_cyclical["normal"]["exit_multiple"] == 20.0
+    assert non_cyclical["best"]["exit_multiple"] == 25.0
 
 
 def test_build_scenarios_revenue_basis_uses_ps_style_exit_multiples_not_earnings_style():
@@ -568,9 +576,12 @@ def test_valuation_block_caps_extreme_gap_at_display_cap():
     # Backstop for any path to an extreme gap that G1_CAP alone doesn't
     # reach (e.g. an unusual exit-multiple/cf0 combination) - confirmed
     # live via synthetic data reusing this exact formula: gaps up to 760%
-    # before either cap existed.
+    # before either cap existed. Shows ">" (not "~") once actually
+    # capped - confirmed live "~150%" with no marker read as a specific,
+    # calm estimate while silently understating a genuinely extreme gap
+    # (see valuation_block's own comment for the QCOM case this fixes).
     block = valuation_block(price=1000.0, intrinsic=10.0, basis="eps")  # raw gap: 9900%
-    assert f"~{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
+    assert f">{VALUATION_PCT_DISPLAY_CAP:.0f}%" in block
 
 
 def test_valuation_block_does_not_cap_gap_below_the_display_cap():

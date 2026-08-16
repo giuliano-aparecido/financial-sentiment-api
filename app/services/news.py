@@ -23,7 +23,7 @@ def fetch_live_news_rag(ticker: str) -> str:
         feed = feedparser.parse(response.content)
 
         if not feed.entries:
-            return f"Recent market volatility and financial developments for {ticker}."
+            return "Data unavailable."
 
         # Extract top 4 news headlines with publication dates
         news_items = []
@@ -36,4 +36,4 @@ def fetch_live_news_rag(ticker: str) -> str:
 
     except Exception as e:
         logger.warning("RAG Google News RSS error for %s: %s", ticker, e)
-        return f"Recent quarterly earnings and news updates for {ticker}."
+        return "Data unavailable."
