@@ -65,7 +65,30 @@ STAGE_2_YEARS = 5
 
 # Sector strings match yfinance's Ticker.info["sector"] values exactly.
 ASSET_HEAVY_SECTORS = {"Energy", "Industrials", "Basic Materials", "Utilities"}
-DIVIDEND_PAYOUT_THRESHOLD = 0.40  # payout_ratio >= this -> treated as a mature dividend payer
+# Raised 0.40 -> 0.55 after live data across 26 real tickers: names sitting
+# just above the old 0.40 (LOW 0.406, QCOM 0.410, AVGO 0.413, CSCO 0.498)
+# all showed LOW dividend yields (0.66-2.29%) - the market clearly isn't
+# pricing them on dividend income the way it obviously is for names with a
+# higher payout AND higher yield (VZ 0.728/5.84%, MO 0.893/6.45%, PEP
+# 0.753/4.20%). Concretely: QCOM's real consensus derived a plausible-
+# looking-but-wrong "$22.90, overvalued ~150%" (masked by
+# VALUATION_PCT_DISPLAY_CAP - the raw gap was 624%) BECAUSE it landed on
+# this basis at all, not because of any bad growth input - a $3.68
+# dividend against a $165.79 price structurally can't produce anything
+# near that price under a dividend-discount model no matter how the
+# growth rate is bounded (confirmed live: even a flat 0% g1/g2 caps out
+# around $51). This also fixes a separate, real, currently-live bug: XOM
+# (real payout_ratio 0.525) was classified "dividends" here while its
+# CURATED_SCENARIOS entry is calibrated for "eps" (see that dict's own
+# comment - reproduces a real analyst's target within 2-12%) - the
+# mismatch made build_scenarios' basis-match check correctly refuse the
+# curated data and silently fall through to a generic, uncurated
+# valuation instead. 0.55 excludes XOM (0.525) from this basis too,
+# realigning it with its curated "eps" tag without needing to guess new
+# dividends-basis numbers for it. MMM (0.536, 1.71% yield) also moves to
+# "eps" as a side effect - consistent with the same low-yield pattern,
+# and MMM isn't curated so there's no calibration to preserve either way.
+DIVIDEND_PAYOUT_THRESHOLD = 0.55  # payout_ratio >= this -> treated as a mature dividend payer
 
 # A payout_ratio above this means the company is paying out MORE than its
 # entire trailing earnings - confirmed live (DSM-Firmenich, mid its 2023
@@ -161,18 +184,23 @@ CURATED_SCENARIOS = {
 }
 
 # The basis each CURATED_SCENARIOS ticker's growth/exit-multiple
-# assumptions were actually calibrated against. Confirmed live: a given
-# ticker's classify_valuation_basis result can legitimately differ call to
-# call (payout_ratio/sector/free_cash_flow can vary - e.g. a payout ratio
-# that happens to land in the dividends band this time), and applying
-# growth assumptions calibrated for one basis's cash flow (e.g. AAPL's
-# trailing EPS) to a DIFFERENT basis's cash flow (e.g. its much smaller
-# dividend rate) doesn't produce a "less accurate" number, it produces one
-# with no relationship to the analyst's actual target at all - the
-# growth/exit-multiple assumptions and the cf0 they're meant to compound
-# have to come from the same DCF. build_scenarios below only uses a
-# ticker's curated table when the basis classified for THIS call matches
-# what it was actually calibrated for.
+# assumptions were actually calibrated against. Applying growth assumptions
+# calibrated for one basis's cash flow (e.g. AAPL's trailing EPS) to a
+# DIFFERENT basis's cash flow (e.g. its much smaller dividend rate) doesn't
+# produce a "less accurate" number, it produces one with no relationship to
+# the analyst's actual target at all - the growth/exit-multiple assumptions
+# and the cf0 they're meant to compound have to come from the same DCF.
+#
+# valuation_block_for overrides classify_valuation_basis's output with this
+# tag outright for any curated ticker, rather than merely checking the two
+# agree - confirmed live that classify_valuation_basis's result can
+# legitimately drift for reasons that have nothing to do with whether the
+# curated numbers are still valid (e.g. raising DIVIDEND_PAYOUT_THRESHOLD to
+# fix QCOM's misrouting silently reclassified XOM from "dividends" to "fcf",
+# not the "eps" this table was calibrated for, leaving a human-verified
+# ticker's curated data unused as a side effect of an unrelated constant).
+# build_scenarios' own basis-match check below still applies for callers
+# that reach it directly without going through that override (e.g. tests).
 CURATED_SCENARIOS_BASIS = {
     "AAPL": "eps",
     "NVDA": "eps",
@@ -235,6 +263,22 @@ REVENUE_BEST_EXIT_MULTIPLE = 6.0
 # rate, nothing further to fade toward.
 GROWTH_BASIS_G2 = {"normal": 0.10, "best": 0.12, "worst": 0.04}
 
+# Floor on g2 for the "dividends" basis specifically (build_scenarios sets
+# g2 = g1 there, uncapped, before this applies) - see G1_FLOOR's own
+# comment for the QCOM case this fixes: a g1 that's negative because of
+# ONE bad consensus year is a weak enough basis for a 5-year projection
+# already; copying it into g2 asserts the SAME decline rate holds for a
+# SECOND five years, which is a much stronger, much less defensible claim
+# a temporary dip doesn't support. Set to -0.05, not less negative -
+# that's PEP's own real CURATED_SCENARIOS worst-case g2 (see
+# CURATED_SCENARIOS above), the most negative g2 any analyst-vetted
+# mature-payer number on file actually reaches. A generic derived
+# estimate floors at the worst case real vetted data shows is plausible,
+# not at zero (a genuinely struggling payer's long-term outlook can
+# legitimately be somewhat negative - PEP's own worst case IS - just not
+# QCOM's unfloored -13%).
+G2_DIVIDENDS_FLOOR = -0.05
+
 # g1 FALLBACK OF LAST RESORT - used only when NEITHER a reliable consensus
 # growth estimate NOR the sustainable-growth-rate calculation below
 # (_sustainable_growth_rate) has usable inputs. "Average company" growth
@@ -293,12 +337,31 @@ def _sustainable_growth_rate(fundamentals: dict) -> float | None:
 # - the single most aggressive analyst-vetted number this model has - on
 # the reasoning that an individually-vetted number deserves more trust
 # than an automated consensus-estimate average, but a generic derived
-# estimate still needs SOME ceiling rather than none. Only caps the upper
-# bound: the observed failure mode is specifically upside blowup from high
-# growth, not a symmetric problem needing a floor too. CURATED_SCENARIOS
+# estimate still needs SOME ceiling rather than none. CURATED_SCENARIOS
 # tickers bypass this entirely (see build_scenarios' early return) - this
 # cannot change any CURATED_SCENARIOS ticker's already-calibrated output.
 G1_CAP = 0.40
+
+# Correction to this constant's own earlier comment ("only caps the upper
+# bound... not a symmetric problem needing a floor too"): confirmed live
+# it IS a symmetric problem. QCOM's real consensus (growth_0y -12.5%,
+# growth_1y -3.05%, same-direction so "reliable" by the check above)
+# derived a g1 of -7.79% - not extreme on its own, but for the "dividends"
+# basis g2 is set equal to g1 (see GROWTH_BASIS_G2's comment), and
+# projecting that SAME decline rate for a second 5-year stage compounds
+# to an intrinsic value of $22.90 against a $165.79 price - a raw 624%
+# overvaluation gap, masked down to the misleadingly modest-looking
+# "~150%" by VALUATION_PCT_DISPLAY_CAP (which only bounds the DISPLAYED
+# number, not this one). A single bad consensus year is not evidence a
+# company decays at that rate for a decade. Same "set above the single
+# most aggressive analyst-vetted number" reasoning as G1_CAP: PEP's and
+# XOM's CURATED_SCENARIOS worst-case g1 (both real, analyst-vetted,
+# +0.03) are comfortably above this, so a generic derived g1 still gets a
+# real floor without disagreeing with actually-vetted data. (g2's own
+# floor, for the "dividends" basis specifically, is separate - see
+# G2_DIVIDENDS_FLOOR below; a temporary near-term dip and a decade-long
+# fade aren't the same claim, so they don't share one floor.)
+G1_FLOOR = -0.10
 
 
 def classify_valuation_basis(
@@ -443,20 +506,42 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
     growth_1y = fundamentals.get("growth_1y")
     consensus_reliable = growth_0y is not None and growth_1y is not None and (growth_0y >= 0) == (growth_1y >= 0)
     if consensus_reliable:
-        g1_values["normal"] = (growth_0y + growth_1y) / 2
+        # best/worst are OFFSETS from the same 2-year blend "normal" uses
+        # (by the analyst range's own spread around growth_0y), not a
+        # wholesale substitution of a different, narrower-window number -
+        # confirmed live this matters: best/worst used to be growth_0y_
+        # high/low directly, which only reflects THIS year's range and
+        # ignores next year's growth_1y entirely. For a company where next
+        # year is expected to look meaningfully different from this year
+        # (QCOM: -12.5% this year, -3.1% next), that let "best" end up
+        # WORSE than "normal" - normal's blend partly saw the better next
+        # year, best's raw high-end didn't see it at all. Offsetting from
+        # the same blended base guarantees best >= normal >= worst always,
+        # for every basis this consensus path feeds (not just dividends).
+        blended_normal = (growth_0y + growth_1y) / 2
+        g1_values["normal"] = blended_normal
         growth_0y_high = fundamentals.get("growth_0y_high")
         growth_0y_low = fundamentals.get("growth_0y_low")
         if growth_0y_high is not None:
-            g1_values["best"] = growth_0y_high
+            g1_values["best"] = blended_normal + (growth_0y_high - growth_0y)
         if growth_0y_low is not None:
-            g1_values["worst"] = growth_0y_low
+            g1_values["worst"] = blended_normal - (growth_0y - growth_0y_low)
 
-    # See G1_CAP's own comment - applied after all three g1 sources above
-    # (fallback/derived-normal/derived-best) so nothing downstream of this
-    # point ever sees an uncapped g1, regardless of which source set it.
-    g1_values = {name: min(value, G1_CAP) for name, value in g1_values.items()}
+    # See G1_CAP's/G1_FLOOR's own comments - applied after all three g1
+    # sources above (fallback/derived-normal/derived-best) so nothing
+    # downstream of this point ever sees an un-bounded g1, regardless of
+    # which source set it.
+    g1_values = {name: max(min(value, G1_CAP), G1_FLOOR) for name, value in g1_values.items()}
 
-    g2_values = dict(g1_values) if basis == "dividends" else dict(GROWTH_BASIS_G2)
+    # dividends' g2 = g1 (see GROWTH_BASIS_G2's comment for why that's
+    # usually right for a mature payer) gets its OWN, separate floor here
+    # - see G2_DIVIDENDS_FLOOR's own comment for why a temporary dip
+    # (g1's claim) and a decade-long fade (g2's claim, if left as a raw
+    # copy of a deeply negative g1) aren't the same claim.
+    if basis == "dividends":
+        g2_values = {name: max(value, G2_DIVIDENDS_FLOOR) for name, value in g1_values.items()}
+    else:
+        g2_values = dict(GROWTH_BASIS_G2)
 
     if basis == "revenue":
         exit_multiples = {
@@ -644,6 +729,23 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
         fundamentals.get("sector"),
         fundamentals.get("free_cash_flow"),
     )
+    # Curated tickers override the generic classifier's output rather than
+    # merely being checked against it. Confirmed live: XOM's own real
+    # consensus growth estimates are opposite-direction year-over-year (see
+    # build_scenarios' docstring) - exactly why it was hand-curated in the
+    # first place, since the generic pipeline can't be trusted for it. Tying
+    # curated-data usage to "does today's classify_valuation_basis output
+    # happen to agree" made curated tickers hostage to unrelated constants:
+    # raising DIVIDEND_PAYOUT_THRESHOLD to fix QCOM's misrouting silently
+    # knocked XOM from "dividends" to "fcf" (Energy is in
+    # ASSET_HEAVY_SECTORS and XOM has positive free_cash_flow) - still not
+    # "eps", still using_curated=False, for a ticker whose g1/g2/exit
+    # numbers were calibrated specifically for the "eps" cf0. A human
+    # already verified this ticker's basis against real analyst work; that
+    # judgment should win outright, not just when it coincidentally matches
+    # a sector/payout-ratio heuristic that has nothing to do with it.
+    if ticker and ticker in CURATED_SCENARIOS_BASIS:
+        basis = CURATED_SCENARIOS_BASIS[ticker]
     cf0 = cash_flow_basis_value(basis, fundamentals)
     scenarios = build_scenarios(ticker, fundamentals, basis)
     intrinsic = intrinsic_value(cf0, basis, scenarios)
