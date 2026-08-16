@@ -310,10 +310,19 @@ def market_data_block(fundamentals: dict | None) -> str:
     price_to_sales_str = f"{screen['price_to_sales']:.1f}" if screen["price_to_sales"] is not None else "N/A"
     fcf_yield_str = f"{screen['fcf_yield'] * 100:.1f}%" if screen["fcf_yield"] is not None else "N/A"
     peg_ratio_str = f"{screen['peg_ratio']:.1f}" if screen["peg_ratio"] is not None else "N/A"
-    sector_median_pe_str = (
-        f"{screen['sector_median_pe']:.1f} ({fundamentals.get('sector')})"
-        if screen["sector_median_pe"] is not None else "N/A"
-    )
+    # Sector name now renders even when no median exists for it (Real
+    # Estate, deliberately excluded - see SECTOR_MEDIAN_PE's own comment)
+    # rather than a bare "N/A" - the model's prompt has no other reliable
+    # signal that a company is a REIT specifically (the "Dividend-based"
+    # valuation label alone doesn't say why), and the checklist's REIT
+    # Price/Book rule only applies if the sector is actually identifiable.
+    sector = fundamentals.get("sector")
+    if screen["sector_median_pe"] is not None:
+        sector_median_pe_str = f"{screen['sector_median_pe']:.1f} ({sector})"
+    elif sector:
+        sector_median_pe_str = f"N/A ({sector})"
+    else:
+        sector_median_pe_str = "N/A"
 
     return (
         f"Price: {price_prefix}{fundamentals['price']:.2f} | Market Cap: {format_market_cap(fundamentals['market_cap'])}\n"
