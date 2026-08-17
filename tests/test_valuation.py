@@ -491,6 +491,46 @@ def test_build_scenarios_normal_exit_multiple_sector_anchored_for_eps_and_fcf():
     assert non_cyclical["best"]["exit_multiple"] == 25.0
 
 
+def test_build_scenarios_normal_exit_multiple_floored_at_own_trailing_pe():
+    # Regression test: confirmed live investigating XOM right after it
+    # left CURATED_SCENARIOS - a flat Energy sector median (12.0) capped
+    # its exit multiple BELOW its own real trailing P/E (20.7x), i.e.
+    # assuming the market prices it MORE cheaply in 10 years than it
+    # already does today. A company genuinely trading above its sector's
+    # median multiple shouldn't get pulled down to the sector's generic
+    # level - max(sector_median, own_pe) keeps the sector floor only for
+    # names actually trading at or below it. Uses 16.0 (strictly between
+    # Energy's 12.0 median and the flat 20.0 ceiling) so the floor's
+    # effect is visible without also hitting NORMAL_EXIT_MULTIPLE's cap -
+    # see the "extreme_pe" test below for that boundary specifically.
+    above_sector_median = build_scenarios(
+        "SOME_UNKNOWN_TICKER", {"sector": "Energy", "pe_trailing": 16.0}, basis="eps",
+    )
+    assert above_sector_median["normal"]["exit_multiple"] == 16.0
+    assert above_sector_median["best"]["exit_multiple"] == 21.0  # same +5 absolute spread
+
+
+def test_build_scenarios_own_trailing_pe_does_not_lower_the_sector_median_floor():
+    # A company trading BELOW its sector median still gets the sector
+    # median, not pulled down further to its own (lower) P/E - the floor
+    # only ever raises the multiple, never lowers it below what the
+    # sector-anchored logic already produces.
+    below_sector_median = build_scenarios(
+        "SOME_UNKNOWN_TICKER", {"sector": "Energy", "pe_trailing": 8.0}, basis="eps",
+    )
+    assert below_sector_median["normal"]["exit_multiple"] == 12.0
+
+
+def test_build_scenarios_own_trailing_pe_does_not_exceed_flat_normal_exit_multiple_cap():
+    # The own-P/E floor still respects the overall NORMAL_EXIT_MULTIPLE
+    # ceiling (20.0) - an extremely high real P/E shouldn't push the exit
+    # multiple past what's calibrated for Technology's own curated names.
+    extreme_pe = build_scenarios(
+        "SOME_UNKNOWN_TICKER", {"sector": "Energy", "pe_trailing": 300.0}, basis="eps",
+    )
+    assert extreme_pe["normal"]["exit_multiple"] == 20.0
+
+
 def test_build_scenarios_revenue_basis_uses_ps_style_exit_multiples_not_earnings_style():
     # Regression test: revenue-basis exit multiples used to reuse
     # NORMAL_EXIT_MULTIPLE/BEST_EXIT_MULTIPLE (20x/25x) - P/E-grade
