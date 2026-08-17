@@ -721,9 +721,10 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
       shares eps/fcf's flat defaults (no confirmed evidence it needs a
       different multiple - see the reverted DIVIDEND_*_EXIT_MULTIPLE
       comment). "eps"/"fcf" anchor the normal exit multiple to
-      min(NORMAL_EXIT_MULTIPLE, this sector's SECTOR_MEDIAN_PE) - see
-      that block's own comment for why min() rather than the sector
-      median outright; worst case uses
+      min(NORMAL_EXIT_MULTIPLE, max(this sector's SECTOR_MEDIAN_PE, the
+      company's OWN current trailing P/E)) - see that block's own comment
+      for why min() rather than the sector median outright, and why the
+      own-P/E floor exists; worst case uses
       WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity sectors
       (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT.
     """
@@ -871,9 +872,28 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
         # keeps the same +5 absolute spread the curated examples show
         # (25-20=5), not a ratio - a ratio would shrink alongside a
         # lowered normal multiple in a way no curated example supports.
+        #
+        # Floored at the company's OWN current trailing P/E, not just the
+        # sector median - confirmed live a real bug for any NON-curated
+        # ticker in a low-median sector: XOM (real trailing P/E 20.7x)
+        # would get capped at Energy's flat 12.0x median the moment it
+        # left CURATED_SCENARIOS, i.e. assuming the market prices it MORE
+        # cheaply in 10 years than it already does today. This path was
+        # never actually exercised for XOM specifically since it's stayed
+        # curated (bypasses this block entirely - see the early return
+        # above), but any other real Energy/Financial-Services/Utilities/
+        # Basic-Materials ticker a user queries through this live API and
+        # that ISN'T in CURATED_SCENARIOS hits this exact case whenever
+        # its own multiple sits above its sector's. max(sector_median,
+        # own_pe) keeps the sector floor for names genuinely trading at or
+        # below it, without dragging a premium-multiple name down to the
+        # sector's generic level.
         sector = fundamentals.get("sector")
         sector_median = SECTOR_MEDIAN_PE.get(sector)
-        normal_exit_multiple = min(NORMAL_EXIT_MULTIPLE, sector_median) if sector_median is not None else NORMAL_EXIT_MULTIPLE
+        own_pe = fundamentals.get("pe_trailing")
+        effective_median_candidates = [v for v in (sector_median, own_pe) if v is not None]
+        effective_median = max(effective_median_candidates) if effective_median_candidates else None
+        normal_exit_multiple = min(NORMAL_EXIT_MULTIPLE, effective_median) if effective_median is not None else NORMAL_EXIT_MULTIPLE
         best_exit_multiple = normal_exit_multiple + (BEST_EXIT_MULTIPLE - NORMAL_EXIT_MULTIPLE)
         worst_exit_multiple = (
             WORST_EXIT_MULTIPLE_ASSET_HEAVY if sector in ASSET_HEAVY_SECTORS
