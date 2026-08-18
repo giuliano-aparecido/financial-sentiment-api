@@ -69,7 +69,7 @@ _LOW_CONTENT_HEADLINE_RE = re.compile(
     r"stock (?:is )?trad(?:ing|es) (?:up|down|higher|lower)"
     r"|shares (?:are|is) (?:up|down|higher|lower) today"
     r"|here.s why|here.s what (?:investors|we|you) (?:need to know|see)"
-    r"|what you need to know|laps the stock market"
+    r"|what you need to know|laps the stock market|what.s going on with"
     rf"|\bwhy\b.{{0,60}}\b(?:stock|shares?)\b.{{0,30}}\b{_MOVE_VERB_RE_FRAGMENT}\b"
     rf"|\b(?:stock|shares?)\b.{{0,20}}\b(?:is|are)\b.{{0,10}}\b{_MOVE_VERB_RE_FRAGMENT}(?:ing)?\b"
     r"|^Is .+ a Good Stock|Stock a (?:Good )?Buy\b|^Should You Buy|Buy,? Hold,? (?:or|and) Sell"
