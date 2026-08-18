@@ -48,8 +48,9 @@ def test_filter_domestic_captures_current_snapshot_fields(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
 
+    assert failed == []
     entry = domestic["TEST.SW"]
     assert entry["trailing_pe"] == 20.0
     assert entry["forward_pe"] == 17.5
@@ -67,8 +68,9 @@ def test_filter_domestic_new_fields_are_none_when_missing(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
 
+    assert failed == []
     entry = domestic["TEST.SW"]
     assert entry["trailing_pe"] is None
     assert entry["forward_pe"] is None
@@ -83,8 +85,9 @@ def test_filter_domestic_excludes_foreign_domiciled(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info(country="Germany")))
     candidates = {"FOREIGN.SW": {"longName": "Foreign SE", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
+    assert failed == []  # a legitimate exclusion (wrong domicile), not a fetch failure - must not be retried
 
 
 def test_filter_domestic_excludes_below_min_avg_daily_volume_10d(monkeypatch):
@@ -94,8 +97,9 @@ def test_filter_domestic_excludes_below_min_avg_daily_volume_10d(monkeypatch):
     )
     candidates = {"THIN.SW": {"longName": "Thin AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
+    assert failed == []  # legitimate exclusion (thin volume), not a fetch failure
 
 
 def test_filter_domestic_includes_at_exactly_min_avg_daily_volume_10d(monkeypatch):
@@ -105,8 +109,9 @@ def test_filter_domestic_includes_at_exactly_min_avg_daily_volume_10d(monkeypatc
     )
     candidates = {"EDGE.SW": {"longName": "Edge AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
     assert "EDGE.SW" in domestic
+    assert failed == []
 
 
 def test_filter_domestic_excludes_missing_avg_daily_volume_10d(monkeypatch):
@@ -115,8 +120,9 @@ def test_filter_domestic_excludes_missing_avg_daily_volume_10d(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     candidates = {"NOVOL.SW": {"longName": "No Volume AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
+    assert failed == []  # legitimate exclusion (no volume data), not a fetch failure
 
 
 def test_filter_domestic_captures_avg_volume_10d(monkeypatch):
@@ -126,7 +132,7 @@ def test_filter_domestic_captures_avg_volume_10d(monkeypatch):
     )
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
     assert domestic["TEST.SW"]["avg_volume_10d"] == 250_000
 
 
@@ -140,8 +146,9 @@ def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkey
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
     candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(12)}
 
-    domestic = filter_domestic(candidates, delay_seconds=0, max_workers=5)
+    domestic, failed = filter_domestic(candidates, delay_seconds=0, max_workers=5)
 
+    assert failed == []
     assert set(domestic.keys()) == set(candidates.keys())
     for symbol, entry in domestic.items():
         assert entry["sector"] == symbol  # each entry answered for itself, not a neighbor's data
@@ -171,6 +178,36 @@ def test_filter_domestic_runs_fetches_concurrently(monkeypatch):
     filter_domestic(candidates, delay_seconds=0, max_workers=3)
 
     assert state["max_in_flight"] >= 2
+
+
+def test_filter_domestic_marks_genuine_fetch_exception_as_failed(monkeypatch):
+    def fake_ticker(symbol):
+        raise Exception("YFRateLimitError: Too Many Requests")
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {"RATELIMITED.SW": {"longName": "Rate Limited AG", "marketCap": 1e9}}
+
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+    assert failed == ["RATELIMITED.SW"]
+
+
+def test_filter_domestic_only_marks_the_symbol_that_actually_raised(monkeypatch):
+    def fake_ticker(symbol):
+        if symbol == "BROKEN.SW":
+            raise Exception("simulated transient fetch failure")
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {
+        "OK.SW": {"longName": "Fine AG", "marketCap": 1e9},
+        "BROKEN.SW": {"longName": "Broken AG", "marketCap": 1e9},
+    }
+
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    assert "OK.SW" in domestic
+    assert "BROKEN.SW" not in domestic
+    assert failed == ["BROKEN.SW"]
 
 
 def test_discover_candidates_excludes_configured_tickers(monkeypatch):
@@ -263,8 +300,9 @@ def test_discover_candidates_fallback_quotes_are_usable_by_filter_domestic(monke
     monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda *a: None)
 
     candidates = discover_candidates()
-    domestic = filter_domestic(candidates)
+    domestic, failed = filter_domestic(candidates)
     assert domestic["REAL.SW"]["name"] == "Real Co"
+    assert failed == []
 
 
 class _FakeCookies(dict):

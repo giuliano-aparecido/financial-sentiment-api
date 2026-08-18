@@ -535,8 +535,12 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
     """One ticker's worth of filter_domestic's work - fetch .info, decide
     keep/skip, sleep the politeness delay - factored out so it can run as
     a unit inside a worker thread (see filter_domestic below). Returns
-    (symbol, entry_dict_or_None); the caller does the printing/assembly,
-    this only computes. Sleeps unconditionally at the end, success or
+    (symbol, entry_dict_or_None, failed) - `failed` is True ONLY for a
+    genuine fetch exception (transient - e.g. a rate limit - worth
+    retrying later), False for both success AND a legitimate exclusion
+    (wrong domicile, too illiquid - a real, permanent answer, not
+    something to retry). The caller does the printing/assembly, this
+    only computes. Sleeps unconditionally at the end, success or
     failure, same as the original serial loop did - each worker still
     paces its OWN sequential requests by delay_seconds, concurrency just
     runs several such paced streams at once (see INFO_MAX_WORKERS)."""
@@ -546,10 +550,10 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
         avg_volume_10d = info.get("averageDailyVolume10Day")
         if country != "Switzerland":
             print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
-            return symbol, None
+            return symbol, None, False
         if avg_volume_10d is None or avg_volume_10d < MIN_AVG_DAILY_VOLUME_10D:
             print(f"  skip {symbol}: 10-day avg volume {avg_volume_10d!r} below {MIN_AVG_DAILY_VOLUME_10D} floor")
-            return symbol, None
+            return symbol, None, False
         return symbol, {
             "name": quote.get("longName") or quote.get("shortName") or symbol,
             "sector": info.get("sector"),
@@ -564,10 +568,10 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
             "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
             "avg_volume_10d": avg_volume_10d,
             "quote": quote,
-        }
+        }, False
     except Exception as e:
         print(f"  skip {symbol}: info fetch failed ({e!r})")
-        return symbol, None
+        return symbol, None, True
     finally:
         time.sleep(delay_seconds)
 
@@ -587,18 +591,27 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
     cost, and unlike the screener quote it's present for BOTH discovery
     paths - the static fallback's synthesized quote (see
     STATIC_DOMESTIC_TICKER_SNAPSHOT) has no volume field at all).
-    Returns (symbol -> dict) with the original screener `quote` retained
-    (for live/"today" fields) alongside domicile-confirmed extras that
-    only .info has - sector/trailing_eps (used by the valuation-adjacent
-    scripts), avg_volume_10d (used by swiss_crash_rebound.py AND
-    swiss_today_screener.py, so both read the SAME already-fetched
-    figure rather than two different volume-averaging methodologies)
-    plus a handful of extra current-snapshot fields (dividend yield,
-    ex-dividend date, trailing/forward P/E, beta, 52-week range) pulled
-    from this SAME .info call at no extra request cost, for scripts that
-    want a fuller company profile (see swiss_crash_rebound.py's
-    run_scan). Fails soft per ticker: a fetch error just excludes that
-    ticker with a warning, rather than aborting the whole scan.
+
+    Returns (domestic, failed_symbols): `domestic` is symbol -> dict with
+    the original screener `quote` retained (for live/"today" fields)
+    alongside domicile-confirmed extras that only .info has - sector/
+    trailing_eps (used by the valuation-adjacent scripts), avg_volume_10d
+    (used by swiss_crash_rebound.py AND swiss_today_screener.py, so both
+    read the SAME already-fetched figure rather than two different
+    volume-averaging methodologies) plus a handful of extra current-
+    snapshot fields (dividend yield, ex-dividend date, trailing/forward
+    P/E, beta, 52-week range) pulled from this SAME .info call at no
+    extra request cost. `failed_symbols` is a list of candidate symbols
+    whose fetch genuinely raised an exception (added 2026-08-19 - see
+    research_job.py's _discover_and_filter_with_retry, which uses this
+    to retry ONLY these specific tickers on a same-day re-scan instead
+    of re-fetching the whole universe) - does NOT include symbols that
+    were correctly excluded for a real, permanent reason (wrong
+    domicile, too illiquid); only transient fetch failures belong here,
+    since only those are worth ever retrying. Fails soft per ticker
+    either way: a fetch error just excludes that ticker from `domestic`
+    (while still being recorded in `failed_symbols`), never aborts the
+    whole scan.
 
     Runs the per-ticker fetches across max_workers threads (see
     INFO_MAX_WORKERS's own comment for the safety reasoning) instead of
@@ -607,10 +620,13 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
     so threads (not processes) are the right tool despite the GIL.
     """
     domestic = {}
+    failed_symbols = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_fetch_domestic_entry, symbol, quote, delay_seconds) for symbol, quote in candidates.items()]
         for future in concurrent.futures.as_completed(futures):
-            symbol, entry = future.result()
+            symbol, entry, failed = future.result()
             if entry is not None:
                 domestic[symbol] = entry
-    return domestic
+            if failed:
+                failed_symbols.append(symbol)
+    return domestic, failed_symbols
