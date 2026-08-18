@@ -66,14 +66,39 @@ below only recomputes it (paying the yf.download historical batch call)
 once per UTC calendar day, reusing the cached result for same-day
 re-scans (including across DIFFERENT users/browser tabs clicking
 Refresh, or a fresh discovery pass with a different `domestic` object
-but the same underlying trading data). today_screener is NEVER cached -
-it reports live intraday quotes and always re-runs fresh; volatility-
-indicator is cached per (calendar day, threshold_pct), same "a closed
+but the same underlying trading data). today_screener's own SCAN RESULT
+is never cached - it always recomputes fresh against whatever `domestic`
+it's handed, so live intraday quotes stay live; volatility-indicator's
+result is cached per (calendar day, threshold_pct), same "a closed
 trading day's OHLCV doesn't change" reasoning, plus the threshold in the
 key since 2%/3%/5% are genuinely different scans over the same universe,
 not one scan with a display-only filter.
 
-No lock needed around either result cache: a given scan type's _run_*
+Discovery caching + partial-failure retry (added 2026-08-19): each scan
+type ALSO caches its own `domestic` dict (and the `candidates` dict
+discovery produced it from) per calendar day, via _discover_and_filter_
+with_retry below - independent per scan type still (see the split
+above), not shared across rebound/today/indicator. Confirmed live: some
+tickers' .info fetch can fail transiently (Yahoo rate-limiting mid-scan)
+while most succeed - swiss_universe.filter_domestic already failed soft
+per-ticker (drops just that one, doesn't abort the scan), but the
+dropped ticker was gone for good even though the SAME scan type's next
+same-day click re-discovered the whole universe from scratch anyway,
+paying the full ~150-call cost AGAIN just to end up with the same
+partial result if Yahoo was still degraded, or a fresh full result that
+silently discarded whatever succeeded the first time if only some
+tickers were still failing. Now: a same-day re-scan reuses the cached
+`domestic` dict outright and retries ONLY the specific tickers that
+failed last time (their original discovery-time `quote` dict is kept in
+`candidates` specifically so this retry doesn't need to re-run
+discovery itself) - newly-succeeding tickers get merged permanently into
+the day's cached `domestic`; still-failing ones stay in `failed_symbols`
+for the NEXT same-day retry. `failed_ticker_count` is surfaced in each
+scan's own "done"/"error" status so the frontend can show a warning when
+a result may be incomplete rather than looking like a clean, complete
+scan.
+
+No lock needed around any of these caches: a given scan type's _run_*
 only ever executes one at a time (see _JobSlot's single-flight
 reasoning above), so there's no concurrent writer to race against.
 """
@@ -150,18 +175,87 @@ class _JobSlot:
         self.job = {"status": "error", "started_at": started_at, "finished_at": _now(), "error": error, **fields}
 
 
+def _new_discovery_cache() -> dict:
+    return {"date": None, "candidates": {}, "domestic": {}, "failed_symbols": []}
+
+
+def _discover_and_filter_with_retry(cache: dict) -> tuple[dict, bool]:
+    """Per-scan-type discovery+domicile-filter, cached per calendar day
+    with same-day partial-failure retry (see module docstring for the
+    full "why"). `cache` is one of _rebound_discovery_cache/
+    _today_discovery_cache/_indicator_discovery_cache - mutated in
+    place. Returns (domestic, changed).
+
+    `changed` is True whenever `domestic` is DIFFERENT from what it was
+    on this cache's previous call (a fresh day's full discovery, or a
+    same-day retry that actually recovered at least one previously-
+    failed ticker) - callers MUST check this before trusting their OWN
+    result-level cache (_rebound_result/_indicator_result): a scan
+    result computed from a SMALLER `domestic` (because some tickers
+    were still failing at the time) would otherwise keep being served
+    as this scan type's "cached" result even after a later retry
+    recovers those tickers, silently hiding the recovery. `changed` is
+    False only for a genuine same-day no-op re-check (no failed_symbols
+    left, or a retry that didn't recover anything new) - the one case
+    where reusing an existing result-level cache is actually correct.
+
+    Fresh day (or never run): full discover_candidates() + filter_
+    domestic() pass, caches candidates/domestic/failed_symbols.
+
+    Same day, with leftover failed_symbols from an earlier call today:
+    retries ONLY those specific symbols (their original `quote` dict is
+    still in `candidates`, so this doesn't need to re-run discovery) -
+    newly-successful ones are merged into the cached `domestic`
+    permanently for the rest of the day; still-failing ones remain in
+    `failed_symbols` for the next call to retry again.
+
+    Same day, no failed_symbols: pure cache hit, no yfinance calls at
+    all - identical to the pre-2026-08-19 "cached once per day" result-
+    level caching, just applied one layer earlier (to the universe
+    itself, not just the final scan computation).
+    """
+    today = _today()
+    if cache["date"] != today:
+        candidates = swiss_universe.discover_candidates()
+        domestic, failed_symbols = swiss_universe.filter_domestic(candidates)
+        cache["date"] = today
+        cache["candidates"] = candidates
+        cache["domestic"] = domestic
+        cache["failed_symbols"] = failed_symbols
+        logger.info(
+            "Discovery for %s: universe=%d failed=%d", today, len(domestic), len(failed_symbols),
+        )
+        return domestic, True
+
+    if cache["failed_symbols"]:
+        retry_candidates = {s: cache["candidates"][s] for s in cache["failed_symbols"] if s in cache["candidates"]}
+        newly_domestic, still_failed = swiss_universe.filter_domestic(retry_candidates)
+        cache["failed_symbols"] = still_failed
+        logger.info(
+            "Retried %d previously-failed tickers: %d now succeeded, %d still failing",
+            len(retry_candidates), len(newly_domestic), len(still_failed),
+        )
+        if newly_domestic:
+            cache["domestic"].update(newly_domestic)
+            return cache["domestic"], True
+    return cache["domestic"], False
+
+
 # --- Rebound scan ---
 
 _rebound_slot = _JobSlot()
 _rebound_cache: dict = {"date": None, "result": None}
+_rebound_discovery_cache: dict = _new_discovery_cache()
 
 
-def _rebound_result(domestic: dict) -> pd.DataFrame:
+def _rebound_result(domestic: dict, force: bool) -> pd.DataFrame:
     """Cached per calendar day - returns today's already-computed result
-    if this is a same-day re-scan, otherwise recomputes and caches it."""
+    if this is a same-day re-scan AND `domestic` hasn't changed since
+    (force=False - see _discover_and_filter_with_retry's own docstring
+    for why `force` matters), otherwise recomputes and caches it."""
     global _rebound_cache
     today = _today()
-    if _rebound_cache["date"] == today:
+    if not force and _rebound_cache["date"] == today:
         logger.info("Reusing cached rebound result from %s", today)
         return _rebound_cache["result"]
     result = swiss_crash_rebound.run_scan(domestic)
@@ -171,11 +265,16 @@ def _rebound_result(domestic: dict) -> pd.DataFrame:
 
 def _run_rebound(slot: _JobSlot, started_at: str) -> None:
     try:
-        candidates = swiss_universe.discover_candidates()
-        domestic = swiss_universe.filter_domestic(candidates)
-        df = _rebound_result(domestic)
-        slot.set_done(started_at, universe_size=len(domestic), crash_rebound=_json_safe_records(df))
-        logger.info("Rebound scan done: universe=%d matches=%d", len(domestic), len(df))
+        domestic, changed = _discover_and_filter_with_retry(_rebound_discovery_cache)
+        failed_count = len(_rebound_discovery_cache["failed_symbols"])
+        df = _rebound_result(domestic, force=changed)
+        slot.set_done(
+            started_at, universe_size=len(domestic), failed_ticker_count=failed_count,
+            crash_rebound=_json_safe_records(df),
+        )
+        logger.info(
+            "Rebound scan done: universe=%d matches=%d failed=%d", len(domestic), len(df), failed_count,
+        )
     except Exception as e:
         logger.exception("Rebound scan failed")
         slot.set_error(started_at, str(e))
@@ -194,15 +293,25 @@ def get_rebound_status() -> dict:
 # --- Today (big-loss) scan ---
 
 _today_slot = _JobSlot()
+_today_discovery_cache: dict = _new_discovery_cache()
 
 
 def _run_today(slot: _JobSlot, started_at: str) -> None:
     try:
-        candidates = swiss_universe.discover_candidates()
-        domestic = swiss_universe.filter_domestic(candidates)
+        # `changed` unused here - today_screener's own scan RESULT is
+        # never cached regardless (always live intraday quotes, see
+        # module docstring), only the discovery/domestic step benefits
+        # from the same-day cache-with-retry.
+        domestic, _changed = _discover_and_filter_with_retry(_today_discovery_cache)
+        failed_count = len(_today_discovery_cache["failed_symbols"])
         df = swiss_today_screener.run_scan(domestic)
-        slot.set_done(started_at, universe_size=len(domestic), today_screener=_json_safe_records(df))
-        logger.info("Today (big-loss) scan done: universe=%d matches=%d", len(domestic), len(df))
+        slot.set_done(
+            started_at, universe_size=len(domestic), failed_ticker_count=failed_count,
+            today_screener=_json_safe_records(df),
+        )
+        logger.info(
+            "Today (big-loss) scan done: universe=%d matches=%d failed=%d", len(domestic), len(df), failed_count,
+        )
     except Exception as e:
         logger.exception("Today (big-loss) scan failed")
         slot.set_error(started_at, str(e))
@@ -225,14 +334,17 @@ def get_today_status() -> dict:
 
 _indicator_slot = _JobSlot()
 _indicator_cache: dict = {"date": None, "threshold_pct": None, "result": None}
+_indicator_discovery_cache: dict = _new_discovery_cache()
 
 
-def _indicator_result(domestic: dict, threshold_pct: float) -> pd.DataFrame:
+def _indicator_result(domestic: dict, threshold_pct: float, force: bool) -> pd.DataFrame:
     """Cached per (calendar day, threshold_pct) - see module docstring
-    for why the threshold is part of the key."""
+    for why the threshold is part of the key. `force` bypasses the
+    cache when `domestic` just changed (see _discover_and_filter_with_
+    retry's own docstring for why)."""
     global _indicator_cache
     today = _today()
-    if _indicator_cache["date"] == today and _indicator_cache["threshold_pct"] == threshold_pct:
+    if not force and _indicator_cache["date"] == today and _indicator_cache["threshold_pct"] == threshold_pct:
         logger.info("Reusing cached volatility-indicator result from %s (threshold=%s)", today, threshold_pct)
         return _indicator_cache["result"]
     result = swiss_volatility_indicator.run_scan(domestic, threshold_pct)
@@ -242,16 +354,16 @@ def _indicator_result(domestic: dict, threshold_pct: float) -> pd.DataFrame:
 
 def _run_indicator(slot: _JobSlot, started_at: str, threshold_pct: float) -> None:
     try:
-        candidates = swiss_universe.discover_candidates()
-        domestic = swiss_universe.filter_domestic(candidates)
-        df = _indicator_result(domestic, threshold_pct)
+        domestic, changed = _discover_and_filter_with_retry(_indicator_discovery_cache)
+        failed_count = len(_indicator_discovery_cache["failed_symbols"])
+        df = _indicator_result(domestic, threshold_pct, force=changed)
         slot.set_done(
             started_at, threshold_pct=threshold_pct, universe_size=len(domestic),
-            volatility_indicator=_json_safe_records(df),
+            failed_ticker_count=failed_count, volatility_indicator=_json_safe_records(df),
         )
         logger.info(
-            "Volatility-indicator scan done: threshold=%s universe=%d matches=%d",
-            threshold_pct, len(domestic), len(df),
+            "Volatility-indicator scan done: threshold=%s universe=%d matches=%d failed=%d",
+            threshold_pct, len(domestic), len(df), failed_count,
         )
     except Exception as e:
         logger.exception("Volatility-indicator scan failed")
