@@ -60,7 +60,10 @@ _MOVE_VERB_RE_FRAGMENT = (
     r"surg(?:e|es|ed|ing)?|plung(?:e|es|ed|ing)?|jump(?:s|ed|ing)?|"
     r"sank|sink(?:s|ing)?|tumbl(?:e|es|ed|ing)|gain(?:s|ed|ing)?|"
     r"los(?:es|ing)|lost|nosediv(?:e|es|ed|ing)|soar(?:s|ed|ing)?|"
-    r"sag(?:s|ged|ging)?|slump(?:s|ed|ing)?)"
+    r"sag(?:s|ged|ging)?|slump(?:s|ed|ing)?|wilt(?:s|ed|ing)?|"
+    r"slip(?:s|ped|ping)?|retreat(?:s|ed|ing)?|advanc(?:e|es|ed|ing)?|"
+    r"wobbl(?:e|es|ed|ing)|sink|dip(?:s|ped|ping)?|swoon(?:s|ed|ing)?|"
+    r"spik(?:e|es|ed|ing)|skid(?:s|ded|ding)?)"
 )
 _LOW_CONTENT_HEADLINE_RE = re.compile(
     r"stock (?:is )?trad(?:ing|es) (?:up|down|higher|lower)"
