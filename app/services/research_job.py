@@ -1,7 +1,7 @@
 """
 Background-job runner for the Swiss volatility research scan
-(swiss_crash_rebound.py + swiss_today_screener.py),
-backing app/routers/research.py's start/status endpoints.
+(swiss_crash_rebound.py + swiss_today_screener.py + swiss_volatility_
+indicator.py), backing app/routers/research.py's start/status endpoints.
 
 A full scan takes 1-3 minutes (universe discovery + ~100+ per-ticker
 domicile checks + a batch price-history download), which is far past what
@@ -56,6 +56,19 @@ just normal state.
 No lock needed around the crash-rebound cache: _run only ever executes
 one at a time (see start_scan's single-job-slot reasoning above), so
 there's no concurrent writer to race against.
+
+Volatility-indicator scan (swiss_volatility_indicator.py): a genuinely
+separate job/cache/lock triple (_indicator_job/_indicator_cache/
+_indicator_job_lock), not folded into _job above, because it has its own
+independent trigger (a separate Refresh button + threshold selector in
+the frontend - see start_indicator_scan) and must NOT block on or get
+blocked by the main crash-rebound/today-screener scan. It also does its
+OWN independent universe discovery rather than reusing _job's `domestic`
+- see swiss_volatility_indicator.py's own module docstring for why.
+Cached per (calendar day, threshold_pct) - same "a closed trading day's
+OHLCV doesn't change" reasoning as _crash_rebound_cache, plus the
+threshold in the key since 2%/3%/5% are genuinely different scans over
+the same universe, not one scan with a display-only filter.
 """
 
 import datetime
@@ -64,7 +77,7 @@ import threading
 
 import pandas as pd
 
-from app.services import swiss_crash_rebound, swiss_today_screener, swiss_universe
+from app.services import swiss_crash_rebound, swiss_today_screener, swiss_universe, swiss_volatility_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +102,10 @@ _job: dict = {"status": "idle"}
 _job_lock = threading.Lock()
 
 _crash_rebound_cache: dict = {"date": None, "result": None}
+
+_indicator_job: dict = {"status": "idle"}
+_indicator_job_lock = threading.Lock()
+_indicator_cache: dict = {"date": None, "threshold_pct": None, "result": None}
 
 
 def _now() -> str:
@@ -160,3 +177,66 @@ def start_scan() -> dict:
 
 def get_status() -> dict:
     return dict(_job)
+
+
+def _indicator_result(domestic: dict, threshold_pct: float) -> pd.DataFrame:
+    """Cached per (calendar day, threshold_pct) - see module docstring
+    for why the threshold is part of the key."""
+    global _indicator_cache
+    today = _today()
+    if _indicator_cache["date"] == today and _indicator_cache["threshold_pct"] == threshold_pct:
+        logger.info("Reusing cached volatility-indicator result from %s (threshold=%s)", today, threshold_pct)
+        return _indicator_cache["result"]
+    result = swiss_volatility_indicator.run_scan(domestic, threshold_pct)
+    _indicator_cache = {"date": today, "threshold_pct": threshold_pct, "result": result}
+    return result
+
+
+def _run_indicator(started_at: str, threshold_pct: float) -> None:
+    global _indicator_job
+    try:
+        # Independent discovery, not the main scan's `domestic` - see
+        # swiss_volatility_indicator.py's own module docstring for why.
+        candidates = swiss_universe.discover_candidates()
+        domestic = swiss_universe.filter_domestic(candidates)
+        indicator_df = _indicator_result(domestic, threshold_pct)
+        _indicator_job = {
+            "status": "done",
+            "started_at": started_at,
+            "finished_at": _now(),
+            "threshold_pct": threshold_pct,
+            "universe_size": len(domestic),
+            "volatility_indicator": _json_safe_records(indicator_df),
+        }
+        logger.info(
+            "Volatility-indicator scan done: threshold=%s universe=%d matches=%d",
+            threshold_pct, len(domestic), len(indicator_df),
+        )
+    except Exception as e:
+        logger.exception("Volatility-indicator scan failed")
+        _indicator_job = {
+            "status": "error", "started_at": started_at, "finished_at": _now(),
+            "threshold_pct": threshold_pct, "error": str(e),
+        }
+
+
+def start_indicator_scan(threshold_pct: float) -> dict:
+    """Starts a new volatility-indicator scan if none is currently
+    running; otherwise returns the already-in-flight job's current status
+    unchanged (including whatever threshold_pct that in-flight scan was
+    started with - a second call with a different threshold while one is
+    already running does NOT change or restart it, same idempotent-while-
+    running behavior as start_scan). Entirely independent of start_scan/
+    _job above - see module docstring."""
+    global _indicator_job
+    with _indicator_job_lock:
+        if _indicator_job.get("status") == "running":
+            return dict(_indicator_job)
+        started_at = _now()
+        _indicator_job = {"status": "running", "started_at": started_at, "threshold_pct": threshold_pct}
+        threading.Thread(target=_run_indicator, args=(started_at, threshold_pct), daemon=True).start()
+        return dict(_indicator_job)
+
+
+def get_indicator_status() -> dict:
+    return dict(_indicator_job)

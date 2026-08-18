@@ -82,6 +82,55 @@ REBOUND_WINDOW_TRADING_DAYS = 3
 DOWNLOAD_CHUNK_SIZE = 25
 DOWNLOAD_CHUNK_DELAY_SECONDS = 2.0
 
+
+def download_ohlcv_chunked(symbols, period):
+    """Batch-downloads daily OHLCV for all `symbols`, chunked + sequential
+    (threads=False) + a delay between chunks - see DOWNLOAD_CHUNK_SIZE's
+    own comment for why. Each chunk is normalized the same way a single
+    yf.download call needs to be (yf.download returns a flat, non-multi-
+    indexed frame for a single symbol, multi-indexed for more than one -
+    a one-symbol final chunk needs the same treatment a one-symbol
+    overall call used to), then concatenated column-wise since each chunk
+    covers a disjoint set of symbols. Returns an empty DataFrame for an
+    empty `symbols` list rather than erroring - callers can index into
+    the result unconditionally.
+
+    Factored out of find_crash_then_rebound below (which still uses it)
+    so swiss_volatility_indicator.py's own 12-month scan can reuse the
+    EXACT same chunking/pacing logic rather than a second, independently
+    drifting copy of code that's already been the source of one real,
+    confirmed-live rate-limit bug (see DOWNLOAD_CHUNK_SIZE's own comment)
+    - a second copy would risk that fix (or a future one) landing in only
+    one of the two places.
+
+    Reads DOWNLOAD_CHUNK_SIZE/DOWNLOAD_CHUNK_DELAY_SECONDS as module
+    globals inside the function body, not as default parameter values -
+    deliberate: a default value is bound once, at function-DEFINITION
+    time, so a test's monkeypatch.setattr(module, "DOWNLOAD_CHUNK_SIZE",
+    ...) would silently have no effect on an already-bound default (a
+    real, confirmed-live bug hit once already writing this function -
+    see test_find_crash_then_rebound_chunks_download_calls, which
+    monkeypatches this exact constant and would have failed against a
+    default-arg version).
+    """
+    if not symbols:
+        return pd.DataFrame()
+
+    chunks = []
+    for i in range(0, len(symbols), DOWNLOAD_CHUNK_SIZE):
+        chunk_symbols = symbols[i:i + DOWNLOAD_CHUNK_SIZE]
+        chunk_data = yf.download(
+            chunk_symbols, period=period, interval="1d",
+            group_by="ticker", auto_adjust=True, threads=False, progress=False,
+        )
+        if len(chunk_symbols) == 1:
+            chunk_data = pd.concat({chunk_symbols[0]: chunk_data}, axis=1)
+        chunks.append(chunk_data)
+        if i + DOWNLOAD_CHUNK_SIZE < len(symbols):
+            time.sleep(DOWNLOAD_CHUNK_DELAY_SECONDS)
+    return pd.concat(chunks, axis=1)
+
+
 def find_crash_then_rebound(
     symbols, domestic, lookback_months, history_period, drop_threshold, gain_threshold,
     rebound_window_days=REBOUND_WINDOW_TRADING_DAYS,
@@ -93,9 +142,10 @@ def find_crash_then_rebound(
     DataFrame of every (drop_date, gain_date) pair found within the last
     `lookback_months`, one row per match - a single ticker can appear more
     than once if it had multiple such events. Each match row carries the
-    loss day's and rebound day's own OHLCV - VOLUME in particular, since a
-    move on thin volume vs. heavy volume tells very different stories
-    about how real/tradeable it was - plus an approximate P/E.
+    loss day's and rebound day's own OHLC plus an approximate P/E - no
+    per-event volume (removed 2026-08-18 at the user's request: the
+    company-level 10-day average volume, added by run_scan below, is
+    shown instead of a per-loss-day/per-gain-day volume figure).
 
     The rebound check looks up to `rebound_window_days` trading days ahead
     of the crash day for the FIRST day whose close is >= gain_threshold%
@@ -124,26 +174,7 @@ def find_crash_then_rebound(
     if not symbols:
         return pd.DataFrame()
 
-    # Chunked + sequential (threads=False) + a delay between chunks - see
-    # DOWNLOAD_CHUNK_SIZE's own comment for why. Each chunk is normalized
-    # the same way the old single-call version was (yf.download returns a
-    # flat, non-multi-indexed frame for a single symbol, multi-indexed for
-    # more than one - a one-symbol final chunk needs the same treatment a
-    # one-symbol overall call used to), then concatenated column-wise since
-    # each chunk covers a disjoint set of symbols.
-    chunks = []
-    for i in range(0, len(symbols), DOWNLOAD_CHUNK_SIZE):
-        chunk_symbols = symbols[i:i + DOWNLOAD_CHUNK_SIZE]
-        chunk_data = yf.download(
-            chunk_symbols, period=history_period, interval="1d",
-            group_by="ticker", auto_adjust=True, threads=False, progress=False,
-        )
-        if len(chunk_symbols) == 1:
-            chunk_data = pd.concat({chunk_symbols[0]: chunk_data}, axis=1)
-        chunks.append(chunk_data)
-        if i + DOWNLOAD_CHUNK_SIZE < len(symbols):
-            time.sleep(DOWNLOAD_CHUNK_DELAY_SECONDS)
-    data = pd.concat(chunks, axis=1)
+    data = download_ohlcv_chunked(symbols, history_period)
 
     cutoff = pd.Timestamp.today(tz=data.index.tz) - pd.DateOffset(months=lookback_months)
 
@@ -155,27 +186,13 @@ def find_crash_then_rebound(
     matches = []
     for symbol in symbols:
         try:
-            ohlcv = data[symbol][["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+            ohlcv = data[symbol][["Open", "High", "Low", "Close"]].dropna(subset=["Close"])
         except KeyError:
             continue
         if ohlcv.empty:
             continue
 
         close = ohlcv["Close"]
-        volume = ohlcv["Volume"]
-        # 10-day average volume (see swiss_universe.filter_domestic's
-        # avg_volume_10d) as the yardstick for "was this day's volume
-        # unusual" - previously a mean computed manually over this
-        # module's own full downloaded window (which meant "3-month
-        # average" only by coincidence, back when HISTORY_PERIOD was
-        # "4mo"; would have silently become a ~13-month average once
-        # LOOKBACK_MONTHS widened to 12, with no code change to signal
-        # it). Reusing the SAME already-fetched figure swiss_universe.py
-        # computes for its liquidity filter keeps one volume-averaging
-        # methodology for the whole feature, not two independently
-        # drifting ones. None when unavailable (e.g. the STATIC_DOMESTIC_
-        # TICKER_SNAPSHOT fallback path - see that dict's own comment).
-        avg_volume = domestic[symbol].get("avg_volume_10d")
         pct_change = close.pct_change() * 100
         trailing_eps = domestic[symbol]["trailing_eps"]
         in_window = pct_change.index >= cutoff
@@ -207,8 +224,6 @@ def find_crash_then_rebound(
             if rebound_j is None:
                 continue
 
-            loss_volume = volume.iloc[i]
-            gain_volume = volume.iloc[rebound_j]
             matches.append({
                 "ticker": symbol,
                 "loss_date": pct_change.index[i].date().isoformat(),
@@ -216,8 +231,6 @@ def find_crash_then_rebound(
                 "loss_high": round(ohlcv["High"].iloc[i], 2),
                 "loss_low": round(ohlcv["Low"].iloc[i], 2),
                 "loss_close": round(close.iloc[i], 2),
-                "loss_volume": int(loss_volume) if pd.notna(loss_volume) else None,
-                "loss_volume_vs_10d_avg": round(loss_volume / avg_volume, 2) if avg_volume else None,
                 "loss_pe_approx": approx_pe(close.iloc[i], trailing_eps),
                 "drop_pct": round(drop_pct, 2),
                 "days_to_rebound": rebound_j - i,
@@ -226,8 +239,6 @@ def find_crash_then_rebound(
                 "gain_high": round(ohlcv["High"].iloc[rebound_j], 2),
                 "gain_low": round(ohlcv["Low"].iloc[rebound_j], 2),
                 "gain_close": round(close.iloc[rebound_j], 2),
-                "gain_volume": int(gain_volume) if pd.notna(gain_volume) else None,
-                "gain_volume_vs_10d_avg": round(gain_volume / avg_volume, 2) if avg_volume else None,
                 "gain_pe_approx": approx_pe(close.iloc[rebound_j], trailing_eps),
                 "gain_pct": round(rebound_pct, 2),
             })
@@ -265,15 +276,23 @@ def run_scan(domestic: dict) -> pd.DataFrame:
     results["beta"] = results["ticker"].map(lambda t: domestic[t]["beta"])
     results["fifty_two_week_high"] = results["ticker"].map(lambda t: domestic[t]["fifty_two_week_high"])
     results["fifty_two_week_low"] = results["ticker"].map(lambda t: domestic[t]["fifty_two_week_low"])
+    # Company-level (not event-level) 10-day average trading volume - see
+    # swiss_universe.filter_domestic's avg_volume_10d, same already-
+    # fetched figure reused here, no extra request. Replaces the former
+    # per-event loss_volume/gain_volume/loss_volume_vs_10d_avg/
+    # gain_volume_vs_10d_avg fields entirely (removed 2026-08-18 at the
+    # user's request: "Remove Loss volume and Gain volume. Show only
+    # average daily trading volume (ADTV)").
+    results["avg_volume_10d"] = results["ticker"].map(lambda t: domestic[t].get("avg_volume_10d"))
     results = results.sort_values("loss_date", ascending=False).reset_index(drop=True)
     results = results[[
         "ticker", "name", "sector", "market_cap",
         "trailing_pe", "forward_pe", "dividend_yield", "ex_dividend_date",
-        "beta", "fifty_two_week_high", "fifty_two_week_low",
+        "beta", "fifty_two_week_high", "fifty_two_week_low", "avg_volume_10d",
         "loss_date", "loss_open", "loss_high", "loss_low", "loss_close",
-        "loss_volume", "loss_volume_vs_10d_avg", "loss_pe_approx", "drop_pct",
+        "loss_pe_approx", "drop_pct",
         "days_to_rebound",
         "gain_date", "gain_open", "gain_high", "gain_low", "gain_close",
-        "gain_volume", "gain_volume_vs_10d_avg", "gain_pe_approx", "gain_pct",
+        "gain_pe_approx", "gain_pct",
     ]]
     return results
