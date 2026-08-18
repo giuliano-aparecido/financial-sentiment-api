@@ -202,7 +202,22 @@ def find_crash_then_rebound(
             if not in_window[i]:
                 continue
             drop_pct = pct_change.iloc[i]
-            if drop_pct > drop_threshold:
+            # NaN happens on a ticker's own FIRST available trading day
+            # (pct_change has no prior close to compare against) - real,
+            # confirmed-live bug: `drop_pct > drop_threshold` is silently
+            # False for NaN (neither > nor <= any threshold evaluates
+            # True), so this check alone let a NaN drop_pct fall through
+            # as if it were a real, non-qualifying day instead of being
+            # excluded outright - producing a match row with drop_pct
+            # (and everything computed from it) as null, which crashed
+            # the frontend's row.drop_pct.toFixed(2) on receipt. Confirmed
+            # live for a recently-listed company whose own trading
+            # history starts inside the lookback window - HISTORY_PERIOD's
+            # buffer only protects against the WINDOW boundary landing
+            # mid-week, not against an individual ticker's history being
+            # shorter than the buffer itself. Explicit pd.isna check
+            # covers both cases the bare comparison silently missed.
+            if pd.isna(drop_pct) or drop_pct > drop_threshold:
                 continue
             crash_close = close.iloc[i]
 
