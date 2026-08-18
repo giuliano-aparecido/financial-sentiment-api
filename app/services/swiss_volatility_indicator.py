@@ -59,15 +59,27 @@ ALLOWED_THRESHOLD_PCTS = (2.0, 3.0, 5.0)
 
 
 def find_volatility_days(symbols, domestic, lookback_months, history_period, threshold_pct):
-    """Returns a DataFrame with one row per company that had at least one
-    qualifying day (loss_days + gain_days >= 1) in the lookback window -
-    companies with zero qualifying days are omitted entirely, not shown
-    with 0/0/0 (the table is specifically "which companies were this
-    volatile," not a full-universe listing). Columns: ticker, name,
-    sector, market_cap, loss_days (count of days closing down >=
-    threshold_pct), gain_days (count of days closing up >= threshold_pct),
-    total_days (loss_days + gain_days). Sorted by total_days descending -
-    the most volatile names first.
+    """Returns a DataFrame with one row per company that had AT LEAST ONE
+    qualifying loss day AND at least one qualifying gain day in the
+    lookback window - a company with only losses (or only gains) is
+    omitted, not shown with a 0 in one column (changed 2026-08-19 at the
+    user's explicit request: "It should show only companies with loss
+    and gains, if loss or gain is 0 then it should not be in the table" -
+    previously any company with EITHER at least one qualifying day of
+    EITHER kind was included, which is a looser bar than what was
+    actually wanted). Columns: ticker, name, sector, market_cap,
+    loss_days (count of days closing down >= threshold_pct - i.e. a
+    LOSS of at least threshold_pct), gain_days (count of days closing up
+    >= threshold_pct), total_days (loss_days + gain_days). Sorted by
+    total_days descending - the most volatile names first. NaN skipped
+    naturally: a NaN day (a ticker's own first available trading day,
+    see swiss_crash_rebound.py's identically-shaped bug/fix for the full
+    story) compares False against both `<=` and `>=` here, the same way
+    it silently passed the OLD unguarded check there - but here that's
+    actually safe and correct as-is, since neither comparison being
+    True just correctly excludes that one day from both counts, it
+    doesn't fabricate a false match the way a single unguarded `>`
+    comparison did in that other module.
     """
     if not symbols:
         return pd.DataFrame()
@@ -90,7 +102,7 @@ def find_volatility_days(symbols, domestic, lookback_months, history_period, thr
 
         loss_days = int((windowed <= -threshold_pct).sum())
         gain_days = int((windowed >= threshold_pct).sum())
-        if loss_days == 0 and gain_days == 0:
+        if loss_days == 0 or gain_days == 0:
             continue
 
         rows.append({

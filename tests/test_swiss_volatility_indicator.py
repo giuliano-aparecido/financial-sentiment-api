@@ -76,8 +76,8 @@ def test_find_volatility_days_excludes_days_below_threshold(today):
 
 
 def test_find_volatility_days_includes_at_exactly_threshold(today):
-    dates = pd.date_range(end=today, periods=2, freq="B")
-    closes = [100.0, 98.0]  # exactly -2.0%
+    dates = pd.date_range(end=today, periods=3, freq="B")
+    closes = [100.0, 98.0, 99.96]  # day1 exactly -2.0%, day2 exactly +2.0%
     crash_rebound_module._TEST_FRAMES = {"TEST.SW": _close_frame(dates, closes)}
 
     domestic = {"TEST.SW": _domestic_entry()}
@@ -85,6 +85,39 @@ def test_find_volatility_days_includes_at_exactly_threshold(today):
                                     history_period="13mo", threshold_pct=2.0)
     assert len(results) == 1
     assert results.iloc[0]["loss_days"] == 1
+    assert results.iloc[0]["gain_days"] == 1
+
+
+def test_find_volatility_days_excludes_company_with_only_loss_days(today):
+    # Regression test: previously a company with ANY qualifying day of
+    # EITHER kind was included (loss_days=0 AND gain_days=0 was the only
+    # exclusion) - changed 2026-08-19 at the user's explicit request to
+    # require BOTH kinds present, since "brings only losses, never a
+    # qualifying gain" isn't what a volatility-in-both-directions
+    # indicator is supposed to surface.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100.0]
+    for pct in [0, -3, 0, -4, 0, 0, 0, 0, 0, 0]:  # only losses, never a qualifying gain
+        closes.append(round(closes[-1] * (1 + pct / 100), 4))
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _close_frame(dates, closes[1:])}
+
+    domestic = {"TEST.SW": _domestic_entry()}
+    results = find_volatility_days(["TEST.SW"], domestic, lookback_months=12,
+                                    history_period="13mo", threshold_pct=2.0)
+    assert results.empty
+
+
+def test_find_volatility_days_excludes_company_with_only_gain_days(today):
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100.0]
+    for pct in [0, 3, 0, 4, 0, 0, 0, 0, 0, 0]:  # only gains, never a qualifying loss
+        closes.append(round(closes[-1] * (1 + pct / 100), 4))
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _close_frame(dates, closes[1:])}
+
+    domestic = {"TEST.SW": _domestic_entry()}
+    results = find_volatility_days(["TEST.SW"], domestic, lookback_months=12,
+                                    history_period="13mo", threshold_pct=2.0)
+    assert results.empty
 
 
 def test_find_volatility_days_excludes_matches_outside_lookback_window(today):
@@ -102,7 +135,7 @@ def test_find_volatility_days_excludes_matches_outside_lookback_window(today):
 def test_find_volatility_days_omits_companies_with_zero_qualifying_days(today):
     dates = pd.date_range(end=today, periods=10, freq="B")
     volatile_closes = [100.0]
-    for pct in [0, -5, 0, 0, 0, 0, 0, 0, 0, 0]:
+    for pct in [0, -5, 0, 5, 0, 0, 0, 0, 0, 0]:  # both a qualifying loss AND gain day
         volatile_closes.append(round(volatile_closes[-1] * (1 + pct / 100), 4))
     flat_closes = [100.0] * 10
     crash_rebound_module._TEST_FRAMES = {
@@ -127,9 +160,9 @@ def test_find_volatility_days_sorted_by_total_days_descending(today):
         return c[1:]
 
     crash_rebound_module._TEST_FRAMES = {
-        "MOST.SW": _close_frame(dates, _closes([0, -3, 3, -3, 3, -3, 3, 0, 0, 0])),   # 6 qualifying days
-        "MID.SW": _close_frame(dates, _closes([0, -3, 3, -3, 0, 0, 0, 0, 0, 0])),      # 3 qualifying days
-        "LEAST.SW": _close_frame(dates, _closes([0, -3, 0, 0, 0, 0, 0, 0, 0, 0])),     # 1 qualifying day
+        "MOST.SW": _close_frame(dates, _closes([0, -3, 3, -3, 3, -3, 3, 0, 0, 0])),   # 6 qualifying days (3 loss, 3 gain)
+        "MID.SW": _close_frame(dates, _closes([0, -3, 3, -3, 0, 0, 0, 0, 0, 0])),      # 3 qualifying days (2 loss, 1 gain)
+        "LEAST.SW": _close_frame(dates, _closes([0, -3, 3, 0, 0, 0, 0, 0, 0, 0])),     # 2 qualifying days (1 loss, 1 gain)
     }
     domestic = {t: _domestic_entry() for t in ["MOST.SW", "MID.SW", "LEAST.SW"]}
     results = find_volatility_days(["MOST.SW", "MID.SW", "LEAST.SW"], domestic, lookback_months=12,
@@ -143,8 +176,8 @@ def test_run_scan_returns_empty_dataframe_when_no_symbols():
 
 
 def test_run_scan_attaches_company_fields(today):
-    dates = pd.date_range(end=today, periods=3, freq="B")
-    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _close_frame(dates, [100.0, 94.0, 94.0])}
+    dates = pd.date_range(end=today, periods=4, freq="B")
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _close_frame(dates, [100.0, 94.0, 94.0, 98.7])}
 
     domestic = {"TEST.SW": {"name": "Test AG", "sector": "Healthcare", "market_cap": 5e9}}
     results = run_scan(domestic, threshold_pct=5.0)
@@ -154,8 +187,8 @@ def test_run_scan_attaches_company_fields(today):
     assert row["sector"] == "Healthcare"
     assert row["market_cap"] == 5e9
     assert row["loss_days"] == 1
-    assert row["gain_days"] == 0
-    assert row["total_days"] == 1
+    assert row["gain_days"] == 1
+    assert row["total_days"] == 2
 
 
 def test_allowed_threshold_pcts_are_2_3_5():
