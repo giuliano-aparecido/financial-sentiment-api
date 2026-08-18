@@ -244,6 +244,36 @@ def test_find_crash_then_rebound_chunks_download_calls(monkeypatch, today):
     assert set(results["ticker"]) == {symbols[0], symbols[3]}
 
 
+def test_find_crash_then_rebound_skips_nan_drop_pct_on_first_available_day(monkeypatch, today):
+    # Regression test: confirmed live in production - a recently-listed
+    # company's own trading history can start INSIDE the lookback window
+    # (HISTORY_PERIOD's buffer only protects against the window BOUNDARY
+    # landing mid-week, not against an individual ticker simply not
+    # having data going back that far). That ticker's own first day has
+    # no prior close, so pct_change() is NaN there - and `drop_pct >
+    # drop_threshold` is silently False for NaN (neither > nor <= any
+    # threshold is True for NaN), so the day fell through as if it
+    # legitimately failed the "not a big enough drop" check, instead of
+    # being excluded outright. Produced a match row with drop_pct (and
+    # everything computed from it) as null, which crashed the frontend's
+    # row.drop_pct.toFixed(2) on receipt.
+    dates = pd.date_range(end=today, periods=5, freq="B")  # only 5 days of history at all
+    closes = [50.0, 50.0, 100.0, 100.0, 99.64]  # day 0's own pct_change is NaN
+    volumes = [1000] * 5
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=12,
+                                       history_period="13mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    # Day 0 (NaN drop_pct) must never appear as a match, regardless of
+    # whatever else in the short history does or doesn't qualify.
+    assert not any(pd.isna(v) for v in results.get("drop_pct", []))
+    if not results.empty:
+        assert (results["loss_date"] != dates[0].date().isoformat()).all()
+
+
 def test_run_scan_returns_empty_dataframe_when_no_symbols():
     assert run_scan({}).empty
 
