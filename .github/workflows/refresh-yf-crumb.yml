@@ -1,0 +1,37 @@
+name: Refresh Yahoo crumb
+
+# Automates the Yahoo crumb-refresh workaround (see
+# scripts/refresh_yf_crumb.py's own docstring for the full "why"):
+# Render's outbound IP is blocked specifically at Yahoo's crumb-fetch
+# endpoint, so a fresh crumb+cookie pair has to be captured from OTHER
+# infrastructure (this runner) and pushed into Render's env vars, rather
+# than something Render itself can ever do for its own process.
+#
+# Daily, not more often: the seeded crumb/cookies have shown roughly a
+# week between real expiries so far (see this repo's own incident
+# history) - daily is a comfortable safety margin without burning
+# GitHub Actions minutes for no benefit. workflow_dispatch is there so
+# this can also be run on demand (e.g. right after confirming a fresh
+# expiry) without waiting for the next scheduled tick.
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install yfinance requests
+
+      - run: python scripts/refresh_yf_crumb.py
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}

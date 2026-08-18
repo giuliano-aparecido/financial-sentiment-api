@@ -65,6 +65,13 @@ logger = logging.getLogger(__name__)
 # own crumb-fetch lifts and a real fetch starts working again - this is a
 # stop-gap, not a permanent fix (the seeded crumb/cookies will themselves
 # eventually expire on Yahoo's side, at an unknown time).
+#
+# The refresh itself is automated as of scripts/refresh_yf_crumb.py +
+# .github/workflows/refresh-yf-crumb.yml - a daily scheduled job that
+# re-captures a fresh crumb+cookie pair from a GitHub Actions runner (not
+# Render, since Render's own IP is exactly what's blocked) and pushes it
+# into these two env vars via Render's API, then redeploys. See that
+# script's own docstring for the full reasoning and its limits.
 def _seed_yf_session_from_env():
     seed_crumb = os.environ.get("YF_SEED_CRUMB")
     seed_cookies_json = os.environ.get("YF_SEED_COOKIES")
