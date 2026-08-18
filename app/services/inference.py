@@ -6,6 +6,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE
+from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 # is interpolated upstream of all of them (market_data/valuation/earnings/
 # live_context). Not a full prompt-injection defense (none exists for
 # free-text LLM input) - just removes the cheapest, most direct way to
-# fake a section boundary.
+# fake a section boundary. Only Task B's prompt uses this (see
+# _build_analysis_prompt) - Task A never interpolates user_query at all.
 _QUERY_SANITIZE_HEADING_RE = re.compile(r"#{2,}")
 _QUERY_SANITIZE_MARKER_RE = re.compile(r"(?im)^\s*(instruction|input|response)\s*:\s*$")
 
@@ -73,69 +75,129 @@ def _client_or_raise() -> httpx.AsyncClient:
     return _client
 
 
-async def analyze_with_hf(
-    ticker: str,
-    user_query: str,
-    live_context: str,
-    market_data: str,
-    valuation: str,
-    earnings: str,
-) -> dict:
-    # Canonical prompt template - must stay byte-identical to
-    # financial-sentiment-model's colab/train/gpu/tpu train_model.py and
-    # evaluate_*.py copies (see that repo's CONTRIBUTING.md 4-way sync
-    # rule). The model is trained on exactly this shape; a drift here
-    # trains one prompt and serves another.
-    #
-    # Rules 2-6 below are new (audit-driven prompt fix, bundled with a
-    # retrain so the new instructions and the model's training data agree
-    # - a prompt-only change against the OLD checkpoint would just be
-    # unverified drift). Confirmed live gaps this closes: rule "1." used
-    # to be the ONLY critical rule, and it was about news specifically -
-    # nothing told the model how to weigh a large Valuation-block gap
-    # against a news headline, so it read as decorative (P1). NEUTRAL and
-    # confidence were both used in the instruction with no definition at
-    # all (P2). The output JSON schema the parser actually requires
-    # (impacted_stocks/direction/...) never appeared anywhere in the
-    # prompt, living only in the fine-tune weights - any checkpoint swap
-    # silently degraded to the raw_response fallback (P3). Rule 6 puts
-    # value-investing-checklist.md's graded P/E bands and the REIT
-    # Price/Book override into the prompt itself, not just an external
-    # doc the model never sees (P7, lightweight version - the sector name
-    # now always renders in market_data's Sector Median P/E line, even
-    # when no median exists for that sector, specifically so a Real
-    # Estate-sector company is identifiable without a new parameter).
-    #
-    # Deliberately NOT adding an "As of: <date>" line here (a separate
-    # audit finding, P5) - unlike the rules above, that needs a NEW
-    # per-row training column (neither dataset generator currently has an
-    # as_of_date field), so doing it here alone would silently mismatch
-    # inference's prompt shape against every training example's - the
-    # exact class of bug this repo has hit before (see git history:
-    # fix/training-prompt-whitespace-mismatch). Left for a follow-up that
-    # threads the column through both generators AND all 8 training/eval
-    # template copies together, not shipped half-done under time pressure.
-    sanitized_user_query = _sanitize_user_query(user_query)
-    prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_label: str) -> str:
+    """POSTs `prompt` to the configured HF inference endpoint and returns
+    the raw generated text - the shared transport core both classify_news
+    (Task A) and generate_analysis (Task B) build on. Raises
+    HTTPException(502) on any transport failure, non-200 response, or
+    unexpected response shape; a PARSE failure of otherwise-successful
+    generated text is each caller's own concern, not this function's."""
+    # Full prompt, not truncated - unlike the response-body logging below,
+    # the whole point here is to let you verify exactly what data/formatting
+    # reached the model (e.g. confirming market_data/valuation/earnings are
+    # populated and not silently "Data unavailable."), so cutting it short
+    # would defeat that. INFO (not DEBUG) so it shows up by default under
+    # this app's logging.basicConfig(level=logging.INFO) - no config change
+    # needed to see it in Render's log stream.
+    logger.info("Prompt sent to [%s/%s] for ticker=%s:\n%s", MODEL_ARCHITECTURE, task_label, ticker, prompt)
+
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": max_new_tokens,
+            "temperature": 0.1,
+            "return_full_text": False,
+        },
+    }
+
+    client = _client_or_raise()
+    try:
+        response = await client.post(_hf_inference_url, headers=headers, json=payload)
+    except httpx.RequestError as e:
+        logger.warning("HF inference request failed for [%s/%s] at %s: %s", MODEL_ARCHITECTURE, task_label, _hf_inference_url, e)
+        raise HTTPException(status_code=502, detail="Failed to reach the inference backend.")
+
+    if response.status_code != 200:
+        # response.text can carry HF account/model/quota details (or ngrok
+        # internals) - log it server-side, don't hand it to the client.
+        logger.warning("Inference error for [%s/%s]: %s %s", MODEL_ARCHITECTURE, task_label, response.status_code, response.text[:1000])
+        raise HTTPException(status_code=502, detail="The inference backend returned an error.")
+
+    try:
+        res_data = response.json()
+        return res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        logger.warning("Unexpected inference response shape for [%s/%s]: %s - body: %s", MODEL_ARCHITECTURE, task_label, e, response.text[:1000])
+        raise HTTPException(status_code=502, detail="The inference backend returned an unexpected response.")
+
+
+def _clean_model_output(raw_text: str) -> str:
+    """Strips special tokens and markdown code fences a raw generation can
+    carry, before handing the remainder to extract_json_object - same
+    cleaning both tasks' outputs need, factored out rather than
+    duplicated."""
+    clean = re.sub(r"<\|.*?\|>", "", raw_text)  # Strips <|eot_id|> and other Llama tokens
+    clean = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", clean)  # Strips ```json ... ``` code blocks
+    return clean.strip()
+
+
+_VALID_NEWS_REACTIONS = frozenset({"good", "bad", "neutral", "overreaction_down", "overreaction_up"})
+
+
+def _build_reaction_prompt(ticker: str, price_context: str, live_context: str) -> str:
+    # Canonical Task A template - must stay byte-identical to financial-
+    # sentiment-model's colab/train/{gpu,tpu}/train_model.py and
+    # evaluate_*.py copies, and runpod/{train_model,evaluate_model}.py
+    # (see that repo's CONTRIBUTING.md sync rule). The model is trained on
+    # exactly this shape; a drift here trains one prompt and serves
+    # another. Deliberately narrow: no user_query, no market_data/
+    # valuation/earnings - Task A only ever reasons about the news itself
+    # plus how the stock has recently moved, never fundamentals or the
+    # user's question (see the two-stage pipeline redesign - fusion.py,
+    # not this prompt, is what combines a reaction with valuation).
+    return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
 
-Analyze the following financial data and news and output JSON containing the impacted stock ticker, detailed reasoning, directional sentiment (BULLISH/BEARISH/NEUTRAL), confidence score, and a direct answer to the user's question, in exactly this shape:
-{{"impacted_stocks": [{{"ticker": "...", "reasoning": "...", "direction": "BULLISH|BEARISH|NEUTRAL", "confidence": 0.0-1.0, "answer": "..."}}]}}
+Classify how the market has reacted to the following news for this stock, given its recent price move, and output JSON containing your classification, in exactly this shape:
+{{"news_reaction": "good|bad|neutral|overreaction_down|overreaction_up"}}
 
-CRITICAL SENTIMENT RULES:
+news_reaction definitions:
+- good: the news is genuinely positive for the stock.
+- bad: the news is genuinely negative for the stock.
+- neutral: the news is routine/ambiguous, not a real catalyst either way.
+- overreaction_down: the price fell more than this news alone would justify - a plausible overreaction to the downside.
+- overreaction_up: the price rose more than this news alone would justify - a plausible overreaction to the upside.
 
-1. Weigh guidance cuts and revenue misses higher than minor operational wins.
-2. The Valuation block is a real, structural signal, not decoration - a large over/undervaluation gap should meaningfully shape your direction and confidence, not just recent news. Only let concrete, current news override it when the news describes a specific catalyst (an actual event, not a generic "market volatility" statement) the valuation estimate couldn't have priced in.
-3. NEUTRAL means the available signals genuinely conflict or are too weak/routine to support a directional call - not a default for "I'm not sure." Use it when Valuation, Market Data, Earnings, and News don't converge on one direction, or when nothing in the input is materially new.
-4. confidence is a 0.0-1.0 score for how strongly the evidence supports your direction, not how certain you are a direction exists at all - a NEUTRAL call can still carry moderate confidence when "no clear signal" is itself well-supported.
-5. "Data unavailable." or "Not applicable (...)" in any block means exactly that - treat it as missing information, never invent numbers or events to fill the gap.
-6. P/E under 20 (sector-adjusted via Sector Median P/E) suggests undervaluation; 20-30 is roughly neutral; over 30 suggests a richer valuation that needs a real growth story to justify. For a Real Estate-sector company specifically, Price/Book below 1.0 is the more meaningful signal - GAAP depreciation makes P/E unreliable for that sector.
+### Input:
+
+Target Stock: {ticker}
+Recent Price Move: {price_context}
+
+Recent News & Results:
+{live_context}
+
+### Response:
+
+"""
+
+
+def _build_analysis_prompt(
+    ticker: str, user_query: str, news_reaction: str, recommendation: str,
+    market_data: str, valuation: str, earnings: str, live_context: str,
+) -> str:
+    # Canonical Task B template - same sync requirement as
+    # _build_reaction_prompt above. news_reaction/recommendation are
+    # ALREADY-DECIDED inputs here (fuse()'s output, never guessed by this
+    # call) - the instruction explicitly forbids advising the opposite of
+    # Recommended Action, mirroring the training data's own framing.
+    sanitized_user_query = _sanitize_user_query(user_query)
+    return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+### Instruction:
+
+You are given a recommended action for this stock, already determined from valuation and news analysis - your job is to explain it, not decide it. Output JSON containing detailed reasoning and a direct answer to the user's question, in exactly this shape:
+{{"reasoning": "...", "answer": "..."}}
+
+Your reasoning and answer must be consistent with the Recommended Action below and must never advise the opposite. Treat News Reaction and Recommended Action as given facts, not conclusions to re-derive.
 
 ### Input:
 
 Target Stock: {ticker}
 User Question: {sanitized_user_query}
+News Reaction: {news_reaction}
+Recommended Action: {recommendation}
 
 Current Market Data:
 {market_data}
@@ -153,90 +215,110 @@ Recent News & Results:
 
 """
 
-    # Full prompt, not truncated - unlike the response-body logging below,
-    # the whole point here is to let you verify exactly what data/formatting
-    # reached the model (e.g. confirming market_data/valuation/earnings are
-    # populated and not silently "Data unavailable."), so cutting it short
-    # would defeat that. INFO (not DEBUG) so it shows up by default under
-    # this app's logging.basicConfig(level=logging.INFO) - no config change
-    # needed to see it in Render's log stream.
-    logger.info("Prompt sent to [%s] for ticker=%s:\n%s", MODEL_ARCHITECTURE, ticker, prompt)
 
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            # 350 -> 512: the v4 `answer` field adds length beyond what the
-            # old 4-field JSON output needed.
-            "max_new_tokens": 512,
-            "temperature": 0.1,
-            "return_full_text": False,
-        },
+async def classify_news(ticker: str, price_context: str, live_context: str) -> str | None:
+    """Task A: classifies how the market has reacted to `live_context`
+    given `price_context` (see fundamentals.recent_price_move). Returns
+    the news_reaction string on success, or None if the model's output
+    didn't parse as JSON or named a class outside _VALID_NEWS_REACTIONS -
+    callers must normalize a None to a safe default (see analyze_two_
+    stage) rather than letting it propagate, since fusion.fuse() raises
+    on an unrecognized reaction by design (a real bug should never be
+    silently masked by an accidental fallback recommendation)."""
+    prompt = _build_reaction_prompt(ticker, price_context, live_context)
+    raw_text = await _call_model(prompt, max_new_tokens=48, ticker=ticker, task_label="reaction")
+    try:
+        json_str = extract_json_object(_clean_model_output(raw_text))
+        reaction = json.loads(json_str)["news_reaction"]
+        if reaction not in _VALID_NEWS_REACTIONS:
+            raise ValueError(f"unrecognized news_reaction: {reaction!r}")
+        return reaction
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.info("Task A output for [%s] ticker=%s wasn't a valid news_reaction (%s) - raw: %r",
+                    MODEL_ARCHITECTURE, ticker, e, raw_text[:300])
+        return None
+
+
+async def generate_analysis(
+    ticker: str, user_query: str, news_reaction: str, recommendation: str,
+    market_data: str, valuation: str, earnings: str, live_context: str,
+) -> dict:
+    """Task B: writes reasoning/answer given an ALREADY-DECIDED news_
+    reaction + recommendation (never asked to produce either). Returns
+    {"reasoning", "answer", "raw_json"} on success, or {"raw_response":
+    ...} if the model's output didn't parse - the caller (analyze_two_
+    stage) still has the recommendation/confidence/news_reaction
+    regardless, since none of those ever depended on this call
+    succeeding (a strict improvement over the old single-call design,
+    where a parse failure lost the recommendation entirely)."""
+    prompt = _build_analysis_prompt(
+        ticker, user_query, news_reaction, recommendation, market_data, valuation, earnings, live_context,
+    )
+    raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis")
+    try:
+        json_str = extract_json_object(_clean_model_output(raw_text))
+        parsed = json.loads(json_str)
+        return {"reasoning": parsed["reasoning"], "answer": parsed["answer"], "raw_json": parsed}
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.info("Task B output for [%s] ticker=%s wasn't the expected JSON shape (%s) - falling back to raw_response",
+                    MODEL_ARCHITECTURE, ticker, e)
+        return {"raw_response": raw_text}
+
+
+async def analyze_two_stage(
+    ticker: str,
+    user_query: str,
+    live_context: str,
+    market_data: str,
+    valuation: str,
+    earnings: str,
+    price_context: str,
+    gap_pct: float | None,
+) -> dict:
+    """Orchestrates the two-stage pipeline: Task A classifies news_
+    reaction -> fusion.fuse() computes the ONLY recommendation this
+    service ever produces -> Task B explains it, given that
+    recommendation as input. Neither LLM call ever decides BUY/SELL/HOLD
+    itself - see fusion.py's own module docstring for why. Replaces the
+    old single-call analyze_with_hf."""
+    news_reaction = await classify_news(ticker, price_context, live_context)
+    news_reaction_fallback = news_reaction is None
+    if news_reaction_fallback:
+        # Fusion still yields a valuation-driven recommendation off
+        # "neutral" - conservative (never invents a directional read) and
+        # keeps the response usable even when Task A's output was
+        # unparseable (including the safety case of an old, pre-redesign
+        # checkpoint still pointed at by this API, which would emit an
+        # entirely different JSON shape here).
+        news_reaction = "neutral"
+
+    fusion_result = fuse(news_reaction, gap_pct)
+
+    analysis = await generate_analysis(
+        ticker, user_query, news_reaction, fusion_result.recommendation,
+        market_data, valuation, earnings, live_context,
+    )
+
+    result = {
+        "model_architecture": MODEL_ARCHITECTURE,
+        "ticker": ticker,
+        "live_news_retrieved": live_context,
+        "recommendation": fusion_result.recommendation,
+        "confidence": fusion_result.confidence,
+        "news_reaction": news_reaction,
+        "valuation_gap_pct": gap_pct,
+        "market_data": market_data,
+        "valuation": valuation,
+        "earnings": earnings,
+        "raw_json": {"task_a": {"news_reaction": news_reaction}, "task_b": analysis.get("raw_json")},
     }
+    if news_reaction_fallback:
+        result["news_reaction_fallback"] = True
 
-    client = _client_or_raise()
-    try:
-        response = await client.post(_hf_inference_url, headers=headers, json=payload)
-    except httpx.RequestError as e:
-        logger.warning("HF inference request failed for [%s] at %s: %s", MODEL_ARCHITECTURE, _hf_inference_url, e)
-        raise HTTPException(status_code=502, detail="Failed to reach the inference backend.")
+    if "reasoning" in analysis:
+        result["reasoning"] = analysis["reasoning"]
+        result["answer"] = analysis["answer"]
+    else:
+        result["raw_response"] = analysis["raw_response"]
 
-    if response.status_code != 200:
-        # response.text can carry HF account/model/quota details (or ngrok
-        # internals) - log it server-side, don't hand it to the client.
-        logger.warning("Inference error for [%s]: %s %s", MODEL_ARCHITECTURE, response.status_code, response.text[:1000])
-        raise HTTPException(status_code=502, detail="The inference backend returned an error.")
-
-    try:
-        res_data = response.json()
-        raw_model_output = res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-        logger.warning("Unexpected inference response shape for [%s]: %s - body: %s", MODEL_ARCHITECTURE, e, response.text[:1000])
-        raise HTTPException(status_code=502, detail="The inference backend returned an unexpected response.")
-
-    try:
-        # Clean special tokens, markdown code fences, and whitespace
-        clean_output = re.sub(r"<\|.*?\|>", "", raw_model_output)  # Strips <|eot_id|> and other Llama tokens
-        clean_output = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", clean_output)  # Strips ```json ... ``` code blocks
-        clean_output = clean_output.strip()
-
-        # Extract only the valid JSON substring if there's surrounding text
-        json_str = extract_json_object(clean_output)
-
-        analysis_json = json.loads(json_str)
-        impact = analysis_json["impacted_stocks"][0]
-
-        result = {
-            "model_architecture": MODEL_ARCHITECTURE,
-            "ticker": ticker,
-            "live_news_retrieved": live_context,
-            "reasoning": impact["reasoning"],
-            "predicted_direction": impact["direction"],
-            "confidence": impact["confidence"],
-            "raw_json": analysis_json,
-            "market_data": market_data,
-            "valuation": valuation,
-            "earnings": earnings,
-        }
-        # .get, not impact["answer"] - a still-served older model (pre-v4)
-        # won't have this key at all, and that must degrade to an omitted
-        # field, not a 500 on an otherwise-successful analysis.
-        answer = impact.get("answer")
-        if answer is not None:
-            result["answer"] = answer
-        return result
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-        logger.info("Model output for [%s] wasn't the expected JSON shape (%s) - falling back to raw_response", MODEL_ARCHITECTURE, e)
-        return {
-            "model_architecture": MODEL_ARCHITECTURE,
-            "ticker": ticker,
-            "live_news_retrieved": live_context,
-            "raw_response": raw_model_output,
-            # Still attached even though the model's own output didn't
-            # parse - these were fetched independently by the router and
-            # remain valid regardless of what the model returned, so the
-            # UI can still show data cards alongside the raw fallback text.
-            "market_data": market_data,
-            "valuation": valuation,
-            "earnings": earnings,
-        }
+    return result

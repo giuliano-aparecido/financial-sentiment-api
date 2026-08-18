@@ -1133,6 +1133,13 @@ def _payout_blend_fraction(payout_ratio: float | None) -> float | None:
 
 
 def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) -> str:
+    """Convenience wrapper for callers that only need the rendered text -
+    see valuation_assessment_for (this function's superset) for the full
+    docstring and the numeric gap this discards."""
+    return valuation_assessment_for(fundamentals, ticker)[0]
+
+
+def valuation_assessment_for(fundamentals: dict | None, ticker: str | None = None) -> tuple[str, float | None]:
     """Convenience wrapper for callers holding a fundamentals.fetch_
     fundamentals() result - classifies the valuation basis, builds this
     company's scenarios (see build_scenarios), computes the intrinsic
@@ -1143,9 +1150,20 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
     build_scenarios can never match CURATED_SCENARIOS and always falls
     back to derived/generic, and the audit log below just omits the label;
     callers without it (e.g. existing tests) still work.
+
+    Returns (block_text, gap_pct). gap_pct is the RAW, uncapped/unrounded
+    (price - intrinsic) / intrinsic * 100 (positive = overvalued) behind
+    the rendered block, or None whenever there's no usable price/intrinsic
+    pair (the "Data unavailable."/"Not applicable" early exits, or a
+    fallback chain that never found a usable basis). This is what
+    fusion.py's valuation_bucket() consumes directly - the 150%
+    VALUATION_PCT_DISPLAY_CAP applied when RENDERING block_text is a
+    display concern only, never part of the fusion decision. valuation_
+    block_for (above) is the pre-existing single-value convenience
+    wrapper, kept so every prior caller/test needs no change.
     """
     if not fundamentals or fundamentals.get("price") is None:
-        return "Data unavailable."
+        return "Data unavailable.", None
 
     basis = classify_valuation_basis(
         fundamentals.get("eps_trailing"),
@@ -1192,7 +1210,7 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
         if recent_eps_surprise is not None and recent_eps_surprise > EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD:
             block = valuation_block(fundamentals["price"], None, "eps")
             _log_valuation_computation(ticker, fundamentals, "eps", None, {}, None, block)
-            return block
+            return block, None
 
     def compute(b: str, include_dividend_pv: bool):
         cf0_ = cash_flow_basis_value(b, fundamentals)
@@ -1267,4 +1285,7 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
 
     block = valuation_block(fundamentals["price"], intrinsic, basis)
     _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block)
-    return block
+    gap_pct = None
+    if intrinsic is not None and intrinsic != 0:
+        gap_pct = (fundamentals["price"] - intrinsic) / intrinsic * 100
+    return block, gap_pct

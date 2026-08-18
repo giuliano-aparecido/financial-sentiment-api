@@ -3,21 +3,26 @@ from app.routers import analyze as analyze_router
 VALID_KEY = "test-api-key"  # matches conftest.py's API_KEY env var
 
 
-def _patch_services(monkeypatch, fundamentals=None, earnings_data=None):
+def _patch_services(monkeypatch, fundamentals=None, earnings_data=None, price_move=("Data unavailable.", None)):
     monkeypatch.setattr(analyze_router, "fetch_live_news_rag", lambda ticker: f"news for {ticker}")
     monkeypatch.setattr(analyze_router, "fetch_fundamentals", lambda ticker: fundamentals)
     monkeypatch.setattr(analyze_router, "fetch_earnings", lambda ticker: earnings_data)
+    monkeypatch.setattr(analyze_router, "recent_price_move", lambda ticker: price_move)
 
     captured = {}
 
-    async def fake_analyze_with_hf(ticker, user_query, live_context, market_data, valuation, earnings):
+    async def fake_analyze_two_stage(ticker, user_query, live_context, market_data, valuation, earnings, price_context, gap_pct):
         captured.update(
             ticker=ticker, user_query=user_query, live_context=live_context,
             market_data=market_data, valuation=valuation, earnings=earnings,
+            price_context=price_context, gap_pct=gap_pct,
         )
-        return {"predicted_direction": "BULLISH", "market_data": market_data, "valuation": valuation, "earnings": earnings}
+        return {
+            "recommendation": "HOLD", "news_reaction": "neutral",
+            "market_data": market_data, "valuation": valuation, "earnings": earnings,
+        }
 
-    monkeypatch.setattr(analyze_router, "analyze_with_hf", fake_analyze_with_hf)
+    monkeypatch.setattr(analyze_router, "analyze_two_stage", fake_analyze_two_stage)
     return captured
 
 
@@ -34,7 +39,10 @@ def test_analyze_route_wires_fetched_blocks_into_inference_call(client, monkeypa
         "last_quarter_date": "2026-06-30", "revenue": 85.8e9, "yoy_growth_pct": 4.9,
         "eps_actual": 1.40, "eps_estimate": 1.35, "next_earnings_date": "2026-10-29",
     }
-    captured = _patch_services(monkeypatch, fundamentals=fundamentals, earnings_data=earnings_data)
+    captured = _patch_services(
+        monkeypatch, fundamentals=fundamentals, earnings_data=earnings_data,
+        price_move=("AAPL moved -3.4% over the last 3 trading days.", -0.034),
+    )
 
     response = client.post(
         "/api/analyze",
@@ -48,6 +56,11 @@ def test_analyze_route_wires_fetched_blocks_into_inference_call(client, monkeypa
     assert "Price: $189.30" in captured["market_data"]
     assert "EPS-based" in captured["valuation"]
     assert "Revenue $85.8B" in captured["earnings"]
+    assert captured["price_context"] == "AAPL moved -3.4% over the last 3 trading days."
+    # A real, meaningful over/undervaluation gap should be a nonzero
+    # number - the router must actually thread valuation_assessment_for's
+    # second return value through to analyze_two_stage, not drop it.
+    assert isinstance(captured["gap_pct"], float)
 
 
 def test_analyze_route_degrades_gracefully_when_fundamentals_and_earnings_fail(client, monkeypatch):
@@ -66,3 +79,4 @@ def test_analyze_route_degrades_gracefully_when_fundamentals_and_earnings_fail(c
     assert captured["market_data"] == "Data unavailable."
     assert captured["valuation"] == "Data unavailable."
     assert captured["earnings"] == "Data unavailable."
+    assert captured["gap_pct"] is None

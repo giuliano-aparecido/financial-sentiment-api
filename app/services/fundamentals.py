@@ -232,6 +232,49 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     return fundamentals
 
 
+def recent_price_move(ticker: str) -> tuple[str, float | None]:
+    """3-trading-day trailing price move - Task A's only price signal (see
+    inference.py's classify_news). Canonical phrasing shared with
+    financial-sentiment-model's generate_real_dataset.py/generate_
+    synthetic_dataset.py price_context_block: training data measures the
+    3 trading days AFTER a headline's publish date (a clean window to
+    label from), while a live request has no "after" yet for a brand-new
+    headline, so this measures the 3 trading days BEFORE/trailing the
+    request instead - both describe the same underlying thing (how has
+    this stock been moving around the time of this news), just anchored
+    from opposite ends of the (headline, price-window) pair, which is
+    close enough for the model to generalize across (documented
+    approximation, not a bug).
+
+    Returns (text, move_fraction) - move_fraction is a plain fraction
+    (0.056 for +5.6%, matching price_context_block's own convention on
+    the training side), not a percentage. ("Data unavailable.", None) on
+    any fetch failure or insufficient history (a market holiday,
+    illiquid/thinly-traded ticker, brand-new listing, etc.).
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period="10d")
+    except Exception as e:
+        logger.warning("yfinance price-history fetch failed for %s: %s", ticker, e)
+        return "Data unavailable.", None
+
+    # Need today's close plus 3 trading days back - a flat 10-calendar-day
+    # window comfortably covers that even across a long weekend/holiday,
+    # same cushion-over-minimum spirit as this module's other yfinance
+    # calls.
+    if len(hist) < 4:
+        return "Data unavailable.", None
+
+    closes = hist["Close"]
+    latest_close = closes.iloc[-1]
+    three_days_ago_close = closes.iloc[-4]
+    if not _usable(latest_close) or not _usable(three_days_ago_close) or not three_days_ago_close:
+        return "Data unavailable.", None
+
+    move_fraction = (latest_close - three_days_ago_close) / three_days_ago_close
+    return f"{ticker} moved {move_fraction * 100:+.1f}% over the last 3 trading days.", move_fraction
+
+
 # See value_screen_metrics' own comment on peg_ratio for why this exists.
 PEG_MIN_GROWTH_FOR_COMPUTATION = 0.02
 

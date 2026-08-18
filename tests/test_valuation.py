@@ -14,6 +14,7 @@ from app.services.valuation import (
     intrinsic_value,
     scenario_dcf_value,
     scenario_terminal_value,
+    valuation_assessment_for,
     valuation_block,
     valuation_block_for,
 )
@@ -803,3 +804,106 @@ def test_valuation_block_for_normal_surprise_does_not_trigger_not_applicable():
         "recent_eps_surprise": 0.25,
     }
     assert "EPS-based" in valuation_block_for(fundamentals, ticker="QCOM")
+
+
+# --- valuation_assessment_for (fusion.py's numeric gap source) ---
+
+
+def test_valuation_assessment_for_returns_same_block_as_valuation_block_for():
+    fundamentals = {
+        "price": 300.0,
+        "eps_trailing": 6.53,
+        "payout_ratio": 0.10,
+        "sector": "Technology",
+        "free_cash_flow": None,
+        "market_cap": 3.0e12,
+    }
+    block, gap_pct = valuation_assessment_for(fundamentals, ticker="NVDA")
+    assert block == valuation_block_for(fundamentals, ticker="NVDA")
+    assert gap_pct is not None
+
+
+def test_valuation_assessment_for_gap_sign_positive_when_overvalued():
+    # price 300 vs intrinsic $270.71 (see the byte-identical block test
+    # above) - price above intrinsic is overvalued, a positive gap in
+    # fusion.py's convention (gap_pct = (price-intrinsic)/intrinsic*100).
+    fundamentals = {
+        "price": 300.0,
+        "eps_trailing": 6.53,
+        "payout_ratio": 0.10,
+        "sector": "Technology",
+        "free_cash_flow": None,
+        "market_cap": 3.0e12,
+    }
+    _block, gap_pct = valuation_assessment_for(fundamentals, ticker="NVDA")
+    assert gap_pct > 0
+    assert gap_pct == pytest.approx(300.0 / 270.71 * 100 - 100, rel=0.01)
+
+
+def test_valuation_assessment_for_gap_sign_negative_when_undervalued():
+    fundamentals = {
+        "price": 100.0,
+        "eps_trailing": 20.0,
+        "payout_ratio": 0.10,
+        "sector": "Technology",
+        "free_cash_flow": None,
+        "market_cap": 3.0e11,
+    }
+    block, gap_pct = valuation_assessment_for(fundamentals, ticker="TESTX")
+    assert "undervalued" in block
+    assert gap_pct < 0
+
+
+def test_valuation_assessment_for_gap_is_none_when_data_unavailable():
+    assert valuation_assessment_for(None) == ("Data unavailable.", None)
+    assert valuation_assessment_for({"price": None}) == ("Data unavailable.", None)
+
+
+def test_valuation_assessment_for_gap_is_none_when_not_applicable():
+    fundamentals = {
+        "price": 189.30,
+        "eps_trailing": None,
+        "payout_ratio": 0.10,
+        "sector": "Technology",
+        "total_revenue": None,
+        "market_cap": 1.0e12,
+    }
+    block, gap_pct = valuation_assessment_for(fundamentals)
+    assert block == "Not applicable (insufficient data for the revenue-based valuation basis)."
+    assert gap_pct is None
+
+
+def test_valuation_assessment_for_gap_is_none_when_eps_distorted_by_earnings_surprise():
+    fundamentals = {
+        "price": 216.15,
+        "eps_trailing": 8.75,
+        "payout_ratio": 0.0,
+        "sector": "Technology",
+        "free_cash_flow": 1.0e10,
+        "market_cap": 1.7e11,
+        "recent_eps_surprise": 2.13,
+    }
+    block, gap_pct = valuation_assessment_for(fundamentals, ticker="GOOG")
+    assert block.startswith("Not applicable")
+    assert gap_pct is None
+
+
+def test_valuation_assessment_for_gap_uncapped_past_display_cap():
+    # The rendered block text caps display at VALUATION_PCT_DISPLAY_CAP
+    # (150%) - the raw gap_pct fusion.py actually consumes must NOT be
+    # capped the same way, since fusion's confidence scaling treats
+    # anything past a 50-point gap identically anyway (see
+    # test_fusion.py's own test for that), and capping the number itself
+    # (not just the display) would understate how decisive the signal
+    # really is.
+    fundamentals = {
+        "price": 1000.0,
+        "eps_trailing": 6.53,
+        "payout_ratio": 0.10,
+        "sector": "Technology",
+        "free_cash_flow": None,
+        "market_cap": 3.0e12,
+    }
+    block, gap_pct = valuation_assessment_for(fundamentals, ticker="NVDA")
+    assert ">150%" in block or ">" in block  # display is capped
+    assert gap_pct > VALUATION_PCT_DISPLAY_CAP  # the raw number is not
