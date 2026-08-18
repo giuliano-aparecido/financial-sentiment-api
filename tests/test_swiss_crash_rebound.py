@@ -246,6 +246,48 @@ def test_find_crash_then_rebound_chunks_download_calls(monkeypatch, today):
     assert set(results["ticker"]) == {symbols[0], symbols[3]}
 
 
+def test_find_crash_then_rebound_volume_ratio_uses_domestic_avg_volume_10d(monkeypatch, today):
+    # Regression test: the vs-average volume ratio used to be computed as
+    # a mean over this function's OWN downloaded Volume column (which
+    # meant "3-month average" only by coincidence, back when
+    # HISTORY_PERIOD was "4mo") - now reads the SAME avg_volume_10d figure
+    # swiss_universe.filter_domestic already computes, passed in via the
+    # domestic dict, so it can't silently drift when HISTORY_PERIOD
+    # changes for an unrelated reason (e.g. the lookback-window widening
+    # this test file's other cases still use "4mo"/3-month args for).
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    volumes = [1000] * 8 + [5000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0, "avg_volume_10d": 2500}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    row = results.iloc[0]
+    assert row["loss_volume_vs_10d_avg"] == 2.0   # 5000 / 2500
+    assert row["gain_volume_vs_10d_avg"] == 3.2   # 8000 / 2500
+
+
+def test_find_crash_then_rebound_volume_ratio_none_when_avg_volume_10d_missing(monkeypatch, today):
+    # e.g. the STATIC_DOMESTIC_TICKER_SNAPSHOT fallback path, where no
+    # live .info data (and so no avg_volume_10d) is available at all.
+    dates = pd.date_range(end=today, periods=10, freq="B")
+    closes = [100, 100, 100, 100, 100, 100, 100, 100, 94, 99.64]
+    volumes = [1000] * 8 + [5000, 8000]
+    crash_rebound_module._TEST_FRAMES = {"TEST.SW": _ohlcv_frame(dates, closes, volumes)}
+    monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
+
+    domestic = {"TEST.SW": {"trailing_eps": 5.0}}
+    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
+                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+
+    row = results.iloc[0]
+    assert row["loss_volume_vs_10d_avg"] is None
+    assert row["gain_volume_vs_10d_avg"] is None
+
+
 def test_run_scan_returns_empty_dataframe_when_no_symbols():
     assert run_scan({}).empty
 
@@ -275,7 +317,7 @@ def test_run_scan_attaches_current_snapshot_company_fields(monkeypatch, today):
     assert row["beta"] == 1.27
     assert row["fifty_two_week_high"] == 2590.0
     assert row["fifty_two_week_low"] == 1258.0
-    # Raw volume (not just the vs-3mo-average ratio) is present for both
+    # Raw volume (not just the vs-10d-average ratio) is present for both
     # the loss day and the gain day.
     assert row["loss_volume"] == 5000
     assert row["gain_volume"] == 8000

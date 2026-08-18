@@ -5,14 +5,12 @@ Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that had a
 day with a >=5% loss followed, within the next REBOUND_WINDOW_TRADING_DAYS
 trading days, by a close that's >=5% ABOVE THE CRASH DAY'S OWN CLOSE (not
 the previous day's close - see find_crash_then_rebound's own docstring for
-why that distinction matters), within the last N months. Universe defaults
-to a small-cap band but
-can widen to include mid/large caps too (SMI's 20 largest excluded either
-way) - see swiss_universe.py's ALL_CAPS_MIN/MAX_MARKET_CAP_CHF and
-research_job.start_scan's all_caps parameter. Either way this is looking
-for VOLATILE movers, not necessarily small companies specifically -
-small-cap is just the more volatile default band, not the point in
-itself.
+why that distinction matters), within the last N months (12 as of
+2026-08-18, widened from 3 at the user's request). Universe: SIX-listed,
+Switzerland-domiciled companies with market cap > CHF 500M (SMI's 20
+largest still excluded regardless - see swiss_universe.py's MIN/
+MAX_MARKET_CAP_CHF and SMI_TICKERS). This is looking for VOLATILE movers,
+not necessarily small companies specifically.
 
 Ported from the standalone research/ project (D:\\projects\\research) into
 this app so it can run from a real, always-on server (Render) instead of a
@@ -46,12 +44,13 @@ import yfinance as yf
 
 # --- Config ---
 
-LOOKBACK_MONTHS = 3
+LOOKBACK_MONTHS = 12  # widened from 3 at the user's request, 2026-08-18
 # Fetched history is deliberately longer than the lookback window so the
 # FIRST day inside the window still has a valid previous-close to compute
 # a % change against - without this buffer, a lookback boundary that lands
-# mid-week would silently drop that day's move.
-HISTORY_PERIOD = "4mo"
+# mid-week would silently drop that day's move. Same 1-month buffer ratio
+# as the original 3mo/"4mo" pair, scaled up with LOOKBACK_MONTHS.
+HISTORY_PERIOD = "13mo"
 
 DROP_THRESHOLD_PCT = -5.0   # day N close-to-close change <= this
 GAIN_THRESHOLD_PCT = 5.0    # rebound-day close vs CRASH DAY's close >= this
@@ -164,11 +163,19 @@ def find_crash_then_rebound(
 
         close = ohlcv["Close"]
         volume = ohlcv["Volume"]
-        # 3-month AVERAGE volume as the yardstick for "was this day's
-        # volume unusual" - computed over the full downloaded window
-        # (HISTORY_PERIOD), not just the lookback window, for a more
-        # stable baseline.
-        avg_volume = volume.mean()
+        # 10-day average volume (see swiss_universe.filter_domestic's
+        # avg_volume_10d) as the yardstick for "was this day's volume
+        # unusual" - previously a mean computed manually over this
+        # module's own full downloaded window (which meant "3-month
+        # average" only by coincidence, back when HISTORY_PERIOD was
+        # "4mo"; would have silently become a ~13-month average once
+        # LOOKBACK_MONTHS widened to 12, with no code change to signal
+        # it). Reusing the SAME already-fetched figure swiss_universe.py
+        # computes for its liquidity filter keeps one volume-averaging
+        # methodology for the whole feature, not two independently
+        # drifting ones. None when unavailable (e.g. the STATIC_DOMESTIC_
+        # TICKER_SNAPSHOT fallback path - see that dict's own comment).
+        avg_volume = domestic[symbol].get("avg_volume_10d")
         pct_change = close.pct_change() * 100
         trailing_eps = domestic[symbol]["trailing_eps"]
         in_window = pct_change.index >= cutoff
@@ -210,7 +217,7 @@ def find_crash_then_rebound(
                 "loss_low": round(ohlcv["Low"].iloc[i], 2),
                 "loss_close": round(close.iloc[i], 2),
                 "loss_volume": int(loss_volume) if pd.notna(loss_volume) else None,
-                "loss_volume_vs_3mo_avg": round(loss_volume / avg_volume, 2) if avg_volume else None,
+                "loss_volume_vs_10d_avg": round(loss_volume / avg_volume, 2) if avg_volume else None,
                 "loss_pe_approx": approx_pe(close.iloc[i], trailing_eps),
                 "drop_pct": round(drop_pct, 2),
                 "days_to_rebound": rebound_j - i,
@@ -220,7 +227,7 @@ def find_crash_then_rebound(
                 "gain_low": round(ohlcv["Low"].iloc[rebound_j], 2),
                 "gain_close": round(close.iloc[rebound_j], 2),
                 "gain_volume": int(gain_volume) if pd.notna(gain_volume) else None,
-                "gain_volume_vs_3mo_avg": round(gain_volume / avg_volume, 2) if avg_volume else None,
+                "gain_volume_vs_10d_avg": round(gain_volume / avg_volume, 2) if avg_volume else None,
                 "gain_pe_approx": approx_pe(close.iloc[rebound_j], trailing_eps),
                 "gain_pct": round(rebound_pct, 2),
             })
@@ -264,9 +271,9 @@ def run_scan(domestic: dict) -> pd.DataFrame:
         "trailing_pe", "forward_pe", "dividend_yield", "ex_dividend_date",
         "beta", "fifty_two_week_high", "fifty_two_week_low",
         "loss_date", "loss_open", "loss_high", "loss_low", "loss_close",
-        "loss_volume", "loss_volume_vs_3mo_avg", "loss_pe_approx", "drop_pct",
+        "loss_volume", "loss_volume_vs_10d_avg", "loss_pe_approx", "drop_pct",
         "days_to_rebound",
         "gain_date", "gain_open", "gain_high", "gain_low", "gain_close",
-        "gain_volume", "gain_volume_vs_3mo_avg", "gain_pe_approx", "gain_pct",
+        "gain_volume", "gain_volume_vs_10d_avg", "gain_pe_approx", "gain_pct",
     ]]
     return results

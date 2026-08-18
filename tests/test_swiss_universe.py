@@ -23,7 +23,7 @@ def _base_info(**overrides):
         "beta": 1.27,
         "fiftyTwoWeekHigh": 2590.0,
         "fiftyTwoWeekLow": 1258.0,
-        "regularMarketVolume": 100_000,  # comfortably above MIN_INTRADAY_VOLUME (50k)
+        "averageDailyVolume10Day": 100_000,  # comfortably above MIN_AVG_DAILY_VOLUME_10D (50k)
     }
     info.update(overrides)
     return info
@@ -87,10 +87,10 @@ def test_filter_domestic_excludes_foreign_domiciled(monkeypatch):
     assert domestic == {}
 
 
-def test_filter_domestic_excludes_below_min_intraday_volume(monkeypatch):
+def test_filter_domestic_excludes_below_min_avg_daily_volume_10d(monkeypatch):
     monkeypatch.setattr(
         swiss_universe_module.yf, "Ticker",
-        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME - 1)),
+        lambda symbol: _FakeTicker(_base_info(averageDailyVolume10Day=swiss_universe_module.MIN_AVG_DAILY_VOLUME_10D - 1)),
     )
     candidates = {"THIN.SW": {"longName": "Thin AG", "marketCap": 1e9}}
 
@@ -98,10 +98,10 @@ def test_filter_domestic_excludes_below_min_intraday_volume(monkeypatch):
     assert domestic == {}
 
 
-def test_filter_domestic_includes_at_exactly_min_intraday_volume(monkeypatch):
+def test_filter_domestic_includes_at_exactly_min_avg_daily_volume_10d(monkeypatch):
     monkeypatch.setattr(
         swiss_universe_module.yf, "Ticker",
-        lambda symbol: _FakeTicker(_base_info(regularMarketVolume=swiss_universe_module.MIN_INTRADAY_VOLUME)),
+        lambda symbol: _FakeTicker(_base_info(averageDailyVolume10Day=swiss_universe_module.MIN_AVG_DAILY_VOLUME_10D)),
     )
     candidates = {"EDGE.SW": {"longName": "Edge AG", "marketCap": 1e9}}
 
@@ -109,14 +109,25 @@ def test_filter_domestic_includes_at_exactly_min_intraday_volume(monkeypatch):
     assert "EDGE.SW" in domestic
 
 
-def test_filter_domestic_excludes_missing_intraday_volume(monkeypatch):
+def test_filter_domestic_excludes_missing_avg_daily_volume_10d(monkeypatch):
     info = _base_info()
-    del info["regularMarketVolume"]
+    del info["averageDailyVolume10Day"]
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     candidates = {"NOVOL.SW": {"longName": "No Volume AG", "marketCap": 1e9}}
 
     domestic = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
+
+
+def test_filter_domestic_captures_avg_volume_10d(monkeypatch):
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(averageDailyVolume10Day=250_000)),
+    )
+    candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
+
+    domestic = filter_domestic(candidates, delay_seconds=0)
+    assert domestic["TEST.SW"]["avg_volume_10d"] == 250_000
 
 
 def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkeypatch):
@@ -320,14 +331,11 @@ def test_discover_candidates_static_fallback_excludes_smi_names(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
     monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
 
-    candidates = discover_candidates(
-        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
-        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
-    )
+    candidates = discover_candidates()
     assert "NESN.SW" not in candidates  # Nestle
     assert "NOVN.SW" not in candidates  # Novartis
     assert "UBSG.SW" not in candidates  # UBS
-    # A genuinely small/mid-cap name should still be present - this isn't
+    # A genuinely non-SMI name should still be present - this isn't
     # asserting the fallback returns an empty dict.
     assert "INRN.SW" in candidates
 
@@ -352,41 +360,23 @@ def test_discover_candidates_live_excludes_smi_names(monkeypatch):
     assert "REAL.SW" in candidates
 
 
-def test_all_caps_band_is_wider_than_small_cap_band():
-    assert swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF == swiss_universe_module.MIN_MARKET_CAP_CHF
-    assert swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF > swiss_universe_module.MAX_MARKET_CAP_CHF
+def test_market_cap_band_has_no_meaningful_upper_bound():
+    # MAX_MARKET_CAP_CHF (1 trillion) should comfortably clear even the
+    # largest SIX-listed company, so the band is effectively "500M+, no
+    # real ceiling" - not a second small-vs-large distinction to maintain.
+    assert swiss_universe_module.MAX_MARKET_CAP_CHF > 500_000_000_000
 
 
 def test_static_snapshot_includes_smi_large_caps_not_just_small_caps():
-    # Regression guard: the static fallback used to be captured at the
-    # small-cap band only (MIN/MAX_MARKET_CAP_CHF), so it was missing SMI
-    # giants entirely. It's now captured at the wide all-caps band so it
-    # works as a fallback for an all-caps request too - this checks a
-    # couple of well-known large caps are actually present, not just that
-    # the dict got bigger.
+    # Regression guard: the static fallback used to be captured at a
+    # small-cap band only, so it was missing SMI giants entirely. It's
+    # captured at the full 500M+ band now, so this checks a couple of
+    # well-known large caps are actually present, not just that the dict
+    # got bigger.
     snapshot = swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT
     assert "NESN.SW" in snapshot  # Nestle
     assert "NOVN.SW" in snapshot  # Novartis
     assert "UBSG.SW" in snapshot  # UBS
-
-
-def test_discover_candidates_static_fallback_still_used_for_all_caps_bounds(monkeypatch):
-    # discover_candidates' fallback doesn't filter STATIC_DOMESTIC_TICKER_
-    # SNAPSHOT by the requested min/max (no market-cap data on static
-    # entries to filter with - see that dict's own comment) - this just
-    # confirms calling with the all-caps bounds still falls back cleanly
-    # rather than erroring.
-    def _boom(*a, **kw):
-        raise Exception("simulated screener outage")
-
-    monkeypatch.setattr(swiss_universe_module.yf, "screen", _boom)
-    monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
-
-    candidates = discover_candidates(
-        min_market_cap=swiss_universe_module.ALL_CAPS_MIN_MARKET_CAP_CHF,
-        max_market_cap=swiss_universe_module.ALL_CAPS_MAX_MARKET_CAP_CHF,
-    )
-    assert "INRN.SW" in candidates  # non-SMI name, present regardless of band
 
 
 def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):

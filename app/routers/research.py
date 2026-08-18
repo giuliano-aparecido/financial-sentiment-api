@@ -9,15 +9,10 @@ router = APIRouter()
 
 @router.post("/api/research/volatility/start", dependencies=[Depends(verify_api_key)])
 @limiter.limit("1/5minutes")
-async def start_volatility_scan(request: Request, all_caps: bool = False):
+async def start_volatility_scan(request: Request):
     # request is required (unused directly) - slowapi's @limiter.limit
     # inspects the endpoint signature for a Request param to extract the
     # rate-limit key from (see app/limiter.py's rate_limit_key).
-    #
-    # all_caps: query param (?all_caps=true), default False so existing
-    # callers that don't pass it keep getting the small-cap-only scan
-    # unchanged - see research_job.start_scan's own docstring for what it
-    # does to the discovery band.
     #
     # Deliberately far stricter than this app's normal 10/minute default
     # (see app/limiter.py): a single scan makes ~150+ live calls to
@@ -27,7 +22,7 @@ async def start_volatility_scan(request: Request, all_caps: bool = False):
     # itself is also idempotent while a scan is in flight (see
     # research_job.py), so this limit is a backstop against genuinely
     # repeated NEW scans, not against polling for status.
-    return start_scan(all_caps=all_caps)
+    return start_scan()
 
 
 @router.get("/api/research/volatility/status", dependencies=[Depends(verify_api_key)])

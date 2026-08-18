@@ -31,33 +31,22 @@ def test_status_requires_api_key(client):
 def test_start_scan_delegates_to_research_job(client, monkeypatch):
     monkeypatch.setattr(
         research_router, "start_scan",
-        lambda all_caps=False: {"status": "running", "started_at": "now", "all_caps": all_caps},
+        lambda: {"status": "running", "started_at": "now"},
     )
     response = client.post("/api/research/volatility/start", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
-    assert response.json() == {"status": "running", "started_at": "now", "all_caps": False}
+    assert response.json() == {"status": "running", "started_at": "now"}
 
 
-def test_start_scan_passes_all_caps_query_param_through(client, monkeypatch):
+def test_start_scan_takes_no_query_params(client, monkeypatch):
     calls = []
     monkeypatch.setattr(
         research_router, "start_scan",
-        lambda all_caps=False: calls.append(all_caps) or {"status": "running", "started_at": "now", "all_caps": all_caps},
+        lambda: calls.append(True) or {"status": "running", "started_at": "now"},
     )
-    response = client.post("/api/research/volatility/start?all_caps=true", headers={"X-API-Key": VALID_KEY})
+    response = client.post("/api/research/volatility/start", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert calls == [True]
-    assert response.json()["all_caps"] is True
-
-
-def test_start_scan_all_caps_defaults_false_when_omitted(client, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        research_router, "start_scan",
-        lambda all_caps=False: calls.append(all_caps) or {"status": "running", "started_at": "now", "all_caps": all_caps},
-    )
-    response = client.post("/api/research/volatility/start", headers={"X-API-Key": VALID_KEY})
-    assert calls == [False]
 
 
 def test_status_delegates_to_research_job(client, monkeypatch):
