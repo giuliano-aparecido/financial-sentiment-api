@@ -1,15 +1,15 @@
 from app.services.swiss_today_screener import find_big_loss, run_scan
 
 
-def _domestic_entry(name, sector, market_cap, change_pct, volume_today, avg_volume_3mo, price=100.0):
+def _domestic_entry(name, sector, market_cap, change_pct, volume_today, avg_volume_10d, price=100.0):
     return {
         "name": name,
         "sector": sector,
         "market_cap": market_cap,
+        "avg_volume_10d": avg_volume_10d,
         "quote": {
             "regularMarketChangePercent": change_pct,
             "regularMarketVolume": volume_today,
-            "averageDailyVolume3Month": avg_volume_3mo,
             "regularMarketPrice": price,
         },
     }
@@ -35,6 +35,7 @@ def test_find_big_loss_skips_missing_live_data():
     domestic = {
         "NOQUOTE.SW": {
             "name": "No Quote AG", "sector": "Industrials", "market_cap": 1e9,
+            "avg_volume_10d": None,
             "quote": {"regularMarketChangePercent": None, "regularMarketVolume": None},
         },
     }
@@ -68,6 +69,13 @@ def test_find_big_loss_none_when_no_matches():
     domestic = {"FLAT.SW": _domestic_entry("Flat AG", "Industrials", 1e9, -1.0, 1000, 5000)}
     results = find_big_loss(domestic, loss_threshold=-5.0)
     assert results.empty
+
+
+def test_find_big_loss_avg_volume_10d_none_when_missing():
+    domestic = {"DROP.SW": _domestic_entry("Drop AG", "Industrials", 1e9, -6.0, 1000, None)}
+    results = find_big_loss(domestic, loss_threshold=-5.0)
+    assert results.iloc[0]["avg_volume_10d"] is None
+    assert results.iloc[0]["volume_vs_10d_avg"] is None
 
 
 def test_run_scan_uses_module_default_threshold():

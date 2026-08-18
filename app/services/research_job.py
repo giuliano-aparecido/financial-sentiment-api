@@ -1,7 +1,7 @@
 """
 Background-job runner for the Swiss volatility research scan
-(swiss_crash_rebound.py + swiss_today_screener.py),
-backing app/routers/research.py's start/status endpoints.
+(swiss_crash_rebound.py + swiss_today_screener.py + swiss_volatility_
+indicator.py), backing app/routers/research.py's start/status endpoints.
 
 A full scan takes 1-3 minutes (universe discovery + ~100+ per-ticker
 domicile checks + a batch price-history download), which is far past what
@@ -32,23 +32,18 @@ atomic). The lock below only guards the "is one already running, if not
 start one" check in start_scan(), which is the one place two threads could
 otherwise race to both start a scan.
 
-all_caps: when True, discover_candidates() is called with
-swiss_universe.ALL_CAPS_MIN/MAX_MARKET_CAP_CHF instead of the default
-small-cap band, so the scan covers the whole SIX-listed, Switzerland-
-domiciled universe (SMI's 20 largest/most-liquid names still EXCLUDED
-either way - see swiss_universe.SMI_TICKERS) rather than just small caps.
-Purely a discovery-time parameter - the crash-rebound and today-screener
-scan logic themselves have no cap-specific thresholds, they just operate
-over whatever `domestic` dict they're handed.
+Universe: a single market-cap band (swiss_universe.MIN/MAX_MARKET_CAP_CHF,
+CHF 500M+, no upper bound - SMI's 20 largest/most-liquid names still
+EXCLUDED - see swiss_universe.SMI_TICKERS) as of 2026-08-18 - previously
+two separate bands (a small-cap default plus an opt-in wider "all caps"
+mode, threaded through this module via an `all_caps` parameter) collapsed
+into one at the user's explicit request to always include mid/large caps.
 
-Crash-rebound caching: its 3-month lookback barely changes day to day -
+Crash-rebound caching: its 12-month lookback barely changes day to day -
 once a trading day closes, that day's OHLCV doesn't change - so
 _crash_rebound_result below only recomputes it (paying the yf.download
 historical batch call) once per UTC calendar day, reusing the cached
-result for same-day re-scans - now keyed on (date, all_caps) rather than
-just date, since a small-cap scan and an all-caps scan cover different
-universes and would otherwise wrongly share one day's cached result when
-a user switches modes mid-day. today_screener is NEVER cached - it reports
+result for same-day re-scans. today_screener is NEVER cached - it reports
 live intraday quotes and always re-runs against the freshly-discovered
 `domestic` dict. Since the only way to trigger a scan at all is the
 Refresh button (no auto-poll timer), this already means today_screener's
@@ -61,6 +56,19 @@ just normal state.
 No lock needed around the crash-rebound cache: _run only ever executes
 one at a time (see start_scan's single-job-slot reasoning above), so
 there's no concurrent writer to race against.
+
+Volatility-indicator scan (swiss_volatility_indicator.py): a genuinely
+separate job/cache/lock triple (_indicator_job/_indicator_cache/
+_indicator_job_lock), not folded into _job above, because it has its own
+independent trigger (a separate Refresh button + threshold selector in
+the frontend - see start_indicator_scan) and must NOT block on or get
+blocked by the main crash-rebound/today-screener scan. It also does its
+OWN independent universe discovery rather than reusing _job's `domestic`
+- see swiss_volatility_indicator.py's own module docstring for why.
+Cached per (calendar day, threshold_pct) - same "a closed trading day's
+OHLCV doesn't change" reasoning as _crash_rebound_cache, plus the
+threshold in the key since 2%/3%/5% are genuinely different scans over
+the same universe, not one scan with a display-only filter.
 """
 
 import datetime
@@ -69,7 +77,7 @@ import threading
 
 import pandas as pd
 
-from app.services import swiss_crash_rebound, swiss_today_screener, swiss_universe
+from app.services import swiss_crash_rebound, swiss_today_screener, swiss_universe, swiss_volatility_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +86,7 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
     """DataFrame -> list-of-dicts with NaN replaced by None. Confirmed
     live: df.to_dict(orient="records") alone leaves NaN (a real value in
     both scan modules - e.g. loss_pe_approx for a loss-making company, or
-    volume_vs_3mo_avg when a ticker has no 3-month average yet) as the
+    volume_vs_10d_avg when a ticker has no 10-day average yet) as the
     Python float nan, which Python's json.dumps happily renders as the
     bare token NaN - not valid JSON, and something JavaScript's
     JSON.parse (what financial-sentiment-web's proxy route eventually
@@ -93,7 +101,11 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
 _job: dict = {"status": "idle"}
 _job_lock = threading.Lock()
 
-_crash_rebound_cache: dict = {"date": None, "all_caps": None, "result": None}
+_crash_rebound_cache: dict = {"date": None, "result": None}
+
+_indicator_job: dict = {"status": "idle"}
+_indicator_job_lock = threading.Lock()
+_indicator_cache: dict = {"date": None, "threshold_pct": None, "result": None}
 
 
 def _now() -> str:
@@ -110,71 +122,121 @@ def _today() -> datetime.date:
     return datetime.datetime.now(datetime.timezone.utc).date()
 
 
-def _crash_rebound_result(domestic: dict, all_caps: bool) -> pd.DataFrame:
-    """Cached per (calendar day, all_caps) - see module docstring for why
-    all_caps is part of the key - returns today's already-computed result
-    for that mode if this is a same-day re-scan, otherwise recomputes and
-    caches it."""
+def _crash_rebound_result(domestic: dict) -> pd.DataFrame:
+    """Cached per calendar day - returns today's already-computed result
+    if this is a same-day re-scan, otherwise recomputes and caches it."""
     global _crash_rebound_cache
     today = _today()
-    if _crash_rebound_cache["date"] == today and _crash_rebound_cache["all_caps"] == all_caps:
-        logger.info("Reusing cached crash-rebound result from %s (all_caps=%s)", today, all_caps)
+    if _crash_rebound_cache["date"] == today:
+        logger.info("Reusing cached crash-rebound result from %s", today)
         return _crash_rebound_cache["result"]
     result = swiss_crash_rebound.run_scan(domestic)
-    _crash_rebound_cache = {"date": today, "all_caps": all_caps, "result": result}
+    _crash_rebound_cache = {"date": today, "result": result}
     return result
 
 
-def _run(started_at: str, all_caps: bool) -> None:
+def _run(started_at: str) -> None:
     global _job
     try:
-        if all_caps:
-            candidates = swiss_universe.discover_candidates(
-                min_market_cap=swiss_universe.ALL_CAPS_MIN_MARKET_CAP_CHF,
-                max_market_cap=swiss_universe.ALL_CAPS_MAX_MARKET_CAP_CHF,
-            )
-        else:
-            candidates = swiss_universe.discover_candidates()
+        candidates = swiss_universe.discover_candidates()
         domestic = swiss_universe.filter_domestic(candidates)
-        crash_rebound_df = _crash_rebound_result(domestic, all_caps)
+        crash_rebound_df = _crash_rebound_result(domestic)
         today_df = swiss_today_screener.run_scan(domestic)
         _job = {
             "status": "done",
             "started_at": started_at,
             "finished_at": _now(),
-            "all_caps": all_caps,
             "universe_size": len(domestic),
             "crash_rebound": _json_safe_records(crash_rebound_df),
             "today_screener": _json_safe_records(today_df),
         }
         logger.info(
-            "Research scan done: all_caps=%s universe=%d crash_rebound_matches=%d today_matches=%d",
-            all_caps, len(domestic), len(crash_rebound_df), len(today_df),
+            "Research scan done: universe=%d crash_rebound_matches=%d today_matches=%d",
+            len(domestic), len(crash_rebound_df), len(today_df),
         )
     except Exception as e:
         logger.exception("Research scan failed")
-        _job = {"status": "error", "started_at": started_at, "finished_at": _now(), "all_caps": all_caps, "error": str(e)}
+        _job = {"status": "error", "started_at": started_at, "finished_at": _now(), "error": str(e)}
 
 
-def start_scan(all_caps: bool = False) -> dict:
+def start_scan() -> dict:
     """Starts a new scan if none is currently running; otherwise returns
-    the already-in-flight job's current status unchanged (including
-    whatever all_caps that in-flight scan was started with - a second
-    call with a different all_caps value while one is already running
-    does NOT change or restart it, same idempotent-while-running behavior
-    as before this parameter existed). Either way, returns the same shape
-    get_status() does, so callers (see app/routers/research.py) don't
-    need two different response handlers for "just started" vs "already
-    running"."""
+    the already-in-flight job's current status unchanged. Either way,
+    returns the same shape get_status() does, so callers (see
+    app/routers/research.py) don't need two different response handlers
+    for "just started" vs "already running"."""
     global _job
     with _job_lock:
         if _job.get("status") == "running":
             return dict(_job)
         started_at = _now()
-        _job = {"status": "running", "started_at": started_at, "all_caps": all_caps}
-        threading.Thread(target=_run, args=(started_at, all_caps), daemon=True).start()
+        _job = {"status": "running", "started_at": started_at}
+        threading.Thread(target=_run, args=(started_at,), daemon=True).start()
         return dict(_job)
 
 
 def get_status() -> dict:
     return dict(_job)
+
+
+def _indicator_result(domestic: dict, threshold_pct: float) -> pd.DataFrame:
+    """Cached per (calendar day, threshold_pct) - see module docstring
+    for why the threshold is part of the key."""
+    global _indicator_cache
+    today = _today()
+    if _indicator_cache["date"] == today and _indicator_cache["threshold_pct"] == threshold_pct:
+        logger.info("Reusing cached volatility-indicator result from %s (threshold=%s)", today, threshold_pct)
+        return _indicator_cache["result"]
+    result = swiss_volatility_indicator.run_scan(domestic, threshold_pct)
+    _indicator_cache = {"date": today, "threshold_pct": threshold_pct, "result": result}
+    return result
+
+
+def _run_indicator(started_at: str, threshold_pct: float) -> None:
+    global _indicator_job
+    try:
+        # Independent discovery, not the main scan's `domestic` - see
+        # swiss_volatility_indicator.py's own module docstring for why.
+        candidates = swiss_universe.discover_candidates()
+        domestic = swiss_universe.filter_domestic(candidates)
+        indicator_df = _indicator_result(domestic, threshold_pct)
+        _indicator_job = {
+            "status": "done",
+            "started_at": started_at,
+            "finished_at": _now(),
+            "threshold_pct": threshold_pct,
+            "universe_size": len(domestic),
+            "volatility_indicator": _json_safe_records(indicator_df),
+        }
+        logger.info(
+            "Volatility-indicator scan done: threshold=%s universe=%d matches=%d",
+            threshold_pct, len(domestic), len(indicator_df),
+        )
+    except Exception as e:
+        logger.exception("Volatility-indicator scan failed")
+        _indicator_job = {
+            "status": "error", "started_at": started_at, "finished_at": _now(),
+            "threshold_pct": threshold_pct, "error": str(e),
+        }
+
+
+def start_indicator_scan(threshold_pct: float) -> dict:
+    """Starts a new volatility-indicator scan if none is currently
+    running; otherwise returns the already-in-flight job's current status
+    unchanged (including whatever threshold_pct that in-flight scan was
+    started with - a second call with a different threshold while one is
+    already running does NOT change or restart it, same idempotent-while-
+    running behavior as start_scan). Entirely independent of start_scan/
+    _job above - see module docstring."""
+    global _indicator_job
+    with _indicator_job_lock:
+        if _indicator_job.get("status") == "running":
+            return dict(_indicator_job)
+        started_at = _now()
+        _indicator_job = {"status": "running", "started_at": started_at, "threshold_pct": threshold_pct}
+        threading.Thread(target=_run_indicator, args=(started_at, threshold_pct), daemon=True).start()
+        return dict(_indicator_job)
+
+
+def get_indicator_status() -> dict:
+    return dict(_indicator_job)

@@ -2,19 +2,19 @@
 Swiss "big loss" volatility screener - TODAY only.
 
 Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that are
-down >= LOSS_THRESHOLD_PCT today. Universe defaults to a small-cap band
-but can widen to include mid/large caps too (SMI's 20 largest excluded
-either way) - see swiss_crash_rebound.py's module docstring for the same
-volatility-vs-small-cap framing, which applies here identically since
-both scans share the same universe discovery. This module's OWN logic
-does no volume filtering of its own - volume vs. each stock's own
-3-month average is shown and used to SORT the results (thinnest first),
-but never excludes a row here: a big loss on unusually thin volume vs.
-one on heavy volume tell different stories, and both are worth seeing,
-not just one of them. (A separate, absolute liquidity floor IS applied
-upstream, in swiss_universe.filter_domestic - see MIN_INTRADAY_VOLUME -
-that's excluding unreliably-thin prints entirely, a different concern
-from this module's own thin-vs-heavy sort.)
+down >= LOSS_THRESHOLD_PCT today. Universe: SIX-listed, Switzerland-
+domiciled companies with market cap > CHF 500M (SMI's 20 largest still
+excluded) - see swiss_crash_rebound.py's module docstring for the same
+framing, which applies here identically since both scans share the same
+universe discovery. This module's OWN logic does no volume filtering of
+its own - volume vs. each stock's own 10-day average is shown and used to
+SORT the results (thinnest first), but never excludes a row here: a big
+loss on unusually thin volume vs. one on heavy volume tell different
+stories, and both are worth seeing, not just one of them. (A separate,
+absolute liquidity floor IS applied upstream, in
+swiss_universe.filter_domestic - see MIN_AVG_DAILY_VOLUME_10D - that's
+excluding unreliably-thin prints entirely, a different concern from this
+module's own thin-vs-heavy sort.)
 
 Ported from the standalone research/ project (D:\\projects\\research) - see
 swiss_crash_rebound.py's module docstring for why this now runs
@@ -26,11 +26,18 @@ discovery (market-cap band + domicile filter) lives in swiss_universe.py,
 shared with swiss_crash_rebound.py.
 
 Unlike that other script, this one needs no separate price-history
-download: the screener's own live quote already carries today's change%,
-today's volume, and the 3-month average volume to compare it against
-(confirmed live - see swiss_universe.discover_candidates' docstring), so
-discovery and "today's numbers" come from the exact same call - run_scan()
-below just reads them off the already-discovered/filtered `domestic` dict.
+download: the screener's own live quote already carries today's change%
+and today's volume, and swiss_universe.filter_domestic's own .info call
+(already made per ticker for the domicile/liquidity check - see that
+module's docstring) already carries the 10-day average volume to compare
+today's volume against - avg_volume_10d, read straight off the
+already-discovered/filtered `domestic` dict entry, not the screener quote
+(changed 2026-08-18: previously read the screener's own
+averageDailyVolume3Month field directly - switched to reuse the SAME
+10-day figure swiss_crash_rebound.py now also uses, one volume-averaging
+methodology for the whole feature instead of two). No extra fetch either
+way - run_scan() below just reads everything off the already-fetched
+`domestic` dict.
 """
 
 import pandas as pd
@@ -41,9 +48,10 @@ LOSS_THRESHOLD_PCT = -5.0  # today's regularMarketChangePercent <= this
 
 
 def find_big_loss(domestic: dict, loss_threshold: float) -> pd.DataFrame:
-    """Reads today's change%/volume/3-month-average-volume straight off
-    each candidate's already-fetched screener quote (see
-    swiss_universe.filter_domestic) - no extra fetch needed. Skips any
+    """Reads today's change%/volume off each candidate's already-fetched
+    screener quote, and 10-day average volume off the SAME already-
+    fetched domestic entry (see swiss_universe.filter_domestic's
+    avg_volume_10d) - no extra fetch needed either way. Skips any
     candidate missing a live change% or volume figure, which happens for
     very illiquid names with no trade yet today rather than being a fetch
     failure.
@@ -53,14 +61,14 @@ def find_big_loss(domestic: dict, loss_threshold: float) -> pd.DataFrame:
         quote = entry["quote"]
         change_pct = quote.get("regularMarketChangePercent")
         volume_today = quote.get("regularMarketVolume")
-        avg_volume_3mo = quote.get("averageDailyVolume3Month")
+        avg_volume_10d = entry.get("avg_volume_10d")
 
         if change_pct is None or volume_today is None:
             continue
         if change_pct > loss_threshold:
             continue
 
-        volume_ratio = round(volume_today / avg_volume_3mo, 2) if avg_volume_3mo else None
+        volume_ratio = round(volume_today / avg_volume_10d, 2) if avg_volume_10d else None
 
         rows.append({
             "ticker": symbol,
@@ -70,8 +78,8 @@ def find_big_loss(domestic: dict, loss_threshold: float) -> pd.DataFrame:
             "price": quote.get("regularMarketPrice"),
             "change_pct": round(change_pct, 2),
             "volume_today": int(volume_today),
-            "avg_volume_3mo": int(avg_volume_3mo) if avg_volume_3mo else None,
-            "volume_vs_3mo_avg": volume_ratio,
+            "avg_volume_10d": int(avg_volume_10d) if avg_volume_10d else None,
+            "volume_vs_10d_avg": volume_ratio,
         })
 
     results = pd.DataFrame(rows)
@@ -81,7 +89,7 @@ def find_big_loss(domestic: dict, loss_threshold: float) -> pd.DataFrame:
     # volume first, biggest loss as the tiebreaker within similarly-thin
     # names.
     return results.sort_values(
-        ["volume_vs_3mo_avg", "change_pct"], ascending=[True, True]
+        ["volume_vs_10d_avg", "change_pct"], ascending=[True, True]
     ).reset_index(drop=True)
 
 

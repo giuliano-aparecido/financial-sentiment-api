@@ -3,7 +3,7 @@ Shared "find volatile Swiss stocks, excluding foreign companies and SMI
 mega-caps" logic, used by both swiss_crash_rebound.py and
 swiss_today_screener.py. Free tools only: yfinance (no API key).
 
-Two filters matter for "[small/all-cap] stocks in Switzerland, excluding
+Two filters matter for "Swiss stocks with market cap > CHF 500M, excluding
 foreign companies":
   1. Market-cap range (MIN/MAX_MARKET_CAP_CHF below) - Yahoo's region='ch'
      screener field means "listed in the CH region", not "domiciled in
@@ -16,12 +16,14 @@ foreign companies":
      per-company `country` field actually distinguishes domestic from
      foreign - the region/exchange filters alone do not.
 
-An optional wider ALL_CAPS_MIN/MAX_MARKET_CAP_CHF band (see
-research_job.start_scan's all_caps parameter) extends discovery beyond
-small caps - but always excludes SMI_TICKERS regardless of band (see that
-set's own comment): this scan is looking for VOLATILE tickers, and the
-SMI's 20 largest/most-liquid names are the opposite of that, so they're
-excluded on purpose rather than just being an unlikely match.
+Single universe as of 2026-08-18 (previously a small-cap default with an
+opt-in wider ALL_CAPS_MIN/MAX_MARKET_CAP_CHF band toggled per-request -
+removed at the user's explicit request to always include mid/large caps):
+market cap > CHF 500M, no upper bound - but always excludes SMI_TICKERS
+regardless (see that set's own comment): this scan is looking for
+VOLATILE tickers, and the SMI's 20 largest/most-liquid names are the
+opposite of that, so they're excluded on purpose rather than just being
+an unlikely match.
 """
 
 import concurrent.futures
@@ -86,36 +88,28 @@ def _seed_yf_session_from_env():
     logger.info("Seeded yfinance crumb/cookies from YF_SEED_CRUMB/YF_SEED_COOKIES (Yahoo crumb-fetch workaround)")
 
 
-# Small-cap band in CHF. SIX's own tiers: SMI (~20 largest) and SMIM (next
-# ~30) together cover roughly down to CHF ~1-1.5B; below that is broadly
-# "small cap" on this exchange. MIN_MARKET_CAP_CHF excludes illiquid micro
-# caps unlikely to have reliable daily pricing. Both are just a starting
-# point - adjust freely for a stricter/looser definition.
-MIN_MARKET_CAP_CHF = 50_000_000
-MAX_MARKET_CAP_CHF = 2_000_000_000
-
-# "All market caps" band - same lower bound (still excludes illiquid micro
-# caps), no upper bound in practice: CHF 1 trillion comfortably clears
-# Nestle, the largest SIX-listed company by market cap (confirmed live via
-# the snapshot below, ~CHF 180-250B depending on the day). Passed to
-# discover_candidates/filter_domestic instead of MIN/MAX_MARKET_CAP_CHF
-# when a caller wants the full universe, not just the small-cap band - see
-# research_job.start_scan's all_caps parameter.
-ALL_CAPS_MIN_MARKET_CAP_CHF = 50_000_000
-ALL_CAPS_MAX_MARKET_CAP_CHF = 1_000_000_000_000
+# Market-cap band in CHF - single universe as of 2026-08-18 (see module
+# docstring): CHF 500M+ excludes small/micro caps, no upper bound in
+# practice - 1 trillion comfortably clears Nestle, the largest SIX-listed
+# company by market cap (confirmed live via the snapshot below, ~CHF
+# 180-250B depending on the day). Previously two separate bands (a
+# small-cap default plus an opt-in wider "all caps" toggle) - collapsed
+# into one at the user's explicit request to always include mid/large
+# caps, not gate them behind a checkbox.
+MIN_MARKET_CAP_CHF = 500_000_000
+MAX_MARKET_CAP_CHF = 1_000_000_000_000
 
 # Liquidity floor, applied in filter_domestic below: a ticker trading
-# fewer shares than this today is too thin to trust either the price
+# fewer shares than this on average is too thin to trust either the price
 # itself (a handful of trades can swing "close" arbitrarily) or the crash-
 # rebound/big-loss signals this scan is built to find - a >=5% move on
 # ~1,000 shares traded isn't the same finding as the same move on
-# 500,000. Read from Ticker.info's regularMarketVolume (confirmed live to
-# be the same field today_screener.py already reads off the live
-# screener quote) rather than the 3-month average, since the goal is
-# excluding thin trading TODAY, not thin trading generally - a normally
-# liquid name having one unusually quiet day is exactly the kind of
-# unreliable-print day this is meant to catch.
-MIN_INTRADAY_VOLUME = 50_000
+# 500,000. Measured against the 10-DAY average volume (Ticker.info's
+# averageDailyVolume10Day), not a single day's raw volume - a smoother,
+# less fluke-prone baseline than "was today specifically thin" (changed
+# 2026-08-18 at the user's request; previously compared against
+# regularMarketVolume, today's raw figure only).
+MIN_AVG_DAILY_VOLUME_10D = 50_000
 
 # Politeness delay between per-ticker yfinance .info calls - this is an
 # unofficial/undocumented API, not a documented rate limit to size against
@@ -153,10 +147,9 @@ INFO_MAX_WORKERS = 5
 # finding VOLATILE tickers, and SMI names are the opposite end of that
 # spectrum: heavily traded, closely watched, and structurally the least
 # likely names on the exchange to produce the kind of move this scan is
-# looking for. Applies to BOTH small-cap and all-caps modes, though it's
-# a no-op for small-cap (these names are all far above MAX_MARKET_CAP_CHF
-# already) - only matters once ALL_CAPS_MIN/MAX_MARKET_CAP_CHF widens the
-# band enough to reach them.
+# looking for. Applies regardless of market cap - these names are all
+# well within the CHF 500M-1T band (MIN/MAX_MARKET_CAP_CHF), so this
+# exclusion is what actually keeps them out, not the cap band itself.
 #
 # Confirmed live via Wikipedia's SMI constituent table on 2026-08-13
 # (https://en.wikipedia.org/wiki/Swiss_Market_Index) - SIX itself reviews
@@ -192,7 +185,7 @@ SMI_TICKERS = {
 }
 
 # Passes the market-cap band and Switzerland-domicile checks but isn't a
-# normal operating company, so it doesn't belong in a "small cap" universe
+# normal operating company, so it doesn't belong in this scan's universe
 # regardless: SNBN.SW is the Swiss National Bank (confirmed live: shows up
 # in the market-cap band, mostly canton-held). Add more symbols here as
 # other non-operating-company edge cases turn up. Merged with SMI_TICKERS
@@ -211,34 +204,32 @@ EXCLUDED_TICKERS = {"SNBN.SW"} | SMI_TICKERS
 # any of those incidents - this fallback exists specifically because the
 # discovery STEP, not the whole pipeline, is what breaks.
 #
-# Captured live on 2026-08-13 via discover_candidates(min_market_cap=
-# ALL_CAPS_MIN_MARKET_CAP_CHF, max_market_cap=ALL_CAPS_MAX_MARKET_CAP_CHF)
-# itself, from a working (non-blocked) network - name/sector only, NOT
-# live price/change%/volume, which the real screener response also
-# carries (see discover_candidates' own docstring) but a static snapshot
-# fundamentally can't provide. Deliberately captured with the WIDE
-# all-caps band, not the small-cap band, so this one snapshot is a strict
-# superset usable as a fallback for either mode - discover_candidates
-# below doesn't filter the fallback by the requested min/max (no market-
-# cap data in the static entries to filter on), so a small-cap-only
-# request falling back to this during an outage will see some non-small-
-# cap names mixed in too; accepted tradeoff for one shared list instead of
-# two to keep in sync. Downstream effect: filter_domestic and
+# Captured live on 2026-08-13 via discover_candidates() itself (back when
+# that meant the wide all-caps band, min=50M/max=1T - now the same as this
+# module's single MIN/MAX_MARKET_CAP_CHF band, see that constant's own
+# comment for the 2026-08-18 band collapse), from a working (non-blocked)
+# network - name/sector only, NOT live price/change%/volume, which the
+# real screener response also carries (see discover_candidates' own
+# docstring) but a static snapshot fundamentally can't provide.
+# discover_candidates below doesn't filter the fallback by the requested
+# min/max (no market-cap data in the static entries to filter on) -
+# accepted, unchanged tradeoff. Downstream effect: filter_domestic and
 # swiss_crash_rebound both work fully off this fallback (neither
 # needs the screener's own live quote fields - filter_domestic makes its
 # own live .info call per ticker regardless, crash_rebound uses a
-# separate yf.download() history call). swiss_today_screener
-# does NOT - it reads today's change%/volume directly off the screener
-# quote with no separate fetch (see that module's own docstring) - so it
-# degrades to genuinely empty results (not a crash - find_big_loss already
-# fails soft on missing fields) whenever this fallback is in use, since
-# there is no live "today" data to give it.
+# separate yf.download() history call). swiss_today_screener's change%/
+# volume_today fields do NOT (still read directly off the screener quote,
+# no separate fetch - see that module's own docstring), so it degrades to
+# genuinely empty results (not a crash - find_big_loss already fails soft
+# on missing fields) whenever this fallback is in use, since there is no
+# live "today" data to give it. avg_volume_10d is unaffected either way -
+# it comes from filter_domestic's own .info call, same as the other
+# fallback-tolerant fields.
 #
 # Will drift from reality over time (new listings, delistings, M&A) since
-# it's not auto-refreshed. Refresh by running discover_candidates(min_
-# market_cap=ALL_CAPS_MIN_MARKET_CAP_CHF, max_market_cap=ALL_CAPS_MAX_
-# MARKET_CAP_CHF)/filter_domestic() from a working, non-blocked network
-# and regenerating this dict - ticker -> (name, sector).
+# it's not auto-refreshed. Refresh by running discover_candidates()/
+# filter_domestic() from a working, non-blocked network and regenerating
+# this dict - ticker -> (name, sector).
 STATIC_DOMESTIC_TICKER_SNAPSHOT = {
     'ABBN.SW': ('ABB Ltd', 'Industrials'),
     'ABBNE.SW': ('ABB Ltd', 'Industrials'),
@@ -552,12 +543,12 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
     try:
         info = yf.Ticker(symbol).info
         country = info.get("country")
-        volume = info.get("regularMarketVolume")
+        avg_volume_10d = info.get("averageDailyVolume10Day")
         if country != "Switzerland":
             print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
             return symbol, None
-        if volume is None or volume < MIN_INTRADAY_VOLUME:
-            print(f"  skip {symbol}: intraday volume {volume!r} below {MIN_INTRADAY_VOLUME} floor")
+        if avg_volume_10d is None or avg_volume_10d < MIN_AVG_DAILY_VOLUME_10D:
+            print(f"  skip {symbol}: 10-day avg volume {avg_volume_10d!r} below {MIN_AVG_DAILY_VOLUME_10D} floor")
             return symbol, None
         return symbol, {
             "name": quote.get("longName") or quote.get("shortName") or symbol,
@@ -571,6 +562,7 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
             "beta": info.get("beta"),
             "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+            "avg_volume_10d": avg_volume_10d,
             "quote": quote,
         }
     except Exception as e:
@@ -583,25 +575,30 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
 def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_workers=INFO_MAX_WORKERS):
     """Keeps only candidates whose own `country` field is Switzerland -
     the one field that actually reflects company domicile rather than
-    exchange/listing region (see module docstring) - AND whose today's
-    trading volume clears MIN_INTRADAY_VOLUME (see that constant's own
-    comment for why). Fetched per-ticker via Ticker.info since the
-    screener response doesn't include the country field (it does carry
-    volume too, but info's regularMarketVolume is read here regardless,
-    since it's already being fetched for the domicile check at no extra
-    request cost, and unlike the screener quote it's present for BOTH
-    discovery paths - the static fallback's synthesized quote (see
+    exchange/listing region (see module docstring) - AND whose 10-day
+    average trading volume clears MIN_AVG_DAILY_VOLUME_10D (see that
+    constant's own comment for why). Fetched per-ticker via Ticker.info
+    since the screener response doesn't include the country field (it
+    does carry a 3-month average volume figure too - see
+    swiss_today_screener.py's history for why THIS module deliberately
+    reads a 10-day figure off .info instead of reusing that - but
+    averageDailyVolume10Day is read here regardless, since .info is
+    already being fetched for the domicile check at no extra request
+    cost, and unlike the screener quote it's present for BOTH discovery
+    paths - the static fallback's synthesized quote (see
     STATIC_DOMESTIC_TICKER_SNAPSHOT) has no volume field at all).
     Returns (symbol -> dict) with the original screener `quote` retained
     (for live/"today" fields) alongside domicile-confirmed extras that
     only .info has - sector/trailing_eps (used by the valuation-adjacent
-    scripts) plus a handful of extra current-snapshot fields (dividend
-    yield, ex-dividend date, trailing/forward P/E, beta, 52-week range)
-    pulled from this SAME .info call at no extra request cost, for
-    scripts that want a fuller company profile (see
-    swiss_crash_rebound.py's run_scan). Fails soft per ticker: a
-    fetch error just excludes that ticker with a warning, rather than
-    aborting the whole scan.
+    scripts), avg_volume_10d (used by swiss_crash_rebound.py AND
+    swiss_today_screener.py, so both read the SAME already-fetched
+    figure rather than two different volume-averaging methodologies)
+    plus a handful of extra current-snapshot fields (dividend yield,
+    ex-dividend date, trailing/forward P/E, beta, 52-week range) pulled
+    from this SAME .info call at no extra request cost, for scripts that
+    want a fuller company profile (see swiss_crash_rebound.py's
+    run_scan). Fails soft per ticker: a fetch error just excludes that
+    ticker with a warning, rather than aborting the whole scan.
 
     Runs the per-ticker fetches across max_workers threads (see
     INFO_MAX_WORKERS's own comment for the safety reasoning) instead of
