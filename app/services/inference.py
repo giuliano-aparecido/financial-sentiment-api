@@ -274,13 +274,16 @@ async def analyze_two_stage(
     earnings: str,
     price_context: str,
     gap_pct: float | None,
+    ticker_was_explicit: bool = True,
 ) -> dict:
     """Orchestrates the two-stage pipeline: Task A classifies news_
     reaction -> fusion.fuse() computes the ONLY recommendation this
     service ever produces -> Task B explains it, given that
     recommendation as input. Neither LLM call ever decides BUY/SELL/HOLD
     itself - see fusion.py's own module docstring for why. Replaces the
-    old single-call analyze_with_hf."""
+    old single-call analyze_with_hf. ticker_was_explicit just passes
+    through to the result dict (see ticker.extract_ticker) - never
+    affects Task A/B or fusion, purely informational for the frontend."""
     news_reaction = await classify_news(ticker, price_context, live_context)
     news_reaction_fallback = news_reaction is None
     if news_reaction_fallback:
@@ -302,6 +305,7 @@ async def analyze_two_stage(
     result = {
         "model_architecture": MODEL_ARCHITECTURE,
         "ticker": ticker,
+        "ticker_was_explicit": ticker_was_explicit,
         "live_news_retrieved": live_context,
         "recommendation": fusion_result.recommendation,
         "confidence": fusion_result.confidence,

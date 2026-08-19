@@ -56,9 +56,10 @@ def _install_fake_client(monkeypatch, responses):
     return fake
 
 
-def _run_two_stage(gap_pct=None):
+def _run_two_stage(gap_pct=None, ticker_was_explicit=True):
     return inference.analyze_two_stage(
         "AAPL", "Is AAPL a buy?", NEWS, MARKET_DATA, VALUATION, EARNINGS, PRICE_CONTEXT, gap_pct,
+        ticker_was_explicit=ticker_was_explicit,
     )
 
 
@@ -160,6 +161,33 @@ def test_two_stage_happy_path_returns_recommendation_confidence_reasoning_answer
     assert result["valuation_gap_pct"] == -40.0
     assert result["market_data"] == MARKET_DATA
     assert result["valuation"] == VALUATION
+
+
+def test_ticker_was_explicit_defaults_true_and_propagates(monkeypatch):
+    _install_fake_client(monkeypatch, [
+        _reaction_response("good"),
+        _analysis_response("r", "a"),
+    ])
+    result = _run(_run_two_stage(gap_pct=None))
+    assert result["ticker_was_explicit"] is True
+
+
+def test_ticker_was_explicit_false_propagates_on_task_b_success(monkeypatch):
+    _install_fake_client(monkeypatch, [
+        _reaction_response("good"),
+        _analysis_response("r", "a"),
+    ])
+    result = _run(_run_two_stage(gap_pct=None, ticker_was_explicit=False))
+    assert result["ticker_was_explicit"] is False
+
+
+def test_ticker_was_explicit_false_propagates_on_task_b_raw_response_fallback(monkeypatch):
+    _install_fake_client(monkeypatch, [
+        _reaction_response("good"),
+        _ok("not json at all, no braces here"),  # Task B fails to parse
+    ])
+    result = _run(_run_two_stage(gap_pct=None, ticker_was_explicit=False))
+    assert result["ticker_was_explicit"] is False
     assert result["earnings"] == EARNINGS
     assert "news_reaction_fallback" not in result
 

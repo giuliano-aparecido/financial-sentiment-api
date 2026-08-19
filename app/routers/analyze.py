@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.post("/api/analyze", dependencies=[Depends(verify_api_key)])
 async def analyze_stock(req: QueryRequest):
-    ticker = extract_ticker(req.user_query)
+    ticker, ticker_was_explicit = extract_ticker(req.user_query)
     # All four do blocking I/O (feedparser/yfinance) - off the event loop
     # via to_thread (same reason as before: one slow response shouldn't
     # stall every other concurrent request on this single-worker process),
@@ -44,4 +44,5 @@ async def analyze_stock(req: QueryRequest):
     earnings = earnings_block(earnings_data)
     return await analyze_two_stage(
         ticker, req.user_query, live_context, market_data, valuation, earnings, price_context, gap_pct,
+        ticker_was_explicit=ticker_was_explicit,
     )

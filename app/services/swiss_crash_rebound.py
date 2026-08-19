@@ -7,10 +7,11 @@ trading days, by a close that's >=5% ABOVE THE CRASH DAY'S OWN CLOSE (not
 the previous day's close - see find_crash_then_rebound's own docstring for
 why that distinction matters), within the last N months (12 as of
 2026-08-18, widened from 3 at the user's request). Universe: SIX-listed,
-Switzerland-domiciled companies with market cap > CHF 500M (SMI's 20
-largest still excluded regardless - see swiss_universe.py's MIN/
-MAX_MARKET_CAP_CHF and SMI_TICKERS). This is looking for VOLATILE movers,
-not necessarily small companies specifically.
+Switzerland-domiciled companies with market cap > CHF 500M - that is the
+only requirement (see swiss_universe.py's MIN/MAX_MARKET_CAP_CHF; an
+earlier unconditional SMI-names exclusion was removed 2026-08-19 at the
+user's explicit direction). This is looking for VOLATILE movers, not
+necessarily small companies specifically.
 
 Ported from the standalone research/ project (D:\\projects\\research) into
 this app so it can run from a real, always-on server (Render) instead of a

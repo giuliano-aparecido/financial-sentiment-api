@@ -3,10 +3,10 @@ Swiss "big loss" volatility screener - TODAY only.
 
 Finds SIX Swiss Exchange-listed, Switzerland-domiciled stocks that are
 down >= LOSS_THRESHOLD_PCT today. Universe: SIX-listed, Switzerland-
-domiciled companies with market cap > CHF 500M (SMI's 20 largest still
-excluded) - see swiss_crash_rebound.py's module docstring for the same
-framing, which applies here identically since both scans share the same
-universe discovery. This module's OWN logic does no volume filtering of
+domiciled companies with market cap > CHF 500M, no other exclusion - see
+swiss_crash_rebound.py's module docstring for the same framing, which
+applies here identically since both scans share the same universe
+discovery. This module's OWN logic does no volume filtering of
 its own - volume vs. each stock's own 10-day average is shown and used to
 SORT the results (thinnest first), but never excludes a row here: a big
 loss on unusually thin volume vs. one on heavy volume tell different
