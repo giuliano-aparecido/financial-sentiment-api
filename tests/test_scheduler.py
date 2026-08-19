@@ -1,4 +1,6 @@
 import datetime
+import threading
+import time
 
 import pandas as pd
 
@@ -39,10 +41,13 @@ def _install_fake(monkeypatch):
 
 
 def teardown_function(_fn):
-    # start()/shutdown() mutate the module-level _scheduler global - reset
-    # it after every test in this file regardless of pass/fail, so one
-    # test's state can't leak into the next.
+    # start()/shutdown() mutate the module-level _scheduler global, and
+    # trigger_*/{_run_*_guarded} mutate _rebound_running/_indicator_running -
+    # reset all of them after every test in this file regardless of
+    # pass/fail, so one test's state can't leak into the next.
     scheduler_module._scheduler = None
+    scheduler_module._rebound_running = False
+    scheduler_module._indicator_running = False
 
 
 # --- RESEARCH_SCHEDULER_DISABLED guard ---
@@ -162,14 +167,14 @@ def test_shutdown_calls_underlying_scheduler_and_clears_reference(monkeypatch):
     assert scheduler_module.is_running() is False
 
 
-# --- run_rebound_scan_job / run_indicator_scans_job (the actual pipeline) ---
+# --- _run_rebound_scan / _run_indicator_scans (the actual pipeline) ---
 
 
 def _fake_domestic():
     return {"NESN.SW": {"name": "Nestle"}, "ABBN.SW": {"name": "ABB"}}
 
 
-def test_run_rebound_scan_job_discovers_scans_and_persists(monkeypatch):
+def test_run_rebound_scan_discovers_scans_and_persists(monkeypatch):
     monkeypatch.setattr(scheduler_module.swiss_universe, "discover_candidates", lambda: {"NESN.SW": {}, "ABBN.SW": {}})
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic_batched",
@@ -185,12 +190,12 @@ def test_run_rebound_scan_job_discovers_scans_and_persists(monkeypatch):
         lambda rows, scan_run_at=None: saved.update(rows=rows, scan_run_at=scan_run_at),
     )
 
-    scheduler_module.run_rebound_scan_job()
+    scheduler_module._run_rebound_scan()
 
     assert saved["rows"] == [{"ticker": "NESN.SW", "drop_pct": -5.2}]
 
 
-def test_run_indicator_scans_job_scans_every_allowed_threshold_off_one_discovery(monkeypatch):
+def test_run_indicator_scans_scans_every_allowed_threshold_off_one_discovery(monkeypatch):
     discover_calls = []
     monkeypatch.setattr(scheduler_module.swiss_universe, "discover_candidates", lambda: {"NESN.SW": {}})
     monkeypatch.setattr(
@@ -210,7 +215,7 @@ def test_run_indicator_scans_job_scans_every_allowed_threshold_off_one_discovery
         lambda rows, threshold_pct, scan_run_at=None: saved.append((threshold_pct, rows, scan_run_at)),
     )
 
-    scheduler_module.run_indicator_scans_job()
+    scheduler_module._run_indicator_scans()
 
     # One discovery pass shared across all thresholds, not one per threshold.
     assert len(discover_calls) == 1
@@ -219,3 +224,139 @@ def test_run_indicator_scans_job_scans_every_allowed_threshold_off_one_discovery
     # All three saved under the SAME scan_run_at - one shared run, not
     # three independently-timestamped ones.
     assert len({s[2] for s in saved}) == 1
+
+
+# --- Guarded execution + manual trigger, unified with the cron (see
+# module docstring: is_*_scan_running() must reflect BOTH a cron firing
+# and a manual Refresh click identically) ---
+
+
+def test_is_rebound_scan_running_reflects_module_state():
+    scheduler_module._rebound_running = False
+    assert scheduler_module.is_rebound_scan_running() is False
+    scheduler_module._rebound_running = True
+    assert scheduler_module.is_rebound_scan_running() is True
+
+
+def test_run_rebound_scan_guarded_is_a_noop_when_already_running(monkeypatch):
+    scheduler_module._rebound_running = True
+    calls = []
+    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append(1))
+
+    scheduler_module._run_rebound_scan_guarded()
+
+    assert calls == []  # never ran the actual pipeline
+    assert scheduler_module.is_rebound_scan_running() is True  # untouched, still whatever it was
+
+
+def test_run_rebound_scan_guarded_runs_and_clears_flag_on_success(monkeypatch):
+    scheduler_module._rebound_running = False
+    calls = []
+    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append(1))
+
+    scheduler_module._run_rebound_scan_guarded()
+
+    assert calls == [1]
+    assert scheduler_module.is_rebound_scan_running() is False
+
+
+def test_run_rebound_scan_guarded_clears_flag_even_on_failure(monkeypatch):
+    scheduler_module._rebound_running = False
+
+    def _boom():
+        raise RuntimeError("simulated scan failure")
+
+    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", _boom)
+
+    scheduler_module._run_rebound_scan_guarded()  # must not raise - caught and logged
+
+    assert scheduler_module.is_rebound_scan_running() is False
+
+
+def test_trigger_rebound_scan_returns_false_and_starts_nothing_when_already_running(monkeypatch):
+    scheduler_module._rebound_running = True
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
+
+    assert scheduler_module.trigger_rebound_scan() is False
+
+
+def test_trigger_rebound_scan_runs_the_guarded_pipeline_in_the_background(monkeypatch):
+    scheduler_module._rebound_running = False
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run():
+        started.set()
+        finish.wait(timeout=2)
+
+    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", fake_run)
+
+    result = scheduler_module.trigger_rebound_scan()
+
+    assert result is True
+    assert started.wait(timeout=2) is True
+    # A manual trigger's in-progress state is indistinguishable from a
+    # cron firing's - same flag, same getter.
+    assert scheduler_module.is_rebound_scan_running() is True
+
+    finish.set()
+    for _ in range(100):
+        if not scheduler_module.is_rebound_scan_running():
+            break
+        time.sleep(0.02)
+    assert scheduler_module.is_rebound_scan_running() is False
+
+
+def test_is_indicator_scan_running_reflects_module_state():
+    scheduler_module._indicator_running = False
+    assert scheduler_module.is_indicator_scan_running() is False
+    scheduler_module._indicator_running = True
+    assert scheduler_module.is_indicator_scan_running() is True
+
+
+def test_run_indicator_scans_guarded_is_a_noop_when_already_running(monkeypatch):
+    scheduler_module._indicator_running = True
+    calls = []
+    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", lambda: calls.append(1))
+
+    scheduler_module._run_indicator_scans_guarded()
+
+    assert calls == []
+
+
+def test_trigger_indicator_scan_returns_false_when_already_running(monkeypatch):
+    scheduler_module._indicator_running = True
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
+
+    assert scheduler_module.trigger_indicator_scan() is False
+
+
+def test_trigger_indicator_scan_runs_the_guarded_pipeline_in_the_background(monkeypatch):
+    scheduler_module._indicator_running = False
+    started = threading.Event()
+    finish = threading.Event()
+
+    def fake_run():
+        started.set()
+        finish.wait(timeout=2)
+
+    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", fake_run)
+
+    result = scheduler_module.trigger_indicator_scan()
+
+    assert result is True
+    assert started.wait(timeout=2) is True
+    assert scheduler_module.is_indicator_scan_running() is True
+
+    finish.set()
+    for _ in range(100):
+        if not scheduler_module.is_indicator_scan_running():
+            break
+        time.sleep(0.02)
+    assert scheduler_module.is_indicator_scan_running() is False
