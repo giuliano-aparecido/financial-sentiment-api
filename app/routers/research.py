@@ -32,11 +32,12 @@ router = APIRouter()
 @router.get("/api/research/volatility/rebound", dependencies=[Depends(verify_api_key)])
 @limiter.limit("30/minute")
 async def get_rebound_scan_result(request: Request):
-    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_rebound_scan)
+    rows, scan_run_at, failed_tickers = await asyncio.to_thread(scan_persistence.get_latest_rebound_scan)
     return {
         "rows": rows,
         "scan_run_at": scan_run_at.isoformat() if scan_run_at else None,
         "is_running": scheduler.is_rebound_scan_running(),
+        "failed_ticker_count": len(failed_tickers),
     }
 
 
@@ -54,11 +55,12 @@ async def get_indicator_scan_result(request: Request, threshold_pct: float):
             status_code=422,
             detail=f"threshold_pct must be one of {ALLOWED_THRESHOLD_PCTS}, got {threshold_pct}",
         )
-    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_indicator_scan, threshold_pct)
+    rows, scan_run_at, failed_tickers = await asyncio.to_thread(scan_persistence.get_latest_indicator_scan, threshold_pct)
     return {
         "rows": rows,
         "scan_run_at": scan_run_at.isoformat() if scan_run_at else None,
         "is_running": scheduler.is_indicator_scan_running(),
+        "failed_ticker_count": len(failed_tickers),
     }
 
 

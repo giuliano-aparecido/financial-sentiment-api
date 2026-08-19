@@ -65,7 +65,7 @@ def test_get_rebound_scan_requires_api_key(client):
 def test_get_rebound_scan_reads_from_persistence(client, monkeypatch):
     monkeypatch.setattr(
         research_router.scan_persistence, "get_latest_rebound_scan",
-        lambda: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 8, 19, 6, 0, tzinfo=datetime.timezone.utc)),
+        lambda: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 8, 19, 6, 0, tzinfo=datetime.timezone.utc), []),
     )
     monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: False)
     response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
@@ -74,14 +74,15 @@ def test_get_rebound_scan_reads_from_persistence(client, monkeypatch):
     assert body["rows"] == [{"ticker": "NESN.SW"}]
     assert body["scan_run_at"] == "2026-08-19T06:00:00+00:00"
     assert body["is_running"] is False
+    assert body["failed_ticker_count"] == 0
 
 
 def test_get_rebound_scan_returns_null_scan_run_at_when_nothing_saved(client, monkeypatch):
-    monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None))
+    monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
     monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: False)
     response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
-    assert response.json() == {"rows": [], "scan_run_at": None, "is_running": False}
+    assert response.json() == {"rows": [], "scan_run_at": None, "is_running": False, "failed_ticker_count": 0}
 
 
 def test_get_rebound_scan_reports_is_running_true_regardless_of_trigger_source(client, monkeypatch):
@@ -89,10 +90,20 @@ def test_get_rebound_scan_reports_is_running_true_regardless_of_trigger_source(c
     # manual Refresh click, scheduler.is_rebound_scan_running() is the
     # ONE source of truth this route reads - see scheduler.py's own
     # module docstring for why that unification matters.
-    monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None))
+    monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
     monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
     response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
     assert response.json()["is_running"] is True
+
+
+def test_get_rebound_scan_reports_failed_ticker_count(client, monkeypatch):
+    monkeypatch.setattr(
+        research_router.scan_persistence, "get_latest_rebound_scan",
+        lambda: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 8, 19, 6, 0, tzinfo=datetime.timezone.utc), ["ZURN.SW", "UBSG.SW"]),
+    )
+    monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: False)
+    response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
+    assert response.json()["failed_ticker_count"] == 2
 
 
 def test_rebound_start_requires_api_key(client):
@@ -142,7 +153,7 @@ def test_get_indicator_scan_reads_from_persistence_scoped_to_threshold(client, m
 
     def fake_get(threshold_pct):
         calls.append(threshold_pct)
-        return [{"ticker": "NESN.SW"}], None
+        return [{"ticker": "NESN.SW"}], None, []
 
     monkeypatch.setattr(research_router.scan_persistence, "get_latest_indicator_scan", fake_get)
     monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: False)
@@ -154,18 +165,31 @@ def test_get_indicator_scan_reads_from_persistence_scoped_to_threshold(client, m
     body = response.json()
     assert body["rows"] == [{"ticker": "NESN.SW"}]
     assert body["is_running"] is False
+    assert body["failed_ticker_count"] == 0
 
 
 def test_get_indicator_scan_is_running_is_the_same_regardless_of_selected_threshold(client, monkeypatch):
     # Only ONE indicator scan runs at a time, covering all three
     # thresholds together (see scheduler._run_indicator_scans) - there's
     # no per-threshold running state.
-    monkeypatch.setattr(research_router.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([], None))
+    monkeypatch.setattr(research_router.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([], None, []))
     monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: True)
     response = client.get(
         "/api/research/volatility/indicator?threshold_pct=2.0", headers={"X-API-Key": VALID_KEY},
     )
     assert response.json()["is_running"] is True
+
+
+def test_get_indicator_scan_reports_failed_ticker_count(client, monkeypatch):
+    monkeypatch.setattr(
+        research_router.scan_persistence, "get_latest_indicator_scan",
+        lambda threshold_pct: ([{"ticker": "NESN.SW"}], None, ["ZURN.SW"]),
+    )
+    monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: False)
+    response = client.get(
+        "/api/research/volatility/indicator?threshold_pct=2.0", headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.json()["failed_ticker_count"] == 1
 
 
 def test_indicator_start_requires_api_key(client):
