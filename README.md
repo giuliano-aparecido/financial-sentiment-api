@@ -18,7 +18,14 @@ doing it properly, not because it needs to scale or handle real traffic.
 - **yfinance** — market fundamentals/earnings (keyless; see `app/services/
   fundamentals.py`/`earnings.py`/`valuation.py`)
 - **slowapi** — global rate limit
-- **pytest** — 53 tests, run via GitHub Actions on every push/PR
+- **SQLAlchemy 2.0** + **Alembic** + **psycopg3** — Postgres (Neon)
+  persistence for the two scheduled research scans (`app/db/`,
+  `app/services/scan_persistence.py`) — same pattern as
+  `portfolio-manager-backend`'s DB layer, adapted where noted (see that
+  module's own comments)
+- **APScheduler** — in-process cron for those same two scans (`app/
+  services/scheduler.py`) — no external trigger (GitHub Actions, etc.)
+- **pytest** — run via GitHub Actions on every push/PR
 
 ## Architecture
 
@@ -107,6 +114,29 @@ app/
   but the model's actual JSON output quality against the new prompt is
   untested until the cutover happens. Do not treat this as "the analyst
   pipeline is live" until that model swap is confirmed.
+- **The rebound and volatility-indicator research tables are scanned on a
+  schedule (daily / monthly), not live on button click.** Added at the
+  user's explicit request to cut Yahoo Finance call volume, since neither
+  table's underlying data changes meaningfully more often than that. An
+  in-process APScheduler cron (`app/services/scheduler.py`) runs each
+  scan in the early morning, batches the ~150-ticker universe discovery
+  into several groups with a delay between them (on top of, not instead
+  of, `swiss_universe.filter_domestic`'s existing per-ticker pacing —
+  affordable for an unattended overnight job in a way it isn't for a
+  live one), and persists the result to Neon Postgres
+  (`app/services/scan_persistence.py`). `GET /api/research/volatility/
+  {rebound,indicator}` just reads the latest saved run — no scan runs on
+  request anymore for these two. Deliberately NOT an external trigger
+  (GitHub Actions cron, Render Cron Jobs): this repo already tried a
+  GitHub Actions cron for a different purpose (keeping Render's free
+  tier warm) and it proved unreliable in practice (see git history:
+  `ci/remove-keep-alive-workflow` — a `*/10` schedule silently went 24+
+  minutes without firing). A catch-up check runs on every app startup
+  (`scheduler._is_rebound_stale`/`_is_indicator_stale`) so a missed
+  scheduled firing (a redeploy landing exactly on the hour) just runs a
+  bit late instead of being silently skipped. The "today" big-loss
+  screener is untouched — it stays fully live/on-demand, since intraday
+  data has no meaningful cache window.
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since
@@ -125,7 +155,19 @@ uvicorn main:app --reload
 
 `.env`/environment needs at minimum `API_KEY` and `HF_TOKEN` — see
 `app/config.py` for the full list (model selection, allowed inference
-host suffixes, etc.).
+host suffixes, etc.). `.env` is loaded automatically (`python-dotenv`) if
+present — copy `.env.example` to start.
+
+The scheduled-scan feature additionally needs `DATABASE_CONNECTION_STRING`
+(a Neon Postgres connection string) and a migration:
+
+```bash
+python -m alembic upgrade head
+```
+
+Tests never touch the real database or trigger a real scan — see
+`conftest.py`'s `RESEARCH_SCHEDULER_DISABLED` guard and `tests/
+test_scan_persistence.py`'s in-memory-SQLite fixture.
 
 ## Tests
 

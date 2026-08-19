@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 
 from app.routers import research as research_router
@@ -153,6 +155,66 @@ def test_indicator_status_delegates_to_research_job(client, monkeypatch):
     response = client.get("/api/research/volatility/indicator/status", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == fake_status
+
+
+# --- scheduled-scan reads (rebound, volatility-indicator) ---
+
+
+def test_get_rebound_scan_requires_api_key(client):
+    response = client.get("/api/research/volatility/rebound")
+    assert response.status_code == 401
+
+
+def test_get_rebound_scan_reads_from_persistence(client, monkeypatch):
+    monkeypatch.setattr(
+        research_router.scan_persistence, "get_latest_rebound_scan",
+        lambda: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 8, 19, 6, 0, tzinfo=datetime.timezone.utc)),
+    )
+    response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rows"] == [{"ticker": "NESN.SW"}]
+    assert body["scan_run_at"] == "2026-08-19T06:00:00+00:00"
+
+
+def test_get_rebound_scan_returns_null_scan_run_at_when_nothing_saved(client, monkeypatch):
+    monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None))
+    response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"rows": [], "scan_run_at": None}
+
+
+def test_get_indicator_scan_requires_api_key(client):
+    response = client.get("/api/research/volatility/indicator?threshold_pct=2.0")
+    assert response.status_code == 401
+
+
+def test_get_indicator_scan_requires_threshold_pct_query_param(client):
+    response = client.get("/api/research/volatility/indicator", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 422
+
+
+def test_get_indicator_scan_rejects_a_value_outside_the_allowed_set(client):
+    response = client.get(
+        "/api/research/volatility/indicator?threshold_pct=4.0", headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 422
+
+
+def test_get_indicator_scan_reads_from_persistence_scoped_to_threshold(client, monkeypatch):
+    calls = []
+
+    def fake_get(threshold_pct):
+        calls.append(threshold_pct)
+        return [{"ticker": "NESN.SW"}], None
+
+    monkeypatch.setattr(research_router.scan_persistence, "get_latest_indicator_scan", fake_get)
+    response = client.get(
+        "/api/research/volatility/indicator?threshold_pct=5.0", headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert calls == [5.0]
+    assert response.json()["rows"] == [{"ticker": "NESN.SW"}]
 
 
 def test_start_routes_allow_rapid_repeated_calls_without_a_business_cooldown(client, monkeypatch):

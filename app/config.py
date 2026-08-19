@@ -1,7 +1,24 @@
 import os
 
+from dotenv import load_dotenv
+
+# Loads .env into the real process environment if one exists (local dev) -
+# a no-op if it doesn't (Render, CI), since real env vars are already set
+# there directly. Must run before any os.getenv() call below. This repo
+# had no .env-loading mechanism at all until the research-scan DB layer
+# needed one - every var below was previously only ever set as a real
+# shell/host env var.
+load_dotenv()
+
 API_KEY = os.getenv("API_KEY")
 HF_API_TOKEN = os.getenv("HF_TOKEN")
+
+# Neon Postgres connection string for the research-scan persistence layer
+# (app/db, app/services/scan_persistence.py) - same variable name already
+# set on Render (see that service's env vars), not the DATABASE_URL name
+# portfolio-manager-backend uses, to avoid requiring a Render-side rename
+# of something already configured.
+DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
 MODEL_ARCHITECTURE = os.getenv("MODEL_ARCHITECTURE", "apertus").lower()
 

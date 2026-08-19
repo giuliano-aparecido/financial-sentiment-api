@@ -1,7 +1,10 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.deps import verify_api_key
 from app.limiter import limiter
+from app.services import scan_persistence
 from app.services.research_job import (
     get_indicator_status,
     get_rebound_status,
@@ -13,6 +16,41 @@ from app.services.research_job import (
 from app.services.swiss_volatility_indicator import ALLOWED_THRESHOLD_PCTS
 
 router = APIRouter()
+
+# --- Scheduled-scan reads (rebound, volatility-indicator) ---
+#
+# These two tables are no longer scanned live on request - see
+# app/services/scheduler.py's own docstring for why (user's explicit
+# request: cache daily/monthly instead of hammering Yahoo on every
+# button click). The routes below just read whatever the scheduler most
+# recently persisted (app/services/scan_persistence.py) - cheap (one
+# indexed DB query), so no /start-style background job or polling
+# needed, unlike the "today" big-loss screener below, which stays fully
+# live/on-demand since intraday data has no meaningful cache window.
+#
+# The old POST .../start + GET .../status pair for rebound/indicator
+# (further down this file) is kept as-is - not called by the frontend
+# for these two tables anymore, but still useful for manually forcing a
+# fresh scan (e.g. via curl) without waiting for the next scheduled run.
+
+
+@router.get("/api/research/volatility/rebound", dependencies=[Depends(verify_api_key)])
+@limiter.limit("30/minute")
+async def get_rebound_scan_result(request: Request):
+    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_rebound_scan)
+    return {"rows": rows, "scan_run_at": scan_run_at.isoformat() if scan_run_at else None}
+
+
+@router.get("/api/research/volatility/indicator", dependencies=[Depends(verify_api_key)])
+@limiter.limit("30/minute")
+async def get_indicator_scan_result(request: Request, threshold_pct: float):
+    if threshold_pct not in ALLOWED_THRESHOLD_PCTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"threshold_pct must be one of {ALLOWED_THRESHOLD_PCTS}, got {threshold_pct}",
+        )
+    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_indicator_scan, threshold_pct)
+    return {"rows": rows, "scan_run_at": scan_run_at.isoformat() if scan_run_at else None}
 
 # No @limiter.limit(...) override on any /start route below as of
 # 2026-08-19 (previously "1/5minutes" on each) - removed at the user's

@@ -3,7 +3,7 @@ import threading
 import time
 
 import app.services.swiss_universe as swiss_universe_module
-from app.services.swiss_universe import _ex_dividend_date, discover_candidates, filter_domestic
+from app.services.swiss_universe import _ex_dividend_date, discover_candidates, filter_domestic, filter_domestic_batched
 
 
 class _FakeTicker:
@@ -394,6 +394,60 @@ def test_discover_candidates_static_fallback_includes_smi_names(monkeypatch):
     assert "NOVN.SW" in candidates  # Novartis
     assert "UBSG.SW" in candidates  # UBS
     assert "INRN.SW" in candidates
+
+
+# --- filter_domestic_batched (scheduled-scan batching, see scheduler.py) ---
+
+
+def _four_candidates():
+    return {f"T{i}.SW": {"longName": f"Ticker {i}"} for i in range(4)}
+
+
+def test_filter_domestic_batched_single_batch_matches_filter_domestic(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
+
+    candidates = _four_candidates()
+    domestic, failed = filter_domestic_batched(candidates, num_batches=1, batch_delay_seconds=999, delay_seconds=0)
+
+    assert set(domestic) == set(candidates)
+    assert failed == []
+    # num_batches=1 must not sleep at all (no "between batches" gap when
+    # there's only one) - delay_seconds=0 above also rules out the
+    # per-ticker politeness sleep as a false positive here.
+    assert 999 not in sleep_calls
+
+
+def test_filter_domestic_batched_sleeps_between_but_not_after_last_batch(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
+
+    candidates = _four_candidates()
+    domestic, failed = filter_domestic_batched(candidates, num_batches=4, batch_delay_seconds=42, delay_seconds=0)
+
+    assert set(domestic) == set(candidates)
+    assert failed == []
+    # 4 candidates / 4 batches = 1 ticker each -> 3 gaps between 4 batches,
+    # never a 4th trailing sleep after the last one.
+    assert sleep_calls.count(42) == 3
+
+
+def test_filter_domestic_batched_merges_results_and_failures_across_batches(monkeypatch):
+    def fake_ticker(symbol):
+        if symbol == "T2.SW":
+            raise Exception("simulated transient fetch failure")
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda s: None)
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+
+    candidates = _four_candidates()
+    domestic, failed = filter_domestic_batched(candidates, num_batches=2, batch_delay_seconds=0, delay_seconds=0)
+
+    assert set(domestic) == {"T0.SW", "T1.SW", "T3.SW"}
+    assert failed == ["T2.SW"]
 
 
 def test_discover_candidates_live_includes_smi_names(monkeypatch):
