@@ -57,8 +57,10 @@ one place two threads could otherwise race to both start a scan of the
 same type.
 
 Universe: a single market-cap band (swiss_universe.MIN/MAX_MARKET_CAP_CHF,
-CHF 500M+, no upper bound - SMI's 20 largest/most-liquid names still
-EXCLUDED - see swiss_universe.SMI_TICKERS) as of 2026-08-18.
+CHF 500M+, no upper bound - that is the only requirement, including SMI
+names; the earlier unconditional SMI exclusion was removed 2026-08-19 at
+the user's explicit direction, see swiss_universe.py's own comment) as
+of 2026-08-19.
 
 Rebound caching: its 12-month lookback barely changes day to day - once a
 trading day closes, that day's OHLCV doesn't change - so _rebound_result

@@ -112,4 +112,28 @@ def test_unparseable_model_output_falls_back_but_keeps_data_blocks(monkeypatch):
     assert "predicted_direction" not in result
     assert result["market_data"] == MARKET_DATA
     assert result["valuation"] == VALUATION
+
+
+def test_ticker_was_explicit_defaults_true_and_propagates_on_success(monkeypatch):
+    _install_fake_client(monkeypatch, V4_MODEL_OUTPUT)
+    result = _run(inference.analyze_with_hf("AAPL", "Is AAPL a buy?", "news", MARKET_DATA, VALUATION, EARNINGS))
+    assert result["ticker_was_explicit"] is True
+
+
+def test_ticker_was_explicit_false_propagates_on_success(monkeypatch):
+    _install_fake_client(monkeypatch, V4_MODEL_OUTPUT)
+    result = _run(inference.analyze_with_hf(
+        "AAPL", "is the market bullish today", "news", MARKET_DATA, VALUATION, EARNINGS,
+        ticker_was_explicit=False,
+    ))
+    assert result["ticker_was_explicit"] is False
+
+
+def test_ticker_was_explicit_false_propagates_on_raw_response_fallback(monkeypatch):
+    _install_fake_client(monkeypatch, "not json at all, no braces here")
+    result = _run(inference.analyze_with_hf(
+        "AAPL", "is the market bullish today", "news", MARKET_DATA, VALUATION, EARNINGS,
+        ticker_was_explicit=False,
+    ))
+    assert result["ticker_was_explicit"] is False
     assert result["earnings"] == EARNINGS

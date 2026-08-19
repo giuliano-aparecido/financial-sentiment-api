@@ -80,6 +80,7 @@ async def analyze_with_hf(
     market_data: str,
     valuation: str,
     earnings: str,
+    ticker_was_explicit: bool = True,
 ) -> dict:
     # Canonical prompt template - must stay byte-identical to
     # financial-sentiment-model's colab/train/gpu/tpu train_model.py and
@@ -209,6 +210,7 @@ Recent News & Results:
         result = {
             "model_architecture": MODEL_ARCHITECTURE,
             "ticker": ticker,
+            "ticker_was_explicit": ticker_was_explicit,
             "live_news_retrieved": live_context,
             "reasoning": impact["reasoning"],
             "predicted_direction": impact["direction"],
@@ -230,6 +232,7 @@ Recent News & Results:
         return {
             "model_architecture": MODEL_ARCHITECTURE,
             "ticker": ticker,
+            "ticker_was_explicit": ticker_was_explicit,
             "live_news_retrieved": live_context,
             "raw_response": raw_model_output,
             # Still attached even though the model's own output didn't

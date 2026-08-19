@@ -1,7 +1,7 @@
 """
-Shared "find volatile Swiss stocks, excluding foreign companies and SMI
-mega-caps" logic, used by both swiss_crash_rebound.py and
-swiss_today_screener.py. Free tools only: yfinance (no API key).
+Shared "find volatile Swiss stocks, excluding foreign companies" logic,
+used by both swiss_crash_rebound.py and swiss_today_screener.py. Free
+tools only: yfinance (no API key).
 
 Two filters matter for "Swiss stocks with market cap > CHF 500M, excluding
 foreign companies":
@@ -16,14 +16,12 @@ foreign companies":
      per-company `country` field actually distinguishes domestic from
      foreign - the region/exchange filters alone do not.
 
-Single universe as of 2026-08-18 (previously a small-cap default with an
+Single universe as of 2026-08-19 (previously a small-cap default with an
 opt-in wider ALL_CAPS_MIN/MAX_MARKET_CAP_CHF band toggled per-request -
-removed at the user's explicit request to always include mid/large caps):
-market cap > CHF 500M, no upper bound - but always excludes SMI_TICKERS
-regardless (see that set's own comment): this scan is looking for
-VOLATILE tickers, and the SMI's 20 largest/most-liquid names are the
-opposite of that, so they're excluded on purpose rather than just being
-an unlikely match.
+removed at the user's explicit request to always include mid/large caps;
+previously also excluded SMI_TICKERS unconditionally, removed at the
+user's explicit direction - see EXCLUDED_TICKERS' own comment): market
+cap > CHF 500M, no upper bound. That is the only requirement.
 """
 
 import concurrent.futures
@@ -139,60 +137,20 @@ INFO_REQUEST_DELAY_SECONDS = 0.3
 # deploying this; lower it if so.
 INFO_MAX_WORKERS = 5
 
-# SMI (Swiss Market Index) constituents - the 20 largest, most liquid,
-# most heavily analyst-covered names on SIX. Excluded from discovery, not
-# because they fail any correctness check (they're all honest,
-# Switzerland-domiciled operating companies), but because this scan's
-# whole point - crash-then-rebound and big-daily-loss detection - is
-# finding VOLATILE tickers, and SMI names are the opposite end of that
-# spectrum: heavily traded, closely watched, and structurally the least
-# likely names on the exchange to produce the kind of move this scan is
-# looking for. Applies regardless of market cap - these names are all
-# well within the CHF 500M-1T band (MIN/MAX_MARKET_CAP_CHF), so this
-# exclusion is what actually keeps them out, not the cap band itself.
+# SMI_TICKERS (the 20 largest/most-liquid SIX names) used to be excluded
+# here unconditionally, on the theory that this scan is looking for
+# VOLATILE movers and SMI names are structurally the least likely to
+# produce one. Removed 2026-08-19 at the user's explicit direction: the
+# actual requirement is "scan all Swiss companies with market cap above
+# CHF 500M," full stop - no blue-chip carve-out. Confirmed live this was
+# silently dropping real matches (e.g. Nestle showing genuine 2%+ single-
+# day losses and gains that the old exclusion hid from every table).
 #
-# Confirmed live via Wikipedia's SMI constituent table on 2026-08-13
-# (https://en.wikipedia.org/wiki/Swiss_Market_Index) - SIX itself reviews
-# SMI composition once a year each September, so this WILL drift after
-# the next review; re-check that table (or SIX's own six-group.com
-# constituent listing) and update this set when it does. Multiple tickers
-# per company where a company trades more than one share-class line on
-# SIX (e.g. Novartis' NOVN.SW ordinary line and its NOVNEE.SW second
-# line, confirmed present as distinct symbols in
-# STATIC_DOMESTIC_TICKER_SNAPSHOT below) - both listings are the same
-# company, so both are excluded.
-SMI_TICKERS = {
-    "NOVN.SW", "NOVNEE.SW",  # Novartis
-    "RO.SW", "ROP.SW",       # Roche
-    "NESN.SW",                # Nestle
-    "ABBN.SW", "ABBNE.SW",   # ABB
-    "UBSG.SW", "UBSGE.SW",   # UBS
-    "CFR.SW",                 # Richemont
-    "ZURN.SW",                # Zurich Insurance
-    "HOLN.SW",                # Holcim
-    "SREN.SW", "SRENE.SW",   # Swiss Re
-    "LONN.SW",                # Lonza
-    "SCMN.SW",                # Swisscom
-    "GIVN.SW",                # Givaudan
-    "ALC.SW",                 # Alcon
-    "SIKA.SW",                # Sika
-    "AMRZ.SW", "AMRZE.SW",   # Amrize
-    "SLHN.SW",                # Swiss Life
-    "KNIN.SW",                # Kuehne + Nagel
-    "GEBN.SW", "GEBNE.SW",   # Geberit
-    "PGHN.SW",                # Partners Group
-    "LOGN.SW", "LOGNE.SW",   # Logitech
-}
-
 # Passes the market-cap band and Switzerland-domicile checks but isn't a
 # normal operating company, so it doesn't belong in this scan's universe
 # regardless: SNBN.SW is the Swiss National Bank (confirmed live: shows up
 # in the market-cap band, mostly canton-held). Add more symbols here as
-# other non-operating-company edge cases turn up. Merged with SMI_TICKERS
-# (see its own comment) since both are "known good companies that still
-# don't belong in this scan's universe," just for different reasons - one
-# filtering pass covers both (see _discover_candidates_live and
-# discover_candidates' static-fallback branch below).
+# other non-operating-company edge cases turn up.
 EXCLUDED_TICKERS = {"SNBN.SW"}
 
 
@@ -557,7 +515,17 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
         return symbol, {
             "name": quote.get("longName") or quote.get("shortName") or symbol,
             "sector": info.get("sector"),
-            "market_cap": quote.get("marketCap"),
+            # quote.get("marketCap") first (the live screener's own quote
+            # already carries it, no extra cost) - falls back to info's own
+            # marketCap field for anything the discovery-time quote didn't
+            # have it for. Confirmed live: STATIC_DOMESTIC_TICKER_SNAPSHOT's
+            # synthesized quote (used when the live screener fails - see
+            # discover_candidates' own docstring) never carries marketCap
+            # at all, so every ticker discovered via that fallback path was
+            # showing "N/A" market cap in every table, not a display bug -
+            # info is fetched here regardless of discovery path, so this
+            # costs nothing extra.
+            "market_cap": quote.get("marketCap") or info.get("marketCap"),
             "trailing_eps": info.get("trailingEps"),
             "trailing_pe": info.get("trailingPE"),
             "forward_pe": info.get("forwardPE"),
