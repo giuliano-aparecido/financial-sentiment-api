@@ -292,63 +292,74 @@ def test_retry_failed_rebound_tickers_skips_symbols_no_longer_in_discovery(monke
     assert updated["failed"] == []
 
 
-def test_run_rebound_scan_or_retry_retries_when_todays_run_has_failures(monkeypatch):
+def test_trigger_rebound_retry_starts_a_retry_when_todays_run_has_failures(monkeypatch):
+    scheduler_module._rebound_running = False
     today_run_at = scheduler_module._now()
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_rebound_scan",
         lambda: ([{"ticker": "NESN.SW"}], today_run_at, ["ZURN.SW"]),
     )
-    calls = []
+    started = threading.Event()
     monkeypatch.setattr(
         scheduler_module, "_retry_failed_rebound_tickers",
-        lambda run_at, failed: calls.append(("retry", run_at, failed)),
+        lambda run_at, failed: started.set(),
     )
-    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append(("full",)))
 
-    scheduler_module._run_rebound_scan_or_retry()
+    result = scheduler_module.trigger_rebound_retry()
 
-    assert calls == [("retry", today_run_at, ["ZURN.SW"])]
+    assert result is True
+    assert started.wait(timeout=2) is True
 
 
-def test_run_rebound_scan_or_retry_full_scans_when_todays_run_is_clean(monkeypatch):
+def test_trigger_rebound_retry_noops_when_todays_run_is_clean(monkeypatch):
+    scheduler_module._rebound_running = False
     today_run_at = scheduler_module._now()
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_rebound_scan",
         lambda: ([{"ticker": "NESN.SW"}], today_run_at, []),
     )
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_rebound_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_rebound_scan_or_retry()
-
-    assert calls == ["full"]
+    assert scheduler_module.trigger_rebound_retry() is False
 
 
-def test_run_rebound_scan_or_retry_full_scans_when_failures_are_from_a_previous_day(monkeypatch):
+def test_trigger_rebound_retry_noops_when_failures_are_from_a_previous_day(monkeypatch):
+    scheduler_module._rebound_running = False
     yesterday_run_at = scheduler_module._now() - datetime.timedelta(days=1)
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_rebound_scan",
         lambda: ([{"ticker": "NESN.SW"}], yesterday_run_at, ["ZURN.SW"]),
     )
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_rebound_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_rebound_scan_or_retry()
-
-    assert calls == ["full"]
+    assert scheduler_module.trigger_rebound_retry() is False
 
 
-def test_run_rebound_scan_or_retry_full_scans_when_nothing_saved_yet(monkeypatch):
+def test_trigger_rebound_retry_noops_when_nothing_saved_yet(monkeypatch):
+    scheduler_module._rebound_running = False
     monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_rebound_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_rebound_scan", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_rebound_scan_or_retry()
+    assert scheduler_module.trigger_rebound_retry() is False
 
-    assert calls == ["full"]
+
+def test_trigger_rebound_retry_noops_when_already_running(monkeypatch):
+    scheduler_module._rebound_running = True
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
+
+    assert scheduler_module.trigger_rebound_retry() is False
 
 
 def test_retry_failed_indicator_tickers_recomputes_every_threshold(monkeypatch):
@@ -383,64 +394,75 @@ def test_retry_failed_indicator_tickers_recomputes_every_threshold(monkeypatch):
     assert updated["failed"] == []
 
 
-def test_run_indicator_scans_or_retry_retries_when_this_months_run_has_failures(monkeypatch):
+def test_trigger_indicator_retry_starts_a_retry_when_this_months_run_has_failures(monkeypatch):
+    scheduler_module._indicator_running = False
     this_run_at = scheduler_module._now()
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_indicator_scan",
         lambda threshold_pct: ([{"ticker": "NESN.SW"}], this_run_at, ["ZURN.SW"]),
     )
-    calls = []
+    started = threading.Event()
     monkeypatch.setattr(
         scheduler_module, "_retry_failed_indicator_tickers",
-        lambda run_at, failed: calls.append(("retry", run_at, failed)),
+        lambda run_at, failed: started.set(),
     )
-    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", lambda: calls.append(("full",)))
 
-    scheduler_module._run_indicator_scans_or_retry()
+    result = scheduler_module.trigger_indicator_retry()
 
-    assert calls == [("retry", this_run_at, ["ZURN.SW"])]
+    assert result is True
+    assert started.wait(timeout=2) is True
 
 
-def test_run_indicator_scans_or_retry_full_scans_when_this_months_run_is_clean(monkeypatch):
+def test_trigger_indicator_retry_noops_when_this_months_run_is_clean(monkeypatch):
+    scheduler_module._indicator_running = False
     this_run_at = scheduler_module._now()
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_indicator_scan",
         lambda threshold_pct: ([{"ticker": "NESN.SW"}], this_run_at, []),
     )
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_indicator_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_indicator_scans_or_retry()
-
-    assert calls == ["full"]
+    assert scheduler_module.trigger_indicator_retry() is False
 
 
-def test_run_indicator_scans_or_retry_full_scans_when_nothing_saved_yet(monkeypatch):
+def test_trigger_indicator_retry_noops_when_nothing_saved_yet(monkeypatch):
+    scheduler_module._indicator_running = False
     monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([], None, []))
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_indicator_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_indicator_scans_or_retry()
-
-    assert calls == ["full"]
+    assert scheduler_module.trigger_indicator_retry() is False
 
 
-def test_run_indicator_scans_or_retry_full_scans_when_failures_are_from_a_previous_month(monkeypatch):
+def test_trigger_indicator_retry_noops_when_failures_are_from_a_previous_month(monkeypatch):
+    scheduler_module._indicator_running = False
     now = scheduler_module._now()
     last_month = now.replace(day=1) - datetime.timedelta(days=1)
     monkeypatch.setattr(
         scheduler_module.scan_persistence, "get_latest_indicator_scan",
         lambda threshold_pct: ([{"ticker": "NESN.SW"}], last_month, ["ZURN.SW"]),
     )
-    calls = []
-    monkeypatch.setattr(scheduler_module, "_retry_failed_indicator_tickers", lambda run_at, failed: calls.append("retry"))
-    monkeypatch.setattr(scheduler_module, "_run_indicator_scans", lambda: calls.append("full"))
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
 
-    scheduler_module._run_indicator_scans_or_retry()
+    assert scheduler_module.trigger_indicator_retry() is False
 
-    assert calls == ["full"]
+
+def test_trigger_indicator_retry_noops_when_already_running(monkeypatch):
+    scheduler_module._indicator_running = True
+    monkeypatch.setattr(
+        scheduler_module.threading, "Thread",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Thread should not be constructed")),
+    )
+
+    assert scheduler_module.trigger_indicator_retry() is False
 
 
 # --- Guarded execution + manual trigger, unified with the cron (see
@@ -502,10 +524,6 @@ def test_trigger_rebound_scan_returns_false_and_starts_nothing_when_already_runn
 
 def test_trigger_rebound_scan_runs_the_guarded_pipeline_in_the_background(monkeypatch):
     scheduler_module._rebound_running = False
-    # Nothing saved yet -> _run_rebound_scan_or_retry falls through to a
-    # full scan (see its own tests above) - that's the path this test is
-    # exercising the threading/locking mechanics of.
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
     started = threading.Event()
     finish = threading.Event()
 
@@ -560,10 +578,6 @@ def test_trigger_indicator_scan_returns_false_when_already_running(monkeypatch):
 
 def test_trigger_indicator_scan_runs_the_guarded_pipeline_in_the_background(monkeypatch):
     scheduler_module._indicator_running = False
-    monkeypatch.setattr(
-        scheduler_module.scan_persistence, "get_latest_indicator_scan",
-        lambda threshold_pct: ([], None, []),
-    )
     started = threading.Event()
     finish = threading.Event()
 
@@ -587,23 +601,45 @@ def test_trigger_indicator_scan_runs_the_guarded_pipeline_in_the_background(monk
     assert scheduler_module.is_indicator_scan_running() is False
 
 
-def test_retry_or_run_rebound_scan_guarded_is_a_noop_when_already_running(monkeypatch):
+def test_retry_failed_rebound_tickers_guarded_is_a_noop_when_already_running(monkeypatch):
     scheduler_module._rebound_running = True
     calls = []
-    monkeypatch.setattr(scheduler_module, "_run_rebound_scan_or_retry", lambda: calls.append(1))
+    monkeypatch.setattr(scheduler_module, "_retry_failed_rebound_tickers", lambda run_at, failed: calls.append(1))
 
-    scheduler_module._retry_or_run_rebound_scan_guarded()
+    scheduler_module._retry_failed_rebound_tickers_guarded(scheduler_module._now(), ["ZURN.SW"])
 
     assert calls == []
     assert scheduler_module.is_rebound_scan_running() is True  # untouched
 
 
-def test_retry_or_run_indicator_scans_guarded_is_a_noop_when_already_running(monkeypatch):
+def test_retry_failed_rebound_tickers_guarded_runs_and_clears_flag(monkeypatch):
+    scheduler_module._rebound_running = False
+    calls = []
+    monkeypatch.setattr(scheduler_module, "_retry_failed_rebound_tickers", lambda run_at, failed: calls.append(1))
+
+    scheduler_module._retry_failed_rebound_tickers_guarded(scheduler_module._now(), ["ZURN.SW"])
+
+    assert calls == [1]
+    assert scheduler_module.is_rebound_scan_running() is False
+
+
+def test_retry_failed_indicator_tickers_guarded_is_a_noop_when_already_running(monkeypatch):
     scheduler_module._indicator_running = True
     calls = []
-    monkeypatch.setattr(scheduler_module, "_run_indicator_scans_or_retry", lambda: calls.append(1))
+    monkeypatch.setattr(scheduler_module, "_retry_failed_indicator_tickers", lambda run_at, failed: calls.append(1))
 
-    scheduler_module._retry_or_run_indicator_scans_guarded()
+    scheduler_module._retry_failed_indicator_tickers_guarded(scheduler_module._now(), ["ZURN.SW"])
 
     assert calls == []
     assert scheduler_module.is_indicator_scan_running() is True  # untouched
+
+
+def test_retry_failed_indicator_tickers_guarded_runs_and_clears_flag(monkeypatch):
+    scheduler_module._indicator_running = False
+    calls = []
+    monkeypatch.setattr(scheduler_module, "_retry_failed_indicator_tickers", lambda run_at, failed: calls.append(1))
+
+    scheduler_module._retry_failed_indicator_tickers_guarded(scheduler_module._now(), ["ZURN.SW"])
+
+    assert calls == [1]
+    assert scheduler_module.is_indicator_scan_running() is False

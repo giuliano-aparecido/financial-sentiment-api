@@ -113,6 +113,7 @@ def test_rebound_start_requires_api_key(client):
 
 def test_rebound_start_triggers_the_scheduler_and_returns_started_true(client, monkeypatch):
     monkeypatch.setattr(research_router.scheduler, "trigger_rebound_scan", lambda: True)
+    monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
     response = client.post("/api/research/volatility/rebound/start", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == {"started": True, "is_running": True}
@@ -123,9 +124,34 @@ def test_rebound_start_returns_started_false_when_already_running(client, monkey
     # Refresh while a scan is already in progress is a safe no-op, not
     # an error - see scheduler.trigger_rebound_scan's own docstring.
     monkeypatch.setattr(research_router.scheduler, "trigger_rebound_scan", lambda: False)
+    monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
     response = client.post("/api/research/volatility/rebound/start", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == {"started": False, "is_running": True}
+
+
+def test_rebound_retry_requires_api_key(client):
+    response = client.post("/api/research/volatility/rebound/retry")
+    assert response.status_code == 401
+
+
+def test_rebound_retry_triggers_the_scheduler_and_returns_started_true(client, monkeypatch):
+    monkeypatch.setattr(research_router.scheduler, "trigger_rebound_retry", lambda: True)
+    monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
+    response = client.post("/api/research/volatility/rebound/retry", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"started": True, "is_running": True}
+
+
+def test_rebound_retry_returns_started_false_when_nothing_to_retry(client, monkeypatch):
+    # scheduler.trigger_rebound_retry() itself decides there's nothing
+    # worth retrying (no failures, or not from today) - the route just
+    # relays that, no separate check here.
+    monkeypatch.setattr(research_router.scheduler, "trigger_rebound_retry", lambda: False)
+    monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: False)
+    response = client.post("/api/research/volatility/rebound/retry", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"started": False, "is_running": False}
 
 
 # --- volatility-indicator: scheduled-scan read + manual trigger ---
@@ -211,6 +237,7 @@ def test_indicator_start_rejects_a_value_outside_the_allowed_set(client):
 
 def test_indicator_start_accepts_each_allowed_threshold(client, monkeypatch):
     monkeypatch.setattr(research_router.scheduler, "trigger_indicator_scan", lambda: True)
+    monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: True)
     for threshold in (2.0, 3.0, 5.0):
         response = client.post(
             f"/api/research/volatility/indicator/start?threshold_pct={threshold}", headers={"X-API-Key": VALID_KEY},
@@ -234,11 +261,36 @@ def test_indicator_start_triggers_the_scheduler_regardless_of_which_threshold_wa
 
 def test_indicator_start_returns_started_false_when_already_running(client, monkeypatch):
     monkeypatch.setattr(research_router.scheduler, "trigger_indicator_scan", lambda: False)
+    monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: True)
     response = client.post(
         "/api/research/volatility/indicator/start?threshold_pct=2.0", headers={"X-API-Key": VALID_KEY},
     )
     assert response.status_code == 200
     assert response.json() == {"started": False, "is_running": True}
+
+
+def test_indicator_retry_requires_api_key(client):
+    response = client.post("/api/research/volatility/indicator/retry")
+    assert response.status_code == 401
+
+
+def test_indicator_retry_triggers_the_scheduler_with_no_threshold_needed(client, monkeypatch):
+    # Unlike /start, /retry doesn't validate/require threshold_pct at all -
+    # a retry always covers every threshold in one shared run (see
+    # scheduler.trigger_indicator_retry's own docstring).
+    monkeypatch.setattr(research_router.scheduler, "trigger_indicator_retry", lambda: True)
+    monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: True)
+    response = client.post("/api/research/volatility/indicator/retry", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"started": True, "is_running": True}
+
+
+def test_indicator_retry_returns_started_false_when_nothing_to_retry(client, monkeypatch):
+    monkeypatch.setattr(research_router.scheduler, "trigger_indicator_retry", lambda: False)
+    monkeypatch.setattr(research_router.scheduler, "is_indicator_scan_running", lambda: False)
+    response = client.post("/api/research/volatility/indicator/retry", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"started": False, "is_running": False}
 
 
 def test_start_routes_allow_rapid_repeated_calls_without_a_business_cooldown(client, monkeypatch):

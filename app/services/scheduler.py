@@ -26,6 +26,17 @@ schedule or by a user clicking Refresh. A single threading.Lock per table
 guards both entry points against ever running two overlapping scans of
 the same table, whatever the trigger source.
 
+Manual trigger is ALWAYS a full scan (2026-08-19, revised at the user's
+explicit follow-up request: "i think is better to not touch the refresh
+button, it should be a hard refresh anyway... In case of failed ticker
+we should show a new button" instead of Refresh silently choosing
+retry-vs-full on its own). trigger_rebound_retry()/trigger_indicator_
+retry() are the SEPARATE failed-tickers-only path (POST .../retry,
+frontend only renders that button when failed_ticker_count > 0) -
+sharing the SAME lock as the full-scan trigger so the two can never run
+concurrently for the same table, but never chosen automatically by
+trigger_rebound_scan()/trigger_indicator_scan() itself.
+
 Reliability note: this process is on Render's free tier (15-minute
 spin-down), currently kept warm 24/7 by an external UptimeRobot ping to
 /health - unrelated to this feature, already true for the live /api/
@@ -118,11 +129,10 @@ def is_rebound_scan_running() -> bool:
 def _run_rebound_scan() -> None:
     """The actual full discovery + scan + persist work - real network
     calls, can take many minutes once batching delays are added. Always a
-    FULL fresh scan (new day = new data - there's no such thing as
-    "retry" across a day boundary) - this is what the cron/catch-up
-    always runs (_run_rebound_scan_guarded) and what a manual trigger
-    falls back to when there's nothing worth retrying (_run_rebound_
-    scan_or_retry). Never call directly."""
+    FULL fresh scan - what the cron/catch-up runs (via _run_rebound_scan_
+    guarded) AND what the manual Refresh button runs (trigger_rebound_
+    scan calls the same guarded function - see module docstring for why
+    Refresh never picks retry-vs-full on its own). Never call directly."""
     logger.info("Rebound scan starting (batches=%d, delay=%ss)", NUM_SCAN_BATCHES, SCAN_BATCH_DELAY_SECONDS)
     domestic, failed = _discover_domestic_batched()
     df = swiss_crash_rebound.run_scan(domestic)
@@ -160,33 +170,18 @@ def _retry_failed_rebound_tickers(scan_run_at: datetime.datetime, failed_tickers
     )
 
 
-def _run_rebound_scan_or_retry() -> None:
-    """Manual-trigger entry point: if the latest saved run is from TODAY
-    and has leftover failed_tickers, retries just those; otherwise runs a
-    full scan (nothing saved yet, or the saved run is from a previous day
-    - a day boundary always means fresh data, never a retry target). The
-    cron/catch-up path (_run_rebound_scan_guarded) always calls _run_
-    rebound_scan directly instead - a scheduled firing is always for a
-    NEW day, so "retry" never applies there."""
-    _rows, scan_run_at, failed_tickers = scan_persistence.get_latest_rebound_scan()
-    if failed_tickers and scan_run_at is not None and scan_run_at.date() == _now().date():
-        _retry_failed_rebound_tickers(scan_run_at, failed_tickers)
-    else:
-        _run_rebound_scan()
-
-
 def _run_rebound_scan_guarded() -> None:
-    """Registered as the cron job function - always a full scan (see
-    _run_rebound_scan's own docstring). The one place _rebound_running is
-    set/cleared for the cron/catch-up path; _retry_or_run_rebound_scan_
-    guarded below is the manual-trigger equivalent, sharing the SAME lock
-    so a manual click and a scheduled firing are indistinguishable to
-    is_rebound_scan_running()/the frontend. Safe to register directly
-    with AsyncIOScheduler as a plain sync function - its AsyncIOExecutor
-    runs non-coroutine job functions via the event loop's default
-    executor (a thread pool), not on the event loop itself, so this never
-    blocks request handling while it runs (see apscheduler.executors.
-    asyncio.AsyncIOExecutor)."""
+    """Registered as the cron job function AND run as the full-scan
+    manual trigger's background-thread target (see trigger_rebound_scan)
+    - the one place _rebound_running is set/cleared for a full scan, so a
+    manual Refresh click and a scheduled firing are indistinguishable to
+    is_rebound_scan_running()/the frontend. _retry_failed_rebound_
+    tickers_guarded below is the SEPARATE failed-tickers-only path,
+    sharing this same lock. Safe to register directly with AsyncIOScheduler
+    as a plain sync function - its AsyncIOExecutor runs non-coroutine job
+    functions via the event loop's default executor (a thread pool), not
+    on the event loop itself, so this never blocks request handling while
+    it runs (see apscheduler.executors.asyncio.AsyncIOExecutor)."""
     global _rebound_running
     with _rebound_lock:
         if _rebound_running:
@@ -202,38 +197,60 @@ def _run_rebound_scan_guarded() -> None:
             _rebound_running = False
 
 
-def _retry_or_run_rebound_scan_guarded() -> None:
-    """Manual trigger's background-thread target (see trigger_rebound_
-    scan) - same lock as _run_rebound_scan_guarded, but runs _run_
-    rebound_scan_or_retry (smart retry-vs-full) instead of always a full
-    scan."""
+def trigger_rebound_scan() -> bool:
+    """Manual Refresh trigger (POST /api/research/volatility/rebound/
+    start) - ALWAYS a full scan, a hard refresh, regardless of any
+    leftover failed tickers from a previous run (see module docstring for
+    why this doesn't pick retry-vs-full on its own - trigger_rebound_
+    retry below is the separate, explicit path for that). Starts a
+    background thread running the same guarded pipeline the cron uses.
+    Returns True if this call started a new run, False if one was already
+    in progress (single-flight - see _run_rebound_scan_guarded's own lock
+    for why this is authoritative even if two callers race here)."""
+    if _rebound_running:
+        return False
+    threading.Thread(target=_run_rebound_scan_guarded, daemon=True).start()
+    return True
+
+
+def _retry_failed_rebound_tickers_guarded(scan_run_at: datetime.datetime, failed_tickers: list[str]) -> None:
+    """trigger_rebound_retry's background-thread target - same lock as
+    _run_rebound_scan_guarded (a retry and a full scan of the same table
+    must never run concurrently), but runs _retry_failed_rebound_tickers
+    instead."""
     global _rebound_running
     with _rebound_lock:
         if _rebound_running:
-            logger.info("Rebound scan requested but one is already running - no-op")
+            logger.info("Rebound retry requested but a scan is already running - no-op")
             return
         _rebound_running = True
     try:
-        _run_rebound_scan_or_retry()
+        _retry_failed_rebound_tickers(scan_run_at, failed_tickers)
     except Exception:
-        logger.exception("Rebound scan/retry failed")
+        logger.exception("Rebound retry failed")
     finally:
         with _rebound_lock:
             _rebound_running = False
 
 
-def trigger_rebound_scan() -> bool:
-    """Manual trigger (POST /api/research/volatility/rebound/start) -
-    starts a background thread that retries just today's failed tickers
-    if there are any, otherwise runs a full scan (see _run_rebound_scan_
-    or_retry). Returns True if this call started a new run, False if one
-    was already in progress (single-flight, matching the button's old
-    "clicking while already running is a safe no-op" behavior - see
-    _retry_or_run_rebound_scan_guarded's own lock for why this is
-    authoritative even if two callers race here)."""
+def trigger_rebound_retry() -> bool:
+    """Manual "Retry Failed Tickers" trigger (POST /api/research/
+    volatility/rebound/retry) - the frontend only renders this button
+    when failed_ticker_count > 0, but this re-checks server-side rather
+    than trusting that (the count could have changed between page load
+    and click). Retries ONLY today's leftover failed tickers - never a
+    full scan (see trigger_rebound_scan for that). Returns False (no-op,
+    same single-flight contract as trigger_rebound_scan) if a scan is
+    already running, OR if there's genuinely nothing to retry (no scan
+    today, or today's scan has no failures)."""
     if _rebound_running:
         return False
-    threading.Thread(target=_retry_or_run_rebound_scan_guarded, daemon=True).start()
+    _rows, scan_run_at, failed_tickers = scan_persistence.get_latest_rebound_scan()
+    if not failed_tickers or scan_run_at is None or scan_run_at.date() != _now().date():
+        return False
+    threading.Thread(
+        target=_retry_failed_rebound_tickers_guarded, args=(scan_run_at, failed_tickers), daemon=True,
+    ).start()
     return True
 
 
@@ -252,10 +269,10 @@ def _run_indicator_scans() -> None:
     (not one discovery per threshold) - the frontend's threshold selector
     needs every value ready to read, and re-discovering the same
     ~150-ticker universe 3x for the same scan run would triple the Yahoo
-    call count for zero benefit. Always a FULL fresh scan (new month =
-    new data) - same "cron/catch-up always calls this directly, manual
-    trigger falls back to it" split as rebound, see _run_rebound_scan's
-    own docstring. Never call directly."""
+    call count for zero benefit. Always a FULL fresh scan - what the
+    cron/catch-up runs AND what the manual Refresh button runs, same
+    "no automatic retry-vs-full choice" as rebound - see _run_rebound_
+    scan's own docstring. Never call directly."""
     logger.info("Volatility-indicator scan starting (batches=%d, delay=%ss)", NUM_SCAN_BATCHES, SCAN_BATCH_DELAY_SECONDS)
     domestic, failed = _discover_domestic_batched()
     scan_run_at = _now()
@@ -292,24 +309,10 @@ def _retry_failed_indicator_tickers(scan_run_at: datetime.datetime, failed_ticke
     )
 
 
-def _run_indicator_scans_or_retry() -> None:
-    """Manual-trigger entry point - same "retry if same-period leftovers,
-    else full scan" logic as _run_rebound_scan_or_retry, scoped to
-    calendar MONTH (this table's cadence) instead of day. Checked against
-    ALLOWED_THRESHOLD_PCTS[0] only, same reasoning as _is_indicator_
-    stale."""
-    _rows, scan_run_at, failed_tickers = scan_persistence.get_latest_indicator_scan(ALLOWED_THRESHOLD_PCTS[0])
-    now = _now()
-    if failed_tickers and scan_run_at is not None and (scan_run_at.year, scan_run_at.month) == (now.year, now.month):
-        _retry_failed_indicator_tickers(scan_run_at, failed_tickers)
-    else:
-        _run_indicator_scans()
-
-
 def _run_indicator_scans_guarded() -> None:
-    """Cron job function - always a full scan. See _run_rebound_scan_
-    guarded's own docstring (identical reasoning, this is its indicator
-    counterpart)."""
+    """Cron job function AND the full-scan manual trigger's background-
+    thread target. See _run_rebound_scan_guarded's own docstring
+    (identical reasoning, this is its indicator counterpart)."""
     global _indicator_running
     with _indicator_lock:
         if _indicator_running:
@@ -325,35 +328,51 @@ def _run_indicator_scans_guarded() -> None:
             _indicator_running = False
 
 
-def _retry_or_run_indicator_scans_guarded() -> None:
-    """Manual trigger's background-thread target - same lock as _run_
-    indicator_scans_guarded, but runs the smart retry-vs-full logic."""
+def trigger_indicator_scan() -> bool:
+    """Manual Refresh trigger (POST /api/research/volatility/indicator/
+    start) - ALWAYS a full scan covering every threshold, regardless of
+    which one the frontend currently has selected or any leftover failed
+    tickers (see trigger_indicator_retry for that separate path, and
+    module docstring for why). There's no per-threshold "running" state,
+    just one shared run covering all three."""
+    if _indicator_running:
+        return False
+    threading.Thread(target=_run_indicator_scans_guarded, daemon=True).start()
+    return True
+
+
+def _retry_failed_indicator_tickers_guarded(scan_run_at: datetime.datetime, failed_tickers: list[str]) -> None:
+    """trigger_indicator_retry's background-thread target - same lock as
+    _run_indicator_scans_guarded."""
     global _indicator_running
     with _indicator_lock:
         if _indicator_running:
-            logger.info("Volatility-indicator scan requested but one is already running - no-op")
+            logger.info("Volatility-indicator retry requested but a scan is already running - no-op")
             return
         _indicator_running = True
     try:
-        _run_indicator_scans_or_retry()
+        _retry_failed_indicator_tickers(scan_run_at, failed_tickers)
     except Exception:
-        logger.exception("Volatility-indicator scan/retry failed")
+        logger.exception("Volatility-indicator retry failed")
     finally:
         with _indicator_lock:
             _indicator_running = False
 
 
-def trigger_indicator_scan() -> bool:
-    """Manual trigger (POST /api/research/volatility/indicator/start) -
-    same shape as trigger_rebound_scan: retries this month's leftover
-    failed tickers if there are any, otherwise runs a full scan covering
-    every threshold (see _run_indicator_scans_or_retry) regardless of
-    which one the frontend currently has selected - there's no
-    per-threshold "running" state, just one shared run covering all
-    three."""
+def trigger_indicator_retry() -> bool:
+    """Manual "Retry Failed Tickers" trigger (POST /api/research/
+    volatility/indicator/retry) - same shape as trigger_rebound_retry,
+    scoped to calendar MONTH instead of day. Checked against ALLOWED_
+    THRESHOLD_PCTS[0] only, same reasoning as _is_indicator_stale."""
     if _indicator_running:
         return False
-    threading.Thread(target=_retry_or_run_indicator_scans_guarded, daemon=True).start()
+    _rows, scan_run_at, failed_tickers = scan_persistence.get_latest_indicator_scan(ALLOWED_THRESHOLD_PCTS[0])
+    now = _now()
+    if not failed_tickers or scan_run_at is None or (scan_run_at.year, scan_run_at.month) != (now.year, now.month):
+        return False
+    threading.Thread(
+        target=_retry_failed_indicator_tickers_guarded, args=(scan_run_at, failed_tickers), daemon=True,
+    ).start()
     return True
 
 
