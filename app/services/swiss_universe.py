@@ -598,3 +598,39 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
             if failed:
                 failed_symbols.append(symbol)
     return domestic, failed_symbols
+
+
+def filter_domestic_batched(
+    candidates: dict, num_batches: int, batch_delay_seconds: float,
+    delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_workers=INFO_MAX_WORKERS,
+) -> tuple[dict, list[str]]:
+    """Same result as filter_domestic (a single merged (domestic,
+    failed_symbols) pair), but splits `candidates` into `num_batches`
+    roughly-equal chunks and sleeps `batch_delay_seconds` between them,
+    instead of running every ticker's .info fetch (already internally
+    paced/bounded-concurrent - see filter_domestic's own docstring) as one
+    contiguous burst. Only worth using for the unattended scheduled scans
+    (app/services/scheduler.py) - they have no one waiting on a response,
+    so spreading ~150 calls across many extra minutes overnight is free
+    safety margin against Yahoo rate-limiting that a live, user-triggered
+    scan (app/services/research_job.py) can't afford to add on top of its
+    own latency. num_batches=1 (or candidates smaller than num_batches)
+    degrades to a single filter_domestic call with no sleep, same
+    behavior as calling it directly.
+    """
+    items = list(candidates.items())
+    if num_batches <= 1 or not items:
+        return filter_domestic(candidates, delay_seconds=delay_seconds, max_workers=max_workers)
+
+    batch_size = -(-len(items) // num_batches)  # ceiling division
+    batches = [dict(items[i:i + batch_size]) for i in range(0, len(items), batch_size)]
+
+    domestic: dict = {}
+    failed_symbols: list[str] = []
+    for i, batch in enumerate(batches):
+        batch_domestic, batch_failed = filter_domestic(batch, delay_seconds=delay_seconds, max_workers=max_workers)
+        domestic.update(batch_domestic)
+        failed_symbols.extend(batch_failed)
+        if i < len(batches) - 1:
+            time.sleep(batch_delay_seconds)
+    return domestic, failed_symbols

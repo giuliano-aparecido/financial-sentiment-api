@@ -7,6 +7,12 @@ from fastapi.testclient import TestClient
 # these via os.getenv at import time (API_KEY gates every mutating route).
 os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.setdefault("HF_TOKEN", "test-hf-token")
+# Every test using the `client` fixture below runs the app's REAL lifespan
+# (TestClient as a context manager) - without this, app/services/
+# scheduler.py's catch-up-on-stale logic would hit the real Neon DB and
+# schedule a genuine live Yahoo-scanning job on every such test. See that
+# module's start() docstring for the incident this guards against.
+os.environ.setdefault("RESEARCH_SCHEDULER_DISABLED", "1")
 
 from main import app  # noqa: E402
 

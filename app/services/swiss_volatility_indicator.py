@@ -22,18 +22,14 @@ heights, so the threshold has to be a request-time parameter, not a
 module constant.
 
 Deliberately does its OWN independent universe discovery (discover_
-candidates()/filter_domestic()) rather than reusing the `domestic` dict
-the crash-rebound/today-screener scan already computed - see
-research_job.py's start_indicator_scan for why: this table has its own
-independent refresh button/threshold selector, and sharing a cached
-`domestic` across scan types would either (a) let this table's discovery
-go stale between the OTHER two tables' own refreshes, or (b) require
-invalidating a cache today_screener's own tests already depend on
-re-discovering fresh on every Refresh (see that module's docstring on
-"refreshed on demand via the button, or naturally on the next day").
-Simpler and safer to pay the ~30-60s/~150-live-call discovery cost again
-on this table's OWN refresh, same bounded per-click cost the OTHER
-table's own Refresh already has, than to risk that guarantee.
+candidates()/filter_domestic_batched()) rather than reusing the
+`domestic` dict the crash-rebound scan already computed - each is scanned
+on its own schedule (see app/services/scheduler.py: rebound daily,
+this table monthly), so sharing a cached `domestic` across them would
+either let this table's discovery go stale between refreshes, or require
+threading a shared cache through two independently-scheduled jobs for no
+real benefit - simpler and safer to pay the discovery cost again on this
+table's OWN run.
 
 Reuses swiss_crash_rebound.py's download_ohlcv_chunked (identical
 chunking/pacing, not a second copy - see that function's own docstring)
