@@ -2,9 +2,9 @@
 Swiss "indicator of volatility" scanner.
 
 For each SIX Swiss Exchange-listed, Switzerland-domiciled company (same
-universe as swiss_crash_rebound.py - market cap > CHF 500M, SMI's 20
-largest excluded - see swiss_universe.py's MIN/MAX_MARKET_CAP_CHF and
-SMI_TICKERS), counts how many trading days in the last LOOKBACK_MONTHS
+universe as swiss_crash_rebound.py - market cap > CHF 500M, no other
+exclusion - see swiss_universe.py's MIN/MAX_MARKET_CAP_CHF), counts how
+many trading days in the last LOOKBACK_MONTHS
 closed down >= `threshold_pct` and how many closed up >= `threshold_pct`
 (close-to-close, same day-over-day % change swiss_crash_rebound.py
 already computes). Unlike that scan, this isn't looking for a specific

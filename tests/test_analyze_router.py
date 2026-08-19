@@ -10,10 +10,11 @@ def _patch_services(monkeypatch, fundamentals=None, earnings_data=None):
 
     captured = {}
 
-    async def fake_analyze_with_hf(ticker, user_query, live_context, market_data, valuation, earnings):
+    async def fake_analyze_with_hf(ticker, user_query, live_context, market_data, valuation, earnings, ticker_was_explicit=True):
         captured.update(
             ticker=ticker, user_query=user_query, live_context=live_context,
             market_data=market_data, valuation=valuation, earnings=earnings,
+            ticker_was_explicit=ticker_was_explicit,
         )
         return {"predicted_direction": "BULLISH", "market_data": market_data, "valuation": valuation, "earnings": earnings}
 
@@ -66,3 +67,30 @@ def test_analyze_route_degrades_gracefully_when_fundamentals_and_earnings_fail(c
     assert captured["market_data"] == "Data unavailable."
     assert captured["valuation"] == "Data unavailable."
     assert captured["earnings"] == "Data unavailable."
+
+
+def test_analyze_route_flags_ticker_as_not_explicit_when_query_names_none(client, monkeypatch):
+    captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
+
+    response = client.post(
+        "/api/analyze",
+        json={"user_query": "is the market bullish today"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    assert captured["ticker"] == "AAPL"
+    assert captured["ticker_was_explicit"] is False
+
+
+def test_analyze_route_flags_ticker_as_explicit_when_query_names_one(client, monkeypatch):
+    captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
+
+    response = client.post(
+        "/api/analyze",
+        json={"user_query": "Is $AAPL a buy?"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    assert captured["ticker_was_explicit"] is True

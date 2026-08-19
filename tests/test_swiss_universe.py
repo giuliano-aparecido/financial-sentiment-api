@@ -136,6 +136,38 @@ def test_filter_domestic_captures_avg_volume_10d(monkeypatch):
     assert domestic["TEST.SW"]["avg_volume_10d"] == 250_000
 
 
+def test_filter_domestic_market_cap_falls_back_to_info_when_quote_lacks_it(monkeypatch):
+    # Regression test: STATIC_DOMESTIC_TICKER_SNAPSHOT's synthesized quote
+    # (used when the live screener fails - see discover_candidates' own
+    # docstring) never carries marketCap at all, which was silently
+    # showing "N/A" market cap for every ticker discovered that way in
+    # every research table - not a display bug, a missing fallback here.
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(marketCap=4.2e9)),
+    )
+    # No "marketCap" key in the candidate quote at all - matches the
+    # static-fallback discovery path's synthesized quote shape exactly.
+    candidates = {"TEST.SW": {"longName": "Test AG"}}
+
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    assert domestic["TEST.SW"]["market_cap"] == 4.2e9
+
+
+def test_filter_domestic_market_cap_prefers_quote_over_info_when_both_present(monkeypatch):
+    # The live screener path's quote already carries marketCap at no
+    # extra request cost - it should win over info's own value rather
+    # than the two being merged unpredictably.
+    monkeypatch.setattr(
+        swiss_universe_module.yf, "Ticker",
+        lambda symbol: _FakeTicker(_base_info(marketCap=999e9)),
+    )
+    candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 4.2e9}}
+
+    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    assert domestic["TEST.SW"]["market_cap"] == 4.2e9
+
+
 def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkeypatch):
     # Not a timing/speed assertion - just confirms results are complete
     # and correct (nothing dropped/duplicated/mixed up between symbols)
@@ -344,25 +376,13 @@ def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
     assert dict(fake._session.cookies) == {"A1": "abc", "A3": "def"}
 
 
-def test_smi_tickers_are_excluded_from_excluded_tickers():
-    # SMI_TICKERS must actually take effect via EXCLUDED_TICKERS, not just
-    # exist as an unused set - both discover_candidates code paths filter
-    # on EXCLUDED_TICKERS (see _discover_candidates_live and the static
-    # fallback branch), so this is the one thing that has to be true for
-    # either path to actually exclude them.
-    assert swiss_universe_module.SMI_TICKERS <= swiss_universe_module.EXCLUDED_TICKERS
-
-
-def test_smi_tickers_all_present_in_static_snapshot():
-    # Sanity check against typos in SMI_TICKERS (hand-maintained, see its
-    # own comment) - every symbol in it should be a real ticker that
-    # actually showed up in a live capture, not a guessed/misremembered
-    # one.
-    missing = swiss_universe_module.SMI_TICKERS - set(swiss_universe_module.STATIC_DOMESTIC_TICKER_SNAPSHOT)
-    assert missing == set()
-
-
-def test_discover_candidates_static_fallback_excludes_smi_names(monkeypatch):
+def test_discover_candidates_static_fallback_includes_smi_names(monkeypatch):
+    # Regression guard: SMI names (Nestle/Novartis/UBS etc.) used to be
+    # excluded unconditionally - removed 2026-08-19 at the user's explicit
+    # direction (confirmed live it was hiding real matches, e.g. Nestle
+    # showing genuine 2%+ single-day losses and gains). The only
+    # requirement now is the market-cap band + Switzerland domicile, so
+    # these names must come through like any other qualifying company.
     def _boom(*a, **kw):
         raise Exception("simulated screener outage")
 
@@ -370,15 +390,13 @@ def test_discover_candidates_static_fallback_excludes_smi_names(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
 
     candidates = discover_candidates()
-    assert "NESN.SW" not in candidates  # Nestle
-    assert "NOVN.SW" not in candidates  # Novartis
-    assert "UBSG.SW" not in candidates  # UBS
-    # A genuinely non-SMI name should still be present - this isn't
-    # asserting the fallback returns an empty dict.
+    assert "NESN.SW" in candidates  # Nestle
+    assert "NOVN.SW" in candidates  # Novartis
+    assert "UBSG.SW" in candidates  # UBS
     assert "INRN.SW" in candidates
 
 
-def test_discover_candidates_live_excludes_smi_names(monkeypatch):
+def test_discover_candidates_live_includes_smi_names(monkeypatch):
     def fake_screen(query, offset, size, sortField, sortAsc):
         if offset > 0:
             return {"quotes": [], "total": 1}
@@ -394,7 +412,7 @@ def test_discover_candidates_live_excludes_smi_names(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "EquityQuery", lambda *a, **k: None)
 
     candidates = discover_candidates()
-    assert "NESN.SW" not in candidates
+    assert "NESN.SW" in candidates
     assert "REAL.SW" in candidates
 
 
