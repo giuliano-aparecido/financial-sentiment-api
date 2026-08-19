@@ -46,6 +46,41 @@ class ReboundScanRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
+class ReboundScanRun(Base):
+    """One row per rebound scan RUN (not per company - see ReboundScanRow
+    for that), tracking which tickers failed to fetch during that run's
+    discovery step and are therefore MISSING from its ReboundScanRow set -
+    not because they were correctly excluded (wrong domicile, too
+    illiquid), but because the .info fetch itself errored (see
+    swiss_universe.filter_domestic's own docstring on failed_symbols).
+    Lets the frontend show a "N companies missing, failed to fetch"
+    warning, and lets a manual Refresh retry ONLY these specific tickers
+    (see scheduler.py's _retry_failed_rebound_tickers) instead of
+    redoing the whole ~150-ticker scan just to recover a handful."""
+
+    __tablename__ = "rebound_scan_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scan_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, unique=True)
+    failed_tickers: Mapped[list] = mapped_column(_JSON_TYPE, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class IndicatorScanRun(Base):
+    """Same purpose as ReboundScanRun, for the volatility-indicator scan.
+    Not scoped by threshold_pct - one shared discovery pass covers all of
+    swiss_volatility_indicator.ALLOWED_THRESHOLD_PCTS in a single run (see
+    scheduler._run_indicator_scans's own docstring), so failed_tickers is
+    the same regardless of which threshold is being viewed."""
+
+    __tablename__ = "indicator_scan_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scan_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, unique=True)
+    failed_tickers: Mapped[list] = mapped_column(_JSON_TYPE, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
 class VolatilityIndicatorScanRow(Base):
     """One company's row from one scheduled volatility-indicator scan run,
     for one threshold_pct (see swiss_volatility_indicator.ALLOWED_

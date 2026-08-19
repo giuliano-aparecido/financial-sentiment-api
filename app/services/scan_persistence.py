@@ -4,25 +4,42 @@ app/services/scheduler.py): writes one scan run's rows to Neon Postgres,
 and reads back the latest run's rows for the read-only endpoints in
 app/routers/research.py. Deliberately dumb - no business logic here, just
 save/load - so scheduler.py stays the one place that decides WHEN a scan
-runs and research.py the one place that decides how it's exposed over
-HTTP.
+runs (and whether it's a full scan or a failed-ticker-only retry) and
+research.py the one place that decides how it's exposed over HTTP.
 
 Replace-on-write, not append-forever: each save_* call first deletes every
-row with an OLDER scan_run_at than the one being written (see _prune_
-older_than) rather than keeping every historical run. Keeping full history
-was considered (cheap at this row count, free trend data later) but
-rejected for now - nothing in this feature reads anything but the latest
-run, and an unbounded table growing by one scan's worth of rows every
-day/month forever is a maintenance question nobody's asked for yet. If
-history ever becomes wanted, this is the one place to change.
+row with an OLDER scan_run_at than the one being written (see the
+delete(...).where(... < scan_run_at) calls below) rather than keeping
+every historical run. Keeping full history was considered (cheap at this
+row count, free trend data later) but rejected for now - nothing in this
+feature reads anything but the latest run, and an unbounded table growing
+by one scan's worth of rows every day/month forever is a maintenance
+question nobody's asked for yet. If history ever becomes wanted, this is
+the one place to change.
+
+Failed-ticker tracking (ReboundScanRun/IndicatorScanRun - added
+2026-08-19 at the user's explicit request): a scan run persists not just
+its successfully-fetched company rows but ALSO the list of tickers whose
+.info fetch failed (see swiss_universe.filter_domestic's own docstring on
+failed_symbols) - a real, temporary fetch failure, not a company that was
+correctly excluded. This is what lets the frontend show "N companies
+missing, failed to fetch" instead of silently rendering an incomplete
+table as if it were complete, and lets a manual Refresh retry ONLY those
+specific tickers (merge_*_retry_rows/update_*_run_failed_tickers below)
+instead of redoing the whole scan. Kept in Neon (not in-memory, unlike
+the OLDER research_job.py's same-day discovery-retry cache for "today")
+because a retry needs to work correctly even if Render restarted between
+the original scan and the retry - see scheduler.py's own module
+docstring for why that matters for these two scheduled tables
+specifically.
 """
 
 import datetime
 import logging
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
-from app.db.models import ReboundScanRow, VolatilityIndicatorScanRow
+from app.db.models import IndicatorScanRun, ReboundScanRun, ReboundScanRow, VolatilityIndicatorScanRow
 from app.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -32,36 +49,79 @@ def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def save_rebound_scan(rows: list[dict], scan_run_at: datetime.datetime | None = None) -> None:
+# --- Rebound ---
+
+
+def save_rebound_scan(
+    rows: list[dict], failed_tickers: list[str] | None = None, scan_run_at: datetime.datetime | None = None,
+) -> None:
     scan_run_at = scan_run_at or _now()
+    failed_tickers = failed_tickers or []
     with get_session() as session:
         session.execute(delete(ReboundScanRow).where(ReboundScanRow.scan_run_at < scan_run_at))
+        session.execute(delete(ReboundScanRun).where(ReboundScanRun.scan_run_at < scan_run_at))
+        session.add_all([
+            ReboundScanRow(scan_run_at=scan_run_at, ticker=row["ticker"], data=row)
+            for row in rows
+        ])
+        session.add(ReboundScanRun(scan_run_at=scan_run_at, failed_tickers=failed_tickers))
+        session.commit()
+    logger.info(
+        "Saved rebound scan: %d rows, %d failed tickers, at %s",
+        len(rows), len(failed_tickers), scan_run_at.isoformat(),
+    )
+
+
+def get_latest_rebound_scan() -> tuple[list[dict], datetime.datetime | None, list[str]]:
+    """Returns (rows, scan_run_at, failed_tickers) for the most recent
+    saved scan - ([], None, []) if nothing has ever been saved (e.g. the
+    first scheduled run hasn't fired yet)."""
+    with get_session() as session:
+        latest = session.execute(select(func.max(ReboundScanRow.scan_run_at))).scalar_one_or_none()
+        if latest is None:
+            return [], None, []
+        rows = session.execute(
+            select(ReboundScanRow.data).where(ReboundScanRow.scan_run_at == latest)
+        ).scalars().all()
+        failed_tickers = session.execute(
+            select(ReboundScanRun.failed_tickers).where(ReboundScanRun.scan_run_at == latest)
+        ).scalar_one_or_none() or []
+        return list(rows), latest, list(failed_tickers)
+
+
+def merge_rebound_retry_rows(scan_run_at: datetime.datetime, rows: list[dict]) -> None:
+    """Appends newly-recovered rows to an EXISTING scan_run_at's rows -
+    does not delete/replace anything, unlike save_rebound_scan. Called by
+    scheduler._retry_failed_rebound_tickers once per retry; pair with
+    update_rebound_run_failed_tickers to record which tickers, if any,
+    are still failing after the retry."""
+    if not rows:
+        return
+    with get_session() as session:
         session.add_all([
             ReboundScanRow(scan_run_at=scan_run_at, ticker=row["ticker"], data=row)
             for row in rows
         ])
         session.commit()
-    logger.info("Saved rebound scan: %d rows at %s", len(rows), scan_run_at.isoformat())
 
 
-def get_latest_rebound_scan() -> tuple[list[dict], datetime.datetime | None]:
-    """Returns (rows, scan_run_at) for the most recent saved scan -
-    ([], None) if nothing has ever been saved (e.g. the first scheduled
-    run hasn't fired yet)."""
+def update_rebound_run_failed_tickers(scan_run_at: datetime.datetime, failed_tickers: list[str]) -> None:
     with get_session() as session:
-        latest = session.execute(select(func.max(ReboundScanRow.scan_run_at))).scalar_one_or_none()
-        if latest is None:
-            return [], None
-        rows = session.execute(
-            select(ReboundScanRow.data).where(ReboundScanRow.scan_run_at == latest)
-        ).scalars().all()
-        return list(rows), latest
+        session.execute(
+            update(ReboundScanRun).where(ReboundScanRun.scan_run_at == scan_run_at).values(failed_tickers=failed_tickers)
+        )
+        session.commit()
+
+
+# --- Volatility indicator ---
 
 
 def save_indicator_scan(
-    rows: list[dict], threshold_pct: float, scan_run_at: datetime.datetime | None = None,
+    rows: list[dict], threshold_pct: float, failed_tickers: list[str] | None = None,
+    scan_run_at: datetime.datetime | None = None,
 ) -> None:
     scan_run_at = scan_run_at or _now()
+    failed_tickers = failed_tickers or []
     with get_session() as session:
         session.execute(
             delete(VolatilityIndicatorScanRow).where(
@@ -69,23 +129,35 @@ def save_indicator_scan(
                 VolatilityIndicatorScanRow.scan_run_at < scan_run_at,
             )
         )
+        session.execute(delete(IndicatorScanRun).where(IndicatorScanRun.scan_run_at < scan_run_at))
         session.add_all([
             VolatilityIndicatorScanRow(
                 scan_run_at=scan_run_at, threshold_pct=threshold_pct, ticker=row["ticker"], data=row,
             )
             for row in rows
         ])
+        # One shared run-meta row across all three thresholds (see
+        # IndicatorScanRun's own docstring) - only insert it once, the
+        # first threshold in this scan's save loop to hit this code path;
+        # later thresholds in the SAME run share the same scan_run_at, so
+        # skip re-inserting (would violate the unique constraint).
+        existing = session.execute(
+            select(IndicatorScanRun).where(IndicatorScanRun.scan_run_at == scan_run_at)
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(IndicatorScanRun(scan_run_at=scan_run_at, failed_tickers=failed_tickers))
         session.commit()
     logger.info(
-        "Saved volatility-indicator scan: threshold=%s %d rows at %s",
-        threshold_pct, len(rows), scan_run_at.isoformat(),
+        "Saved volatility-indicator scan: threshold=%s %d rows, %d failed tickers, at %s",
+        threshold_pct, len(rows), len(failed_tickers), scan_run_at.isoformat(),
     )
 
 
-def get_latest_indicator_scan(threshold_pct: float) -> tuple[list[dict], datetime.datetime | None]:
-    """Same as get_latest_rebound_scan, scoped to one threshold_pct - each
-    threshold is scanned and stored independently (see scheduler.py), so
-    "latest" is per-threshold, not global across all three."""
+def get_latest_indicator_scan(threshold_pct: float) -> tuple[list[dict], datetime.datetime | None, list[str]]:
+    """Same as get_latest_rebound_scan, scoped to one threshold_pct for
+    the rows - `failed_tickers` is NOT threshold-scoped (see
+    IndicatorScanRun's own docstring), it's the one shared list for
+    whichever scan_run_at this threshold's own latest rows came from."""
     with get_session() as session:
         latest = session.execute(
             select(func.max(VolatilityIndicatorScanRow.scan_run_at)).where(
@@ -93,11 +165,39 @@ def get_latest_indicator_scan(threshold_pct: float) -> tuple[list[dict], datetim
             )
         ).scalar_one_or_none()
         if latest is None:
-            return [], None
+            return [], None, []
         rows = session.execute(
             select(VolatilityIndicatorScanRow.data).where(
                 VolatilityIndicatorScanRow.threshold_pct == threshold_pct,
                 VolatilityIndicatorScanRow.scan_run_at == latest,
             )
         ).scalars().all()
-        return list(rows), latest
+        failed_tickers = session.execute(
+            select(IndicatorScanRun.failed_tickers).where(IndicatorScanRun.scan_run_at == latest)
+        ).scalar_one_or_none() or []
+        return list(rows), latest, list(failed_tickers)
+
+
+def merge_indicator_retry_rows(scan_run_at: datetime.datetime, threshold_pct: float, rows: list[dict]) -> None:
+    """Same as merge_rebound_retry_rows, scoped to one threshold_pct -
+    scheduler._retry_failed_indicator_tickers calls this once per
+    threshold (a recovered ticker's row differs per threshold), then
+    update_indicator_run_failed_tickers ONCE after the loop."""
+    if not rows:
+        return
+    with get_session() as session:
+        session.add_all([
+            VolatilityIndicatorScanRow(
+                scan_run_at=scan_run_at, threshold_pct=threshold_pct, ticker=row["ticker"], data=row,
+            )
+            for row in rows
+        ])
+        session.commit()
+
+
+def update_indicator_run_failed_tickers(scan_run_at: datetime.datetime, failed_tickers: list[str]) -> None:
+    with get_session() as session:
+        session.execute(
+            update(IndicatorScanRun).where(IndicatorScanRun.scan_run_at == scan_run_at).values(failed_tickers=failed_tickers)
+        )
+        session.commit()

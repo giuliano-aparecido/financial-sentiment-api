@@ -21,29 +21,41 @@ router = APIRouter()
 # user explicitly wants the frontend to show that state (button disabled,
 # no table) regardless of whether that in-progress scan was started by
 # the schedule or by a manual Refresh click. The POST .../start routes
-# trigger a manual run through the EXACT SAME guarded pipeline the cron
-# uses (scheduler.trigger_rebound_scan/trigger_indicator_scan) - single-
-# flight per table, a click while one's already running is a no-op, not
-# an error. "Today" (big-loss) below is untouched - stays fully live/on-
-# demand via research_job.py's own job-slot machinery, since intraday
-# data has no meaningful cache window.
+# trigger a manual FULL scan through the EXACT SAME guarded pipeline the
+# cron uses (scheduler.trigger_rebound_scan/trigger_indicator_scan) -
+# single-flight per table, a click while one's already running is a
+# no-op, not an error. POST .../retry (separate, only meaningful when
+# failed_ticker_count > 0 - see the frontend, which only renders that
+# button then) retries JUST the failed tickers from the latest same-
+# period run instead of a full scan - see scheduler.trigger_rebound_
+# retry/trigger_indicator_retry's own docstrings. "Today" (big-loss)
+# below is untouched - stays fully live/on-demand via research_job.py's
+# own job-slot machinery, since intraday data has no meaningful cache
+# window.
 
 
 @router.get("/api/research/volatility/rebound", dependencies=[Depends(verify_api_key)])
 @limiter.limit("30/minute")
 async def get_rebound_scan_result(request: Request):
-    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_rebound_scan)
+    rows, scan_run_at, failed_tickers = await asyncio.to_thread(scan_persistence.get_latest_rebound_scan)
     return {
         "rows": rows,
         "scan_run_at": scan_run_at.isoformat() if scan_run_at else None,
         "is_running": scheduler.is_rebound_scan_running(),
+        "failed_ticker_count": len(failed_tickers),
     }
 
 
 @router.post("/api/research/volatility/rebound/start", dependencies=[Depends(verify_api_key)])
 async def start_rebound_volatility_scan(request: Request):
     started = await asyncio.to_thread(scheduler.trigger_rebound_scan)
-    return {"started": started, "is_running": True}
+    return {"started": started, "is_running": scheduler.is_rebound_scan_running()}
+
+
+@router.post("/api/research/volatility/rebound/retry", dependencies=[Depends(verify_api_key)])
+async def retry_rebound_volatility_scan(request: Request):
+    started = await asyncio.to_thread(scheduler.trigger_rebound_retry)
+    return {"started": started, "is_running": scheduler.is_rebound_scan_running()}
 
 
 @router.get("/api/research/volatility/indicator", dependencies=[Depends(verify_api_key)])
@@ -54,11 +66,12 @@ async def get_indicator_scan_result(request: Request, threshold_pct: float):
             status_code=422,
             detail=f"threshold_pct must be one of {ALLOWED_THRESHOLD_PCTS}, got {threshold_pct}",
         )
-    rows, scan_run_at = await asyncio.to_thread(scan_persistence.get_latest_indicator_scan, threshold_pct)
+    rows, scan_run_at, failed_tickers = await asyncio.to_thread(scan_persistence.get_latest_indicator_scan, threshold_pct)
     return {
         "rows": rows,
         "scan_run_at": scan_run_at.isoformat() if scan_run_at else None,
         "is_running": scheduler.is_indicator_scan_running(),
+        "failed_ticker_count": len(failed_tickers),
     }
 
 
@@ -75,7 +88,17 @@ async def start_volatility_indicator_scan(request: Request, threshold_pct: float
             detail=f"threshold_pct must be one of {ALLOWED_THRESHOLD_PCTS}, got {threshold_pct}",
         )
     started = await asyncio.to_thread(scheduler.trigger_indicator_scan)
-    return {"started": started, "is_running": True}
+    return {"started": started, "is_running": scheduler.is_indicator_scan_running()}
+
+
+@router.post("/api/research/volatility/indicator/retry", dependencies=[Depends(verify_api_key)])
+async def retry_volatility_indicator_scan(request: Request):
+    # No threshold_pct needed here - a retry always recovers tickers for
+    # every threshold at once (scheduler.trigger_indicator_retry), unlike
+    # /start which validates one just for contract consistency with the
+    # GET route.
+    started = await asyncio.to_thread(scheduler.trigger_indicator_retry)
+    return {"started": started, "is_running": scheduler.is_indicator_scan_running()}
 
 
 # No @limiter.limit(...) override on the /start routes above (rebound/
