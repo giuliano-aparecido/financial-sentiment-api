@@ -193,7 +193,7 @@ SMI_TICKERS = {
 # don't belong in this scan's universe," just for different reasons - one
 # filtering pass covers both (see _discover_candidates_live and
 # discover_candidates' static-fallback branch below).
-EXCLUDED_TICKERS = {"SNBN.SW"} | SMI_TICKERS
+EXCLUDED_TICKERS = {"SNBN.SW"}
 
 
 # Static fallback for when Yahoo's screener endpoint (yf.screen, used by
