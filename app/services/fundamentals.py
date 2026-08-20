@@ -1,6 +1,8 @@
+import datetime
 import logging
 import math
 
+import pandas as pd
 import yfinance as yf
 
 from app.services.valuation import REIT_SECTORS, SECTOR_MEDIAN_PE
@@ -204,6 +206,11 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         "dividend_rate": info.get("dividendRate") or info.get("trailingAnnualDividendRate"),
         "sector": info.get("sector"),
         "industry": info.get("industry"),
+        # Not used by anything valuation-related below - fetched here from
+        # this same .info call purely so news.py's relevance filter
+        # (_is_relevant_headline) has a company name to match headlines
+        # against, without a second/duplicate yfinance .info fetch.
+        "company_name": info.get("shortName") or info.get("longName"),
         "payout_ratio": info.get("payoutRatio"),
         # currency = what the stock TRADES in; financial_currency = what
         # totalRevenue/freeCashflow are REPORTED in - confirmed live these
@@ -232,47 +239,79 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     return fundamentals
 
 
-def recent_price_move(ticker: str) -> tuple[str, float | None]:
-    """3-trading-day trailing price move - Task A's only price signal (see
-    inference.py's classify_news). Canonical phrasing shared with
-    financial-sentiment-model's generate_real_dataset.py/generate_
-    synthetic_dataset.py price_context_block: training data measures the
-    3 trading days AFTER a headline's publish date (a clean window to
-    label from), while a live request has no "after" yet for a brand-new
-    headline, so this measures the 3 trading days BEFORE/trailing the
-    request instead - both describe the same underlying thing (how has
-    this stock been moving around the time of this news), just anchored
-    from opposite ends of the (headline, price-window) pair, which is
-    close enough for the model to generalize across (documented
-    approximation, not a bug).
+# Calendar days fetched before published_date to guarantee finding a
+# prior trading day's close even across a long weekend/holiday run -
+# ported verbatim (same name and value) from financial-sentiment-model's
+# generate_real_dataset.py PRE_PUBLISH_BUFFER_DAYS.
+PRE_PUBLISH_BUFFER_DAYS = 7
+
+# Calendar days fetched AFTER published_date - only day-0 itself is
+# needed, but weekends/tz quirks around yfinance's `end` (exclusive) mean
+# a 1-day buffer isn't always enough to guarantee day-0 lands inside the
+# fetched window.
+POST_PUBLISH_BUFFER_DAYS = 3
+
+
+def _as_of_timestamp(index, as_of_date):
+    """pd.Timestamp for as_of_date, localized to match `index`'s own
+    tz-awareness - ported verbatim from financial-sentiment-model's
+    generate_real_dataset.py (same helper, same tz-mismatch problem:
+    yfinance price-history indices are inconsistently tz-aware across
+    tickers, and pandas raises TypeError comparing/searchsorting a naive
+    Timestamp against a tz-aware DatetimeIndex or vice versa)."""
+    ts = pd.Timestamp(as_of_date)
+    tz = getattr(index, "tz", None)
+    return ts.tz_localize(tz) if tz is not None else ts
+
+
+def price_move_on_date(ticker: str, published_date: datetime.date | None) -> tuple[str, float | None]:
+    """Single-day close-to-close move for `published_date` - the day-0
+    close (published_date, or the next trading day if published after
+    close/on a weekend) vs. the immediately preceding trading day's close.
+    Task A's only price signal (see inference.py's classify_news).
+    Replaces the old recent_price_move's "trailing as of now"
+    approximation now that news.py (see fetch_live_news_rag) selects and
+    returns the ONE headline actually used, and its published_date with
+    it - this can finally measure the SAME thing training does
+    (financial-sentiment-model's generate_real_dataset.py measure_
+    reaction_windows/price_context_block, ported not imported, same
+    convention as the DCF valuation math), eliminating the trailing-vs-
+    forward mismatch the old function openly documented as a stopgap. See
+    that repo's module docstring history item 12 for the SIGN.SW example
+    (a same-day >10% crash that mostly reversed within two days) that
+    motivated single-day over a multi-day window in the first place.
 
     Returns (text, move_fraction) - move_fraction is a plain fraction
-    (0.056 for +5.6%, matching price_context_block's own convention on
-    the training side), not a percentage. ("Data unavailable.", None) on
-    any fetch failure or insufficient history (a market holiday,
-    illiquid/thinly-traded ticker, brand-new listing, etc.).
+    (0.056 for +5.6%), matching price_context_block's own convention.
+    ("Data unavailable.", None) if published_date is None (news.py
+    selected no headline) or on any fetch failure/insufficient history.
     """
+    if published_date is None:
+        return "Data unavailable.", None
+
+    start_date = published_date - datetime.timedelta(days=PRE_PUBLISH_BUFFER_DAYS)
+    end_date = published_date + datetime.timedelta(days=POST_PUBLISH_BUFFER_DAYS)
     try:
-        hist = yf.Ticker(ticker).history(period="10d")
+        hist = yf.Ticker(ticker).history(start=start_date, end=end_date)
     except Exception as e:
         logger.warning("yfinance price-history fetch failed for %s: %s", ticker, e)
         return "Data unavailable.", None
 
-    # Need today's close plus 3 trading days back - a flat 10-calendar-day
-    # window comfortably covers that even across a long weekend/holiday,
-    # same cushion-over-minimum spirit as this module's other yfinance
-    # calls.
-    if len(hist) < 4:
+    if hist.empty:
         return "Data unavailable.", None
 
-    closes = hist["Close"]
-    latest_close = closes.iloc[-1]
-    three_days_ago_close = closes.iloc[-4]
-    if not _usable(latest_close) or not _usable(three_days_ago_close) or not three_days_ago_close:
+    published_ts = _as_of_timestamp(hist.index, published_date)
+    day0_pos = hist.index.searchsorted(published_ts)
+    if day0_pos == 0 or day0_pos >= len(hist):
         return "Data unavailable.", None
 
-    move_fraction = (latest_close - three_days_ago_close) / three_days_ago_close
-    return f"{ticker} moved {move_fraction * 100:+.1f}% over the last 3 trading days.", move_fraction
+    prev_close = hist["Close"].iloc[day0_pos - 1]
+    day0_close = hist["Close"].iloc[day0_pos]
+    if not _usable(prev_close) or not _usable(day0_close) or not prev_close:
+        return "Data unavailable.", None
+
+    move_fraction = (day0_close - prev_close) / prev_close
+    return f"{ticker} moved {move_fraction * 100:+.1f}% on the day this was published.", move_fraction
 
 
 # See value_screen_metrics' own comment on peg_ratio for why this exists.

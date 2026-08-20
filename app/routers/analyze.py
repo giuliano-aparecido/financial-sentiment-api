@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from app.deps import verify_api_key
 from app.models import QueryRequest
 from app.services.earnings import earnings_block, fetch_earnings
-from app.services.fundamentals import fetch_fundamentals, market_data_block, recent_price_move
+from app.services.fundamentals import fetch_fundamentals, market_data_block, price_move_on_date
 from app.services.inference import analyze_two_stage
 from app.services.news import fetch_live_news_rag
 from app.services.ticker import extract_ticker
@@ -17,29 +17,40 @@ router = APIRouter()
 @router.post("/api/analyze", dependencies=[Depends(verify_api_key)])
 async def analyze_stock(req: QueryRequest):
     ticker, ticker_was_explicit = extract_ticker(req.user_query)
-    # All four do blocking I/O (feedparser/yfinance) - off the event loop
-    # via to_thread (same reason as before: one slow response shouldn't
-    # stall every other concurrent request on this single-worker process),
-    # and gathered concurrently so the total wait is the slowest of the
-    # four, not their sum. recent_price_move is Task A's only price
-    # signal (see inference.classify_news) - a separate yfinance call from
-    # fetch_fundamentals since it needs trailing daily history, not a
-    # single .info snapshot.
-    live_context, fundamentals, earnings_data, (price_context, _move_fraction) = await asyncio.gather(
-        asyncio.to_thread(fetch_live_news_rag, ticker),
+    # fetch_fundamentals and fetch_earnings are independent of everything
+    # else, so they still run concurrently. fetch_live_news_rag can't join
+    # that gather anymore, though: its relevance filter needs a company
+    # name/sector to check headlines against (see app.services.news.
+    # _is_relevant_headline), and the cheapest source for those is
+    # fundamentals' own .info fetch, not a second yfinance call - so news
+    # now runs AFTER fundamentals resolves. price_move_on_date, in turn,
+    # needs the SPECIFIC headline news.py selected (its published_date),
+    # so it runs after that. This trades some of the old 4-way parallelism
+    # for the correctness fix the redesign plan calls for (train and
+    # inference measuring the same single-day, same-headline price move) -
+    # see financial-sentiment-model's docs/two-stage-task-a-redesign-
+    # plan.md. All four calls still do blocking I/O (feedparser/yfinance)
+    # off the event loop via to_thread.
+    fundamentals, earnings_data = await asyncio.gather(
         asyncio.to_thread(fetch_fundamentals, ticker),
         asyncio.to_thread(fetch_earnings, ticker),
-        asyncio.to_thread(recent_price_move, ticker),
     )
+    # fundamentals may have resolved a bare extracted ticker to its real
+    # Yahoo symbol internally (e.g. "NESN" -> "NESN.SW" - see
+    # fundamentals.resolve_ticker) - use that resolved form for every
+    # subsequent lookup too, so CURATED_SCENARIOS lookups, the news
+    # search, the price lookup, and the audit log all line up with what
+    # was actually fetched, not the raw extracted text.
+    valuation_ticker = fundamentals.get("resolved_ticker", ticker) if fundamentals else ticker
+    company_name = (fundamentals.get("company_name") or ticker) if fundamentals else ticker
+    sector = fundamentals.get("sector") if fundamentals else None
+
+    live_context, published_date = await asyncio.to_thread(fetch_live_news_rag, valuation_ticker, company_name, sector)
+    price_context, _move_fraction = await asyncio.to_thread(price_move_on_date, valuation_ticker, published_date)
+
     # valuation_assessment_for's scenario-DCF math is pure/in-memory - no
     # to_thread needed, it just consumes fundamentals' already-fetched dict.
     market_data = market_data_block(fundamentals)
-    # fundamentals may have resolved a bare extracted ticker to its real
-    # Yahoo symbol internally (e.g. "NESN" -> "NESN.SW" - see
-    # fundamentals.resolve_ticker) - use that resolved form here too, so
-    # CURATED_SCENARIOS lookups and the audit log line up with what was
-    # actually fetched, not the raw extracted text.
-    valuation_ticker = fundamentals.get("resolved_ticker", ticker) if fundamentals else ticker
     valuation, gap_pct = valuation_assessment_for(fundamentals, ticker=valuation_ticker)
     earnings = earnings_block(earnings_data)
     return await analyze_two_stage(

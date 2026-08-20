@@ -6,7 +6,7 @@ from app.services import inference
 MARKET_DATA = "Price: $189.30 | Market Cap: $2.95T\nP/E (trailing): 31.2 | P/E (forward): 27.8\nEPS (trailing): $6.07 | Dividend Yield: 0.55%\n52-Week Range: $164.08 - $237.23"
 VALUATION = "Intrinsic Value (EPS-based): $78.40\nvs Current Price: overvalued by ~59%"
 EARNINGS = "Last Quarter (2026-06-30): Revenue $85.8B (+4.9% YoY), EPS $1.40 (beat est. $1.35)\nNext Earnings Date: 2026-10-29"
-PRICE_CONTEXT = "AAPL moved -9.2% over the last 3 trading days."
+PRICE_CONTEXT = "AAPL moved -9.2% on the day this was published."
 NEWS = "- news headline"
 
 

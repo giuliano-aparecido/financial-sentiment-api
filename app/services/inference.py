@@ -218,7 +218,7 @@ Recent News & Results:
 
 async def classify_news(ticker: str, price_context: str, live_context: str) -> str | None:
     """Task A: classifies how the market has reacted to `live_context`
-    given `price_context` (see fundamentals.recent_price_move). Returns
+    given `price_context` (see fundamentals.price_move_on_date). Returns
     the news_reaction string on success, or None if the model's output
     didn't parse as JSON or named a class outside _VALID_NEWS_REACTIONS -
     callers must normalize a None to a safe default (see analyze_two_

@@ -4,10 +4,10 @@ VALID_KEY = "test-api-key"  # matches conftest.py's API_KEY env var
 
 
 def _patch_services(monkeypatch, fundamentals=None, earnings_data=None, price_move=("Data unavailable.", None)):
-    monkeypatch.setattr(analyze_router, "fetch_live_news_rag", lambda ticker: f"news for {ticker}")
+    monkeypatch.setattr(analyze_router, "fetch_live_news_rag", lambda ticker, name, sector: (f"news for {ticker}", None))
     monkeypatch.setattr(analyze_router, "fetch_fundamentals", lambda ticker: fundamentals)
     monkeypatch.setattr(analyze_router, "fetch_earnings", lambda ticker: earnings_data)
-    monkeypatch.setattr(analyze_router, "recent_price_move", lambda ticker: price_move)
+    monkeypatch.setattr(analyze_router, "price_move_on_date", lambda ticker, published_date: price_move)
 
     captured = {}
 
@@ -37,7 +37,7 @@ def test_analyze_route_wires_fetched_blocks_into_inference_call(client, monkeypa
         "year_low": 164.08, "year_high": 237.23,
         "free_cash_flow": None, "total_revenue": None, "dividend_rate": None,
         "sector": "Technology", "industry": "Consumer Electronics",
-        "payout_ratio": 0.12,
+        "payout_ratio": 0.12, "company_name": "Apple Inc.",
     }
     earnings_data = {
         "last_quarter_date": "2026-06-30", "revenue": 85.8e9, "yoy_growth_pct": 4.9,
@@ -45,7 +45,7 @@ def test_analyze_route_wires_fetched_blocks_into_inference_call(client, monkeypa
     }
     captured = _patch_services(
         monkeypatch, fundamentals=fundamentals, earnings_data=earnings_data,
-        price_move=("AAPL moved -3.4% over the last 3 trading days.", -0.034),
+        price_move=("AAPL moved -1.4% on the day this was published.", -0.014),
     )
 
     response = client.post(
@@ -60,11 +60,45 @@ def test_analyze_route_wires_fetched_blocks_into_inference_call(client, monkeypa
     assert "Price: $189.30" in captured["market_data"]
     assert "EPS-based" in captured["valuation"]
     assert "Revenue $85.8B" in captured["earnings"]
-    assert captured["price_context"] == "AAPL moved -3.4% over the last 3 trading days."
+    assert captured["price_context"] == "AAPL moved -1.4% on the day this was published."
     # A real, meaningful over/undervaluation gap should be a nonzero
     # number - the router must actually thread valuation_assessment_for's
     # second return value through to analyze_two_stage, not drop it.
     assert isinstance(captured["gap_pct"], float)
+
+
+def test_analyze_route_passes_resolved_ticker_name_and_sector_to_news_fetch(client, monkeypatch):
+    fundamentals = {
+        "price": 92.5, "resolved_ticker": "NESN.SW", "sector": "Consumer Defensive",
+        "company_name": "Nestle SA",
+    }
+    news_calls = []
+
+    def fake_fetch_live_news_rag(ticker, name, sector):
+        news_calls.append((ticker, name, sector))
+        return f"news for {ticker}", None
+
+    monkeypatch.setattr(analyze_router, "fetch_live_news_rag", fake_fetch_live_news_rag)
+    monkeypatch.setattr(analyze_router, "fetch_fundamentals", lambda ticker: fundamentals)
+    monkeypatch.setattr(analyze_router, "fetch_earnings", lambda ticker: None)
+    monkeypatch.setattr(analyze_router, "price_move_on_date", lambda ticker, published_date: ("Data unavailable.", None))
+
+    async def fake_analyze_two_stage(*args, **kwargs):
+        return {"recommendation": "HOLD", "news_reaction": "neutral"}
+
+    monkeypatch.setattr(analyze_router, "analyze_two_stage", fake_analyze_two_stage)
+
+    response = client.post(
+        "/api/analyze",
+        json={"user_query": "Is $NESN a buy?"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    # Uses the RESOLVED ticker (NESN.SW), not the raw extracted one
+    # (NESN), and threads the company name/sector through so news.py's
+    # relevance filter has something to check headlines against.
+    assert news_calls == [("NESN.SW", "Nestle SA", "Consumer Defensive")]
 
 
 def test_analyze_route_degrades_gracefully_when_fundamentals_and_earnings_fail(client, monkeypatch):
