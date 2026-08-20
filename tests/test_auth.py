@@ -1,3 +1,5 @@
+from app.routers import admin as admin_router
+
 VALID_KEY = "test-api-key"  # matches conftest.py's API_KEY env var
 
 
@@ -92,3 +94,32 @@ def test_update_inference_url_accepts_modal_run(client):
     )
     assert response.status_code == 200
     assert response.json()["hf_inference_url"] == "https://gaparecido--financial-sentiment-reasoner-generate.modal.run"
+
+
+def test_update_yf_crumb_rejects_missing_key(client):
+    response = client.post("/api/update-yf-crumb", json={"crumb": "abc", "cookies": {}})
+    assert response.status_code == 401
+
+
+def test_update_yf_crumb_rejects_wrong_key(client):
+    response = client.post(
+        "/api/update-yf-crumb",
+        json={"crumb": "abc", "cookies": {}},
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert response.status_code == 401
+
+
+def test_update_yf_crumb_calls_reseed_with_request_body(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(admin_router, "reseed_yf_session", lambda crumb, cookies: calls.append((crumb, cookies)))
+
+    response = client.post(
+        "/api/update-yf-crumb",
+        json={"crumb": "fresh-crumb-123", "cookies": {"A1": "abc", "A3": "def"}},
+        headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert calls == [("fresh-crumb-123", {"A1": "abc", "A3": "def"})]

@@ -70,9 +70,16 @@ logger = logging.getLogger(__name__)
 # The refresh itself is automated as of scripts/refresh_yf_crumb.py +
 # .github/workflows/refresh-yf-crumb.yml - a daily scheduled job that
 # re-captures a fresh crumb+cookie pair from a GitHub Actions runner (not
-# Render, since Render's own IP is exactly what's blocked) and pushes it
-# into these two env vars via Render's API, then redeploys. See that
-# script's own docstring for the full reasoning and its limits.
+# Render, since Render's own IP is exactly what's blocked). Originally
+# pushed the pair into YF_SEED_CRUMB/YF_SEED_COOKIES via Render's API and
+# triggered a redeploy for every refresh - revised 2026-08-20 at the
+# user's explicit request ("I dont want to always trigger and redeploy
+# the app") to instead call reseed_yf_session() below via the
+# /api/update-yf-crumb admin endpoint, hot-swapping the running process's
+# crumb with no restart at all. YF_SEED_CRUMB/YF_SEED_COOKIES (and this
+# function) still exist as the cold-start path for when the process DOES
+# restart for an unrelated reason (a real code deploy) - see that
+# script's own docstring for the full current reasoning.
 def _seed_yf_session_from_env():
     seed_crumb = os.environ.get("YF_SEED_CRUMB")
     seed_cookies_json = os.environ.get("YF_SEED_COOKIES")
@@ -85,6 +92,24 @@ def _seed_yf_session_from_env():
         data._session.cookies.set(name, value)
     data._crumb = seed_crumb
     logger.info("Seeded yfinance crumb/cookies from YF_SEED_CRUMB/YF_SEED_COOKIES (Yahoo crumb-fetch workaround)")
+
+
+def reseed_yf_session(crumb: str, cookies: dict) -> None:
+    """Hot-swaps the running process's yfinance crumb/cookie jar with a
+    freshly captured pair - called from app/routers/admin.py's /api/
+    update-yf-crumb endpoint, itself called by scripts/refresh_yf_crumb.py
+    (see that script's own docstring). Unlike _seed_yf_session_from_env
+    above, this ALWAYS overwrites (no "already seeded, don't clobber"
+    guard) - the whole point is refreshing an already-seeded, now-stale
+    crumb without restarting the process at all, added 2026-08-20 at the
+    user's explicit request to eliminate the redeploy-every-refresh cycle
+    the env-var-only path required."""
+    data = YfData()
+    data._session.cookies.clear()
+    for name, value in cookies.items():
+        data._session.cookies.set(name, value)
+    data._crumb = crumb
+    logger.info("Hot-reseeded yfinance crumb/cookies via reseed_yf_session (no restart)")
 
 
 # Market-cap band in CHF - single universe as of 2026-08-18 (see module
