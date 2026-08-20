@@ -70,7 +70,20 @@ may be incomplete rather than looking like a clean, complete scan.
 No lock needed around this cache: _run_today only ever executes one at a
 time (see _JobSlot's single-flight reasoning above), so there's no
 concurrent writer to race against.
-"""
+
+Rate-limit cooldown (added 2026-08-20): confirmed live - a genuine Yahoo
+rate-limit block (YFRateLimitError, distinct from an ordinary per-ticker
+fetch failure - see swiss_universe.filter_domestic's own comment) was
+being treated exactly like any other transient failure by the discovery-
+retry logic above: every "today" scan click blindly re-attempted the
+full failed_symbols list, which just re-triggered the same block again -
+the "running 2-3 scans throws this again" problem. _yahoo_rate_limited_
+until below is a cooldown: while active, _discover_and_filter_with_retry
+skips live calls entirely and returns whatever's already cached for
+today (which may be empty, on a fresh day that got blocked before
+anything was fetched - see that function's own comment for how that
+case is surfaced to the frontend, rather than a raw YFRateLimitError
+string)."""
 
 import datetime
 import logging
@@ -148,6 +161,48 @@ def _new_discovery_cache() -> dict:
     return {"date": None, "candidates": {}, "domestic": {}, "failed_symbols": []}
 
 
+# How long to stop attempting live filter_domestic calls after a
+# confirmed Yahoo rate-limit hit - see module docstring's "Rate-limit
+# cooldown" section. Not scientifically derived (no documented recovery
+# window from Yahoo) - a conservative first guess, long enough that a
+# user clicking Refresh a few times in a row can't keep re-triggering the
+# block, short enough that a same-session retry later that day still has
+# a real chance of working. Revisit if live experience shows it's too
+# short (still hitting blocks right after cooldown expires) or too long
+# (Yahoo was clearly fine again well before this elapsed).
+RATE_LIMIT_COOLDOWN_MINUTES = 20
+
+# None = no active cooldown.
+_yahoo_rate_limited_until: datetime.datetime | None = None
+
+
+def _yahoo_cooldown_remaining() -> datetime.datetime | None:
+    """Returns the cooldown's expiry time if one is currently active,
+    else None. Factored out so both the skip-live-calls check and the
+    user-facing message below read the exact same value."""
+    if _yahoo_rate_limited_until is not None and datetime.datetime.now(datetime.timezone.utc) < _yahoo_rate_limited_until:
+        return _yahoo_rate_limited_until
+    return None
+
+
+def _start_yahoo_cooldown() -> None:
+    global _yahoo_rate_limited_until
+    _yahoo_rate_limited_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=RATE_LIMIT_COOLDOWN_MINUTES)
+    logger.warning("Yahoo rate limit hit - suppressing further live discovery/filter calls until %s", _yahoo_rate_limited_until.isoformat())
+
+
+class YahooRateLimitedError(Exception):
+    """Raised only when a scan is rate-limited AND has nothing cached for
+    today to fall back to (see _discover_and_filter_with_retry) - a
+    clear, user-facing message for _JobSlot.set_error instead of a raw
+    YFRateLimitError string, distinguishing "Yahoo is temporarily
+    blocking this" from a genuine bug."""
+
+
+def _rate_limit_message(until: datetime.datetime) -> str:
+    return f"Yahoo Finance is currently rate-limiting these requests. Try again after {until.strftime('%H:%M UTC')}."
+
+
 def _discover_and_filter_with_retry(cache: dict) -> tuple[dict, bool]:
     """Discovery+domicile-filter, cached per calendar day with same-day
     partial-failure retry (see module docstring for the full "why").
@@ -173,11 +228,33 @@ def _discover_and_filter_with_retry(cache: dict) -> tuple[dict, bool]:
 
     Same day, no failed_symbols: pure cache hit, no yfinance calls at
     all.
+
+    Rate-limit cooldown (see module docstring): checked FIRST, before any
+    of the above - while active, this makes NO live calls at all. Serves
+    today's cached `domestic` if there is one (even if it's incomplete
+    from a partial fetch before the block hit - partial real data beats
+    nothing), otherwise raises YahooRateLimitedError with a clear,
+    actionable message rather than attempting a live call already known
+    to fail. Whenever a live call below DOES hit a fresh rate limit, it
+    starts the cooldown for next time - this function's own current call
+    still tried live and reports whatever it got, cooldown only affects
+    subsequent calls.
     """
     today = _today()
+
+    cooldown_until = _yahoo_cooldown_remaining()
+    if cooldown_until is not None:
+        if cache["date"] == today and cache["domestic"]:
+            logger.info(
+                "Yahoo cooldown active until %s - reusing today's cached domestic (%d tickers) instead of a live call",
+                cooldown_until.isoformat(), len(cache["domestic"]),
+            )
+            return cache["domestic"], False
+        raise YahooRateLimitedError(_rate_limit_message(cooldown_until))
+
     if cache["date"] != today:
         candidates = swiss_universe.discover_candidates()
-        domestic, failed_symbols = swiss_universe.filter_domestic(candidates)
+        domestic, failed_symbols, hit_rate_limit = swiss_universe.filter_domestic(candidates)
         cache["date"] = today
         cache["candidates"] = candidates
         cache["domestic"] = domestic
@@ -185,19 +262,27 @@ def _discover_and_filter_with_retry(cache: dict) -> tuple[dict, bool]:
         logger.info(
             "Discovery for %s: universe=%d failed=%d", today, len(domestic), len(failed_symbols),
         )
+        if hit_rate_limit:
+            _start_yahoo_cooldown()
+            if not domestic:
+                raise YahooRateLimitedError(_rate_limit_message(_yahoo_rate_limited_until))
         return domestic, True
 
     if cache["failed_symbols"]:
         retry_candidates = {s: cache["candidates"][s] for s in cache["failed_symbols"] if s in cache["candidates"]}
-        newly_domestic, still_failed = swiss_universe.filter_domestic(retry_candidates)
+        newly_domestic, still_failed, hit_rate_limit = swiss_universe.filter_domestic(retry_candidates)
         cache["failed_symbols"] = still_failed
         logger.info(
             "Retried %d previously-failed tickers: %d now succeeded, %d still failing",
             len(retry_candidates), len(newly_domestic), len(still_failed),
         )
+        if hit_rate_limit:
+            _start_yahoo_cooldown()
         if newly_domestic:
             cache["domestic"].update(newly_domestic)
             return cache["domestic"], True
+        if hit_rate_limit and not cache["domestic"]:
+            raise YahooRateLimitedError(_rate_limit_message(_yahoo_rate_limited_until))
     return cache["domestic"], False
 
 
