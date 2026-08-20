@@ -588,3 +588,31 @@ def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):
 
     assert fake._crumb == "already-have-one"
     assert dict(fake._session.cookies) == {}
+
+
+def test_reseed_yf_session_overwrites_existing_crumb(monkeypatch):
+    # Unlike _seed_yf_session_from_env, reseed_yf_session's whole point is
+    # replacing an already-seeded, now-stale crumb - it must NOT skip just
+    # because one is already present.
+    fake = _FakeYfData(crumb="old-stale-crumb")
+    fake._session.cookies.set("OLD", "cookie")
+    monkeypatch.setattr(swiss_universe_module, "YfData", lambda: fake)
+
+    swiss_universe_module.reseed_yf_session("fresh-crumb", {"A1": "abc"})
+
+    assert fake._crumb == "fresh-crumb"
+    assert dict(fake._session.cookies) == {"A1": "abc"}
+
+
+def test_reseed_yf_session_clears_stale_cookies_not_just_adds(monkeypatch):
+    # A hot reseed replaces the WHOLE cookie jar - a stale cookie from the
+    # old session lingering alongside the new ones could confuse Yahoo's
+    # own session validation.
+    fake = _FakeYfData(crumb="old-crumb")
+    fake._session.cookies.set("STALE", "leftover")
+    monkeypatch.setattr(swiss_universe_module, "YfData", lambda: fake)
+
+    swiss_universe_module.reseed_yf_session("fresh-crumb", {"NEW": "cookie"})
+
+    assert "STALE" not in fake._session.cookies
+    assert dict(fake._session.cookies) == {"NEW": "cookie"}

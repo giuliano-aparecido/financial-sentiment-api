@@ -7,3 +7,8 @@ class QueryRequest(BaseModel):
 
 class UpdateInferenceURLRequest(BaseModel):
     url: str
+
+
+class UpdateYfCrumbRequest(BaseModel):
+    crumb: str
+    cookies: dict[str, str]

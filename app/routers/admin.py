@@ -6,8 +6,9 @@ from slowapi.util import get_remote_address
 
 from app.config import is_allowed_inference_host
 from app.deps import verify_api_key
-from app.models import UpdateInferenceURLRequest
+from app.models import UpdateInferenceURLRequest, UpdateYfCrumbRequest
 from app.services.inference import get_hf_inference_url, set_hf_inference_url
+from app.services.swiss_universe import reseed_yf_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,3 +36,19 @@ async def update_inference_url(req: UpdateInferenceURLRequest, request: Request)
     set_hf_inference_url(new_url)
     logger.info("update-inference-url OK from %s: %r -> %r", caller_ip, old_url, new_url)
     return {"status": "ok", "hf_inference_url": get_hf_inference_url()}
+
+
+@router.post("/api/update-yf-crumb", dependencies=[Depends(verify_api_key)])
+async def update_yf_crumb(req: UpdateYfCrumbRequest, request: Request):
+    """Hot-swaps the running process's yfinance crumb/cookie pair with a
+    freshly captured one - see swiss_universe.reseed_yf_session's own
+    docstring. Called by scripts/refresh_yf_crumb.py instead of that
+    script's old Render-env-var-push-plus-redeploy path, added 2026-08-20
+    at the user's explicit request to stop redeploying the whole app just
+    to refresh a crumb. Gated behind the same API key as everything else
+    here - same rationale as update-inference-url: this is a privileged
+    write into process state, not a public read."""
+    caller_ip = get_remote_address(request)
+    reseed_yf_session(req.crumb, req.cookies)
+    logger.info("update-yf-crumb OK from %s (crumb len=%d, %d cookies)", caller_ip, len(req.crumb), len(req.cookies))
+    return {"status": "ok"}
