@@ -104,7 +104,14 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
 
 def _discover_domestic_batched() -> tuple[dict, list[str]]:
     candidates = swiss_universe.discover_candidates()
-    domestic, failed_symbols = swiss_universe.filter_domestic_batched(
+    # `hit_rate_limit` (2026-08-20 addition to filter_domestic_batched -
+    # see that function's own docstring) isn't consumed here: this path
+    # is already the most rate-limit-conscious one in the app (batched,
+    # minutes of delay between chunks), and a hit here just means
+    # whatever candidates weren't reached land in failed_symbols same as
+    # any other failure, picked up by tomorrow's scheduled run or a
+    # manual retry - no separate cooldown gate needed on top of that.
+    domestic, failed_symbols, _hit_rate_limit = swiss_universe.filter_domestic_batched(
         candidates, NUM_SCAN_BATCHES, SCAN_BATCH_DELAY_SECONDS,
     )
     if failed_symbols:
@@ -157,7 +164,7 @@ def _retry_failed_rebound_tickers(scan_run_at: datetime.datetime, failed_tickers
     logger.info("Retrying %d failed rebound tickers from %s", len(failed_tickers), scan_run_at.isoformat())
     candidates = swiss_universe.discover_candidates()
     retry_candidates = {s: candidates[s] for s in failed_tickers if s in candidates}
-    domestic, still_failed = swiss_universe.filter_domestic(retry_candidates)
+    domestic, still_failed, _hit_rate_limit = swiss_universe.filter_domestic(retry_candidates)
     rows = []
     if domestic:
         df = swiss_crash_rebound.run_scan(domestic)
@@ -296,7 +303,7 @@ def _retry_failed_indicator_tickers(scan_run_at: datetime.datetime, failed_ticke
     logger.info("Retrying %d failed volatility-indicator tickers from %s", len(failed_tickers), scan_run_at.isoformat())
     candidates = swiss_universe.discover_candidates()
     retry_candidates = {s: candidates[s] for s in failed_tickers if s in candidates}
-    domestic, still_failed = swiss_universe.filter_domestic(retry_candidates)
+    domestic, still_failed, _hit_rate_limit = swiss_universe.filter_domestic(retry_candidates)
     if domestic:
         for threshold_pct in ALLOWED_THRESHOLD_PCTS:
             df = swiss_volatility_indicator.run_scan(domestic, threshold_pct)

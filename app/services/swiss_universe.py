@@ -32,6 +32,7 @@ import os
 import time
 import yfinance as yf
 from yfinance.data import YfData
+from yfinance.exceptions import YFRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -493,11 +494,17 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
     """One ticker's worth of filter_domestic's work - fetch .info, decide
     keep/skip, sleep the politeness delay - factored out so it can run as
     a unit inside a worker thread (see filter_domestic below). Returns
-    (symbol, entry_dict_or_None, failed) - `failed` is True ONLY for a
-    genuine fetch exception (transient - e.g. a rate limit - worth
-    retrying later), False for both success AND a legitimate exclusion
-    (wrong domicile, too illiquid - a real, permanent answer, not
-    something to retry). The caller does the printing/assembly, this
+    (symbol, entry_dict_or_None, failed, rate_limited) - `failed` is True
+    ONLY for a genuine fetch exception (transient - worth retrying
+    later), False for both success AND a legitimate exclusion (wrong
+    domicile, too illiquid - a real, permanent answer, not something to
+    retry). `rate_limited` is True only for the specific YFRateLimitError
+    case - see filter_domestic's own comment for why this needs its own
+    signal distinct from an ordinary per-ticker `failed`: a rate limit
+    means EVERY remaining/future call against this same crumb is going to
+    fail too, not just this one ticker, so callers need to know to stop
+    burning requests and back off rather than treating it as one more
+    isolated retry candidate. The caller does the printing/assembly, this
     only computes. Sleeps unconditionally at the end, success or
     failure, same as the original serial loop did - each worker still
     paces its OWN sequential requests by delay_seconds, concurrency just
@@ -508,10 +515,10 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
         avg_volume_10d = info.get("averageDailyVolume10Day")
         if country != "Switzerland":
             print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
-            return symbol, None, False
+            return symbol, None, False, False
         if avg_volume_10d is None or avg_volume_10d < MIN_AVG_DAILY_VOLUME_10D:
             print(f"  skip {symbol}: 10-day avg volume {avg_volume_10d!r} below {MIN_AVG_DAILY_VOLUME_10D} floor")
-            return symbol, None, False
+            return symbol, None, False, False
         return symbol, {
             "name": quote.get("longName") or quote.get("shortName") or symbol,
             "sector": info.get("sector"),
@@ -536,10 +543,13 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
             "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
             "avg_volume_10d": avg_volume_10d,
             "quote": quote,
-        }, False
+        }, False, False
+    except YFRateLimitError as e:
+        print(f"  skip {symbol}: info fetch failed ({e!r}) - Yahoo rate limit, not ticker-specific")
+        return symbol, None, True, True
     except Exception as e:
         print(f"  skip {symbol}: info fetch failed ({e!r})")
-        return symbol, None, True
+        return symbol, None, True, False
     finally:
         time.sleep(delay_seconds)
 
@@ -560,26 +570,44 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
     paths - the static fallback's synthesized quote (see
     STATIC_DOMESTIC_TICKER_SNAPSHOT) has no volume field at all).
 
-    Returns (domestic, failed_symbols): `domestic` is symbol -> dict with
-    the original screener `quote` retained (for live/"today" fields)
-    alongside domicile-confirmed extras that only .info has - sector/
-    trailing_eps (used by the valuation-adjacent scripts), avg_volume_10d
-    (used by swiss_crash_rebound.py AND swiss_today_screener.py, so both
-    read the SAME already-fetched figure rather than two different
-    volume-averaging methodologies) plus a handful of extra current-
-    snapshot fields (dividend yield, ex-dividend date, trailing/forward
-    P/E, beta, 52-week range) pulled from this SAME .info call at no
-    extra request cost. `failed_symbols` is a list of candidate symbols
-    whose fetch genuinely raised an exception (added 2026-08-19 - see
-    research_job.py's _discover_and_filter_with_retry, which uses this
-    to retry ONLY these specific tickers on a same-day re-scan instead
-    of re-fetching the whole universe) - does NOT include symbols that
-    were correctly excluded for a real, permanent reason (wrong
-    domicile, too illiquid); only transient fetch failures belong here,
-    since only those are worth ever retrying. Fails soft per ticker
-    either way: a fetch error just excludes that ticker from `domestic`
-    (while still being recorded in `failed_symbols`), never aborts the
-    whole scan.
+    Returns (domestic, failed_symbols, hit_rate_limit): `domestic` is
+    symbol -> dict with the original screener `quote` retained (for
+    live/"today" fields) alongside domicile-confirmed extras that only
+    .info has - sector/trailing_eps (used by the valuation-adjacent
+    scripts), avg_volume_10d (used by swiss_crash_rebound.py AND
+    swiss_today_screener.py, so both read the SAME already-fetched
+    figure rather than two different volume-averaging methodologies)
+    plus a handful of extra current-snapshot fields (dividend yield,
+    ex-dividend date, trailing/forward P/E, beta, 52-week range) pulled
+    from this SAME .info call at no extra request cost. `failed_symbols`
+    is a list of candidate symbols whose fetch genuinely raised an
+    exception (added 2026-08-19 - see research_job.py's _discover_and_
+    filter_with_retry, which uses this to retry ONLY these specific
+    tickers on a same-day re-scan instead of re-fetching the whole
+    universe) - does NOT include symbols that were correctly excluded
+    for a real, permanent reason (wrong domicile, too illiquid); only
+    transient fetch failures belong here, since only those are worth
+    ever retrying. Fails soft per ticker either way: a fetch error just
+    excludes that ticker from `domestic` (while still being recorded in
+    `failed_symbols`), never aborts the whole scan.
+
+    `hit_rate_limit` is True if ANY ticker's fetch raised specifically a
+    YFRateLimitError (added 2026-08-20, see _fetch_domestic_entry's own
+    comment) - confirmed live: without this signal, a broad Yahoo rate-
+    limit block looked identical to "a handful of tickers had a fluke",
+    so research_job.py's same-day retry kept blindly re-attempting the
+    ENTIRE failed_symbols list on every subsequent scan, which just
+    re-triggered the same block again and again with no backoff -
+    exactly the "running 2-3 scans throws this again" complaint this was
+    built to fix. See research_job.py's cooldown gate, which uses this
+    flag to stop attempting live retries for a while instead of
+    hammering an endpoint it already knows is currently blocking it.
+
+    Once `hit_rate_limit` is detected, any not-yet-started futures are
+    cancelled (best-effort - concurrent.futures can only cancel work that
+    hasn't begun running yet, not the up-to-max_workers requests already
+    in flight) rather than burning through the rest of `candidates` on an
+    endpoint that's already shown it's blocking this session.
 
     Runs the per-ticker fetches across max_workers threads (see
     INFO_MAX_WORKERS's own comment for the safety reasoning) instead of
@@ -589,34 +617,63 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
     """
     domestic = {}
     failed_symbols = []
+    hit_rate_limit = False
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_fetch_domestic_entry, symbol, quote, delay_seconds) for symbol, quote in candidates.items()]
+        futures = {
+            executor.submit(_fetch_domestic_entry, symbol, quote, delay_seconds): symbol
+            for symbol, quote in candidates.items()
+        }
+        pending = set(futures)
         for future in concurrent.futures.as_completed(futures):
-            symbol, entry, failed = future.result()
+            pending.discard(future)
+            try:
+                symbol, entry, failed, rate_limited = future.result()
+            except concurrent.futures.CancelledError:
+                # One of our own cancel() calls below landed on this
+                # future before it started - it was never actually
+                # attempted, but still belongs in failed_symbols (not
+                # silently dropped) so the next retry picks it up, same
+                # as a symbol whose fetch genuinely raised.
+                failed_symbols.append(futures[future])
+                continue
             if entry is not None:
                 domestic[symbol] = entry
             if failed:
                 failed_symbols.append(symbol)
-    return domestic, failed_symbols
+            if rate_limited and not hit_rate_limit:
+                hit_rate_limit = True
+                for other in pending:
+                    other.cancel()
+    return domestic, failed_symbols, hit_rate_limit
 
 
 def filter_domestic_batched(
     candidates: dict, num_batches: int, batch_delay_seconds: float,
     delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_workers=INFO_MAX_WORKERS,
-) -> tuple[dict, list[str]]:
+) -> tuple[dict, list[str], bool]:
     """Same result as filter_domestic (a single merged (domestic,
-    failed_symbols) pair), but splits `candidates` into `num_batches`
-    roughly-equal chunks and sleeps `batch_delay_seconds` between them,
-    instead of running every ticker's .info fetch (already internally
-    paced/bounded-concurrent - see filter_domestic's own docstring) as one
-    contiguous burst. Only worth using for the unattended scheduled scans
-    (app/services/scheduler.py) - they have no one waiting on a response,
-    so spreading ~150 calls across many extra minutes overnight is free
-    safety margin against Yahoo rate-limiting that a live, user-triggered
-    scan (app/services/research_job.py) can't afford to add on top of its
-    own latency. num_batches=1 (or candidates smaller than num_batches)
-    degrades to a single filter_domestic call with no sleep, same
-    behavior as calling it directly.
+    failed_symbols, hit_rate_limit) triple), but splits `candidates` into
+    `num_batches` roughly-equal chunks and sleeps `batch_delay_seconds`
+    between them, instead of running every ticker's .info fetch (already
+    internally paced/bounded-concurrent - see filter_domestic's own
+    docstring) as one contiguous burst. Only worth using for the
+    unattended scheduled scans (app/services/scheduler.py) - they have no
+    one waiting on a response, so spreading ~150 calls across many extra
+    minutes overnight is free safety margin against Yahoo rate-limiting
+    that a live, user-triggered scan (app/services/research_job.py) can't
+    afford to add on top of its own latency. num_batches=1 (or candidates
+    smaller than num_batches) degrades to a single filter_domestic call
+    with no sleep, same behavior as calling it directly.
+
+    Stops issuing further batches as soon as one hits a rate limit
+    (2026-08-20, see filter_domestic's own comment on `hit_rate_limit`) -
+    the whole point of the inter-batch delay is politeness margin, so
+    once Yahoo has already signaled a block, sleeping and then trying yet
+    another batch anyway would defeat that; whatever batches already
+    completed are still returned, remaining candidates simply aren't
+    attempted this run (they land in `failed_symbols` the same way a
+    cancelled in-batch fetch does - see filter_domestic - so the next
+    scheduled run's retry path picks them up naturally).
     """
     items = list(candidates.items())
     if num_batches <= 1 or not items:
@@ -627,10 +684,17 @@ def filter_domestic_batched(
 
     domestic: dict = {}
     failed_symbols: list[str] = []
+    hit_rate_limit = False
     for i, batch in enumerate(batches):
-        batch_domestic, batch_failed = filter_domestic(batch, delay_seconds=delay_seconds, max_workers=max_workers)
+        batch_domestic, batch_failed, batch_hit_rate_limit = filter_domestic(batch, delay_seconds=delay_seconds, max_workers=max_workers)
         domestic.update(batch_domestic)
         failed_symbols.extend(batch_failed)
+        if batch_hit_rate_limit:
+            hit_rate_limit = True
+            remaining_batches = batches[i + 1:]
+            for remaining_batch in remaining_batches:
+                failed_symbols.extend(remaining_batch.keys())
+            break
         if i < len(batches) - 1:
             time.sleep(batch_delay_seconds)
-    return domestic, failed_symbols
+    return domestic, failed_symbols, hit_rate_limit

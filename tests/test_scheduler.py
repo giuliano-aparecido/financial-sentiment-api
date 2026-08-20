@@ -178,7 +178,7 @@ def test_run_rebound_scan_discovers_scans_and_persists(monkeypatch):
     monkeypatch.setattr(scheduler_module.swiss_universe, "discover_candidates", lambda: {"NESN.SW": {}, "ABBN.SW": {}})
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic_batched",
-        lambda candidates, num_batches, batch_delay_seconds: (_fake_domestic(), ["ZURN.SW"]),
+        lambda candidates, num_batches, batch_delay_seconds: (_fake_domestic(), ["ZURN.SW"], False),
     )
     monkeypatch.setattr(
         scheduler_module.swiss_crash_rebound, "run_scan",
@@ -203,7 +203,7 @@ def test_run_indicator_scans_scans_every_allowed_threshold_off_one_discovery(mon
     monkeypatch.setattr(scheduler_module.swiss_universe, "discover_candidates", lambda: {"NESN.SW": {}})
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic_batched",
-        lambda candidates, num_batches, batch_delay_seconds: discover_calls.append(1) or (_fake_domestic(), ["ZURN.SW"]),
+        lambda candidates, num_batches, batch_delay_seconds: discover_calls.append(1) or (_fake_domestic(), ["ZURN.SW"], False),
     )
     scanned_thresholds = []
     monkeypatch.setattr(
@@ -243,7 +243,7 @@ def test_retry_failed_rebound_tickers_recovers_and_merges(monkeypatch):
     )
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic",
-        lambda candidates: ({"ZURN.SW": {"name": "Zurich"}}, ["UBSG.SW"]),
+        lambda candidates: ({"ZURN.SW": {"name": "Zurich"}}, ["UBSG.SW"], False),
     )
     monkeypatch.setattr(
         scheduler_module.swiss_crash_rebound, "run_scan",
@@ -277,7 +277,7 @@ def test_retry_failed_rebound_tickers_skips_symbols_no_longer_in_discovery(monke
     filter_calls = []
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic",
-        lambda candidates: filter_calls.append(candidates) or ({}, []),
+        lambda candidates: filter_calls.append(candidates) or ({}, [], False),
     )
     monkeypatch.setattr(scheduler_module.scan_persistence, "merge_rebound_retry_rows", lambda run_at, rows: None)
     updated = {}
@@ -367,7 +367,7 @@ def test_retry_failed_indicator_tickers_recomputes_every_threshold(monkeypatch):
     monkeypatch.setattr(scheduler_module.swiss_universe, "discover_candidates", lambda: {"ZURN.SW": {"q": 1}})
     monkeypatch.setattr(
         scheduler_module.swiss_universe, "filter_domestic",
-        lambda candidates: ({"ZURN.SW": {"name": "Zurich"}}, []),
+        lambda candidates: ({"ZURN.SW": {"name": "Zurich"}}, [], False),
     )
     scanned_thresholds = []
     monkeypatch.setattr(

@@ -2,6 +2,8 @@ import json
 import threading
 import time
 
+from yfinance.exceptions import YFRateLimitError
+
 import app.services.swiss_universe as swiss_universe_module
 from app.services.swiss_universe import _ex_dividend_date, discover_candidates, filter_domestic, filter_domestic_batched
 
@@ -48,7 +50,7 @@ def test_filter_domestic_captures_current_snapshot_fields(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
 
     assert failed == []
     entry = domestic["TEST.SW"]
@@ -68,7 +70,7 @@ def test_filter_domestic_new_fields_are_none_when_missing(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
 
     assert failed == []
     entry = domestic["TEST.SW"]
@@ -85,7 +87,7 @@ def test_filter_domestic_excludes_foreign_domiciled(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info(country="Germany")))
     candidates = {"FOREIGN.SW": {"longName": "Foreign SE", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
     assert failed == []  # a legitimate exclusion (wrong domicile), not a fetch failure - must not be retried
 
@@ -97,7 +99,7 @@ def test_filter_domestic_excludes_below_min_avg_daily_volume_10d(monkeypatch):
     )
     candidates = {"THIN.SW": {"longName": "Thin AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
     assert failed == []  # legitimate exclusion (thin volume), not a fetch failure
 
@@ -109,7 +111,7 @@ def test_filter_domestic_includes_at_exactly_min_avg_daily_volume_10d(monkeypatc
     )
     candidates = {"EDGE.SW": {"longName": "Edge AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert "EDGE.SW" in domestic
     assert failed == []
 
@@ -120,7 +122,7 @@ def test_filter_domestic_excludes_missing_avg_daily_volume_10d(monkeypatch):
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     candidates = {"NOVOL.SW": {"longName": "No Volume AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
     assert failed == []  # legitimate exclusion (no volume data), not a fetch failure
 
@@ -132,7 +134,7 @@ def test_filter_domestic_captures_avg_volume_10d(monkeypatch):
     )
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic["TEST.SW"]["avg_volume_10d"] == 250_000
 
 
@@ -150,7 +152,7 @@ def test_filter_domestic_market_cap_falls_back_to_info_when_quote_lacks_it(monke
     # static-fallback discovery path's synthesized quote shape exactly.
     candidates = {"TEST.SW": {"longName": "Test AG"}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic["TEST.SW"]["market_cap"] == 4.2e9
 
 
@@ -164,7 +166,7 @@ def test_filter_domestic_market_cap_prefers_quote_over_info_when_both_present(mo
     )
     candidates = {"TEST.SW": {"longName": "Test AG", "marketCap": 4.2e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic["TEST.SW"]["market_cap"] == 4.2e9
 
 
@@ -178,7 +180,7 @@ def test_filter_domestic_handles_many_tickers_correctly_under_concurrency(monkey
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
     candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(12)}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0, max_workers=5)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0, max_workers=5)
 
     assert failed == []
     assert set(domestic.keys()) == set(candidates.keys())
@@ -214,14 +216,15 @@ def test_filter_domestic_runs_fetches_concurrently(monkeypatch):
 
 def test_filter_domestic_marks_genuine_fetch_exception_as_failed(monkeypatch):
     def fake_ticker(symbol):
-        raise Exception("YFRateLimitError: Too Many Requests")
+        raise Exception("simulated transient fetch failure, NOT a rate limit")
 
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
-    candidates = {"RATELIMITED.SW": {"longName": "Rate Limited AG", "marketCap": 1e9}}
+    candidates = {"BROKEN.SW": {"longName": "Broken AG", "marketCap": 1e9}}
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert domestic == {}
-    assert failed == ["RATELIMITED.SW"]
+    assert failed == ["BROKEN.SW"]
+    assert hit_rate_limit is False  # an ordinary exception, not YFRateLimitError - no cooldown signal
 
 
 def test_filter_domestic_only_marks_the_symbol_that_actually_raised(monkeypatch):
@@ -236,10 +239,66 @@ def test_filter_domestic_only_marks_the_symbol_that_actually_raised(monkeypatch)
         "BROKEN.SW": {"longName": "Broken AG", "marketCap": 1e9},
     }
 
-    domestic, failed = filter_domestic(candidates, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
     assert "OK.SW" in domestic
     assert "BROKEN.SW" not in domestic
     assert failed == ["BROKEN.SW"]
+
+
+def test_filter_domestic_flags_hit_rate_limit_on_real_yf_rate_limit_error(monkeypatch):
+    def fake_ticker(symbol):
+        raise YFRateLimitError()
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {"RATELIMITED.SW": {"longName": "Rate Limited AG", "marketCap": 1e9}}
+
+    domestic, failed, hit_rate_limit = filter_domestic(candidates, delay_seconds=0)
+    assert domestic == {}
+    assert failed == ["RATELIMITED.SW"]
+    assert hit_rate_limit is True
+
+
+def test_filter_domestic_rate_limit_on_one_ticker_does_not_hide_others_already_in_flight(monkeypatch):
+    # max_workers=1 (serial) so results are deterministic: OK.SW completes
+    # first and lands in `domestic` before RATELIMITED.SW's failure is
+    # even seen - a rate limit detected partway through must not discard
+    # real successes already collected.
+    def fake_ticker(symbol):
+        if symbol == "RATELIMITED.SW":
+            raise YFRateLimitError()
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {
+        "OK.SW": {"longName": "Fine AG", "marketCap": 1e9},
+        "RATELIMITED.SW": {"longName": "Rate Limited AG", "marketCap": 1e9},
+    }
+
+    domestic, failed, hit_rate_limit = filter_domestic(candidates, delay_seconds=0, max_workers=1)
+    assert "OK.SW" in domestic
+    assert failed == ["RATELIMITED.SW"]
+    assert hit_rate_limit is True
+
+
+def test_filter_domestic_cancels_queued_work_after_rate_limit(monkeypatch):
+    # With max_workers=1 (serial), only the first ticker ever actually
+    # runs - everything queued behind it should be cancelled once that
+    # first call raises YFRateLimitError, not attempted one-by-one.
+    call_count = {"n": 0}
+
+    def fake_ticker(symbol):
+        call_count["n"] += 1
+        raise YFRateLimitError()
+
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+    candidates = {f"T{i}.SW": {"longName": f"Company {i}", "marketCap": 1e9} for i in range(20)}
+
+    domestic, failed, hit_rate_limit = filter_domestic(candidates, delay_seconds=0, max_workers=1)
+    assert hit_rate_limit is True
+    # Not a strict ==1 (cancellation is best-effort against a queue that
+    # could theoretically hand off one more before the cancel lands), but
+    # this must be far short of all 20 - proves the short-circuit worked.
+    assert call_count["n"] < 5
 
 
 def test_discover_candidates_excludes_configured_tickers(monkeypatch):
@@ -332,7 +391,7 @@ def test_discover_candidates_fallback_quotes_are_usable_by_filter_domestic(monke
     monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda *a: None)
 
     candidates = discover_candidates()
-    domestic, failed = filter_domestic(candidates)
+    domestic, failed, _hit_rate_limit = filter_domestic(candidates)
     assert domestic["REAL.SW"]["name"] == "Real Co"
     assert failed == []
 
@@ -409,7 +468,7 @@ def test_filter_domestic_batched_single_batch_matches_filter_domestic(monkeypatc
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
 
     candidates = _four_candidates()
-    domestic, failed = filter_domestic_batched(candidates, num_batches=1, batch_delay_seconds=999, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic_batched(candidates, num_batches=1, batch_delay_seconds=999, delay_seconds=0)
 
     assert set(domestic) == set(candidates)
     assert failed == []
@@ -425,7 +484,7 @@ def test_filter_domestic_batched_sleeps_between_but_not_after_last_batch(monkeyp
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", lambda symbol: _FakeTicker(_base_info()))
 
     candidates = _four_candidates()
-    domestic, failed = filter_domestic_batched(candidates, num_batches=4, batch_delay_seconds=42, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic_batched(candidates, num_batches=4, batch_delay_seconds=42, delay_seconds=0)
 
     assert set(domestic) == set(candidates)
     assert failed == []
@@ -444,10 +503,37 @@ def test_filter_domestic_batched_merges_results_and_failures_across_batches(monk
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
 
     candidates = _four_candidates()
-    domestic, failed = filter_domestic_batched(candidates, num_batches=2, batch_delay_seconds=0, delay_seconds=0)
+    domestic, failed, _hit_rate_limit = filter_domestic_batched(candidates, num_batches=2, batch_delay_seconds=0, delay_seconds=0)
 
     assert set(domestic) == {"T0.SW", "T1.SW", "T3.SW"}
     assert failed == ["T2.SW"]
+
+
+def test_filter_domestic_batched_stops_issuing_further_batches_after_rate_limit(monkeypatch):
+    # T0/T1 are batch 1, T2/T3 are batch 2 - batch 1's rate limit must
+    # stop batch 2 from ever being attempted (no sleep, no live calls),
+    # with T2/T3 still landing in failed_symbols for the next scheduled
+    # run's retry rather than silently vanishing.
+    sleep_calls = []
+    fetched = []
+
+    def fake_ticker(symbol):
+        fetched.append(symbol)
+        if symbol in ("T0.SW", "T1.SW"):
+            raise YFRateLimitError()
+        return _FakeTicker(_base_info())
+
+    monkeypatch.setattr(swiss_universe_module.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
+
+    candidates = _four_candidates()
+    domestic, failed, hit_rate_limit = filter_domestic_batched(candidates, num_batches=2, batch_delay_seconds=42, delay_seconds=0)
+
+    assert hit_rate_limit is True
+    assert domestic == {}
+    assert set(failed) == {"T0.SW", "T1.SW", "T2.SW", "T3.SW"}  # batch 2's tickers included even though never fetched
+    assert not any(s.startswith("T2") or s.startswith("T3") for s in fetched)  # batch 2 never actually attempted
+    assert 42 not in sleep_calls  # no inter-batch delay paid for a batch that never ran
 
 
 def test_discover_candidates_live_includes_smi_names(monkeypatch):

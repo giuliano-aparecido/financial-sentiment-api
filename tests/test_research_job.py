@@ -14,9 +14,11 @@ def reset_job_state():
     # whatever state a previous test left behind.
     research_job._today_slot = research_job._JobSlot()
     research_job._today_discovery_cache = research_job._new_discovery_cache()
+    research_job._yahoo_rate_limited_until = None
     yield
     research_job._today_slot = research_job._JobSlot()
     research_job._today_discovery_cache = research_job._new_discovery_cache()
+    research_job._yahoo_rate_limited_until = None
 
 
 def _wait_until(status_fn, deadline_seconds=2):
@@ -38,7 +40,7 @@ def _patch_discovery(monkeypatch, domestic=None, failed_symbols=None):
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", fake_discover)
     monkeypatch.setattr(
         research_job.swiss_universe, "filter_domestic",
-        lambda candidates: (domestic or {"NVDA.SW": {}}, failed_symbols or []),
+        lambda candidates: (domestic or {"NVDA.SW": {}}, failed_symbols or [], False),
     )
     return discover_calls
 
@@ -108,7 +110,7 @@ def test_discover_and_filter_fresh_day_runs_full_discovery(monkeypatch):
 
     def fake_filter(candidates):
         filter_calls.append(candidates)
-        return {"A.SW": {}, "B.SW": {}}, []
+        return {"A.SW": {}, "B.SW": {}}, [], False
 
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa", "B.SW": "qb"})
     monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", fake_filter)
@@ -129,7 +131,7 @@ def test_discover_and_filter_same_day_no_failures_is_pure_cache_hit(monkeypatch)
     filter_calls = []
 
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: (discover_calls.append(1), {"A.SW": "qa"})[1])
-    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: (filter_calls.append(candidates), ({"A.SW": {}}, []))[1])
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: (filter_calls.append(candidates), ({"A.SW": {}}, [], False))[1])
     monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
 
     cache = research_job._new_discovery_cache()
@@ -148,8 +150,8 @@ def test_discover_and_filter_same_day_retries_only_previously_failed_symbols(mon
     def fake_filter(candidates):
         filter_calls.append(dict(candidates))
         if len(filter_calls) == 1:
-            return {"A.SW": {}}, ["B.SW"]  # B.SW fails on the initial discovery pass
-        return {"B.SW": {}}, []  # B.SW succeeds on retry
+            return {"A.SW": {}}, ["B.SW"], False  # B.SW fails on the initial discovery pass
+        return {"B.SW": {}}, [], False  # B.SW succeeds on retry
 
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa", "B.SW": "qb"})
     monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", fake_filter)
@@ -178,8 +180,8 @@ def test_discover_and_filter_still_failing_symbols_stay_for_next_retry(monkeypat
     def fake_filter(candidates):
         filter_calls.append(dict(candidates))
         if len(filter_calls) == 1:
-            return {"A.SW": {}}, ["B.SW"]
-        return {}, ["B.SW"]  # still failing on retry
+            return {"A.SW": {}}, ["B.SW"], False
+        return {}, ["B.SW"], False  # still failing on retry
 
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa", "B.SW": "qb"})
     monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", fake_filter)
@@ -199,7 +201,7 @@ def test_discover_and_filter_new_day_rediscovers_full_universe_even_with_leftove
 
     def fake_filter(candidates):
         filter_calls.append(dict(candidates))
-        return {"A.SW": {}}, ["B.SW"]
+        return {"A.SW": {}}, ["B.SW"], False
 
     monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa", "B.SW": "qb"})
     monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", fake_filter)
@@ -215,6 +217,94 @@ def test_discover_and_filter_new_day_rediscovers_full_universe_even_with_leftove
     assert len(filter_calls) == 2
     assert filter_calls[1] == {"A.SW": "qa", "B.SW": "qb"}  # full re-discovery, not just the failed symbol
     assert cache["date"] == datetime.date(2026, 8, 11)
+
+
+# --- Rate-limit cooldown (added 2026-08-20) ---
+
+
+def test_discover_and_filter_rate_limit_with_no_data_at_all_raises_clear_error(monkeypatch):
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa"})
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: ({}, ["A.SW"], True))
+    monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
+
+    cache = research_job._new_discovery_cache()
+    with pytest.raises(research_job.YahooRateLimitedError):
+        research_job._discover_and_filter_with_retry(cache)
+
+    # A cooldown must now be active even though this call raised - the
+    # POINT is to stop the NEXT call from making live calls too.
+    assert research_job._yahoo_cooldown_remaining() is not None
+
+
+def test_discover_and_filter_rate_limit_with_partial_data_returns_it_without_raising(monkeypatch):
+    # Some candidates succeeded before the rate limit hit (e.g. they were
+    # already in flight) - partial real data is still useful, must not be
+    # discarded just because the batch also hit a rate limit.
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa", "B.SW": "qb"})
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: ({"A.SW": {}}, ["B.SW"], True))
+    monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
+
+    cache = research_job._new_discovery_cache()
+    domestic, changed = research_job._discover_and_filter_with_retry(cache)
+
+    assert domestic == {"A.SW": {}}
+    assert changed is True
+    assert research_job._yahoo_cooldown_remaining() is not None
+
+
+def test_discover_and_filter_skips_live_calls_while_cooldown_active(monkeypatch):
+    discover_calls = []
+    filter_calls = []
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: (discover_calls.append(1), {"A.SW": "qa"})[1])
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: (filter_calls.append(1), ({"A.SW": {}}, [], False))[1])
+    monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
+
+    cache = research_job._new_discovery_cache()
+    research_job._discover_and_filter_with_retry(cache)  # populates cache with real data
+    assert len(discover_calls) == 1
+
+    research_job._start_yahoo_cooldown()
+    domestic, changed = research_job._discover_and_filter_with_retry(cache)
+
+    assert domestic == {"A.SW": {}}  # served from cache
+    assert changed is False
+    assert len(discover_calls) == 1  # no new live call while cooldown is active
+    assert len(filter_calls) == 1
+
+
+def test_discover_and_filter_cooldown_with_nothing_cached_raises_instead_of_calling_live(monkeypatch):
+    discover_calls = []
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: (discover_calls.append(1), {"A.SW": "qa"})[1])
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: ({"A.SW": {}}, [], False))
+    monkeypatch.setattr(research_job, "_today", lambda: datetime.date(2026, 8, 10))
+
+    research_job._start_yahoo_cooldown()
+    cache = research_job._new_discovery_cache()  # fresh, nothing cached for today
+
+    with pytest.raises(research_job.YahooRateLimitedError):
+        research_job._discover_and_filter_with_retry(cache)
+    assert len(discover_calls) == 0  # never even attempted a live call
+
+
+def test_yahoo_cooldown_remaining_is_none_after_it_expires(monkeypatch):
+    research_job._start_yahoo_cooldown()
+    assert research_job._yahoo_cooldown_remaining() is not None
+
+    # Simulate the cooldown having already elapsed.
+    research_job._yahoo_rate_limited_until = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+    assert research_job._yahoo_cooldown_remaining() is None
+
+
+def test_today_scan_surfaces_clear_message_not_raw_exception_when_rate_limited(monkeypatch):
+    monkeypatch.setattr(research_job.swiss_universe, "discover_candidates", lambda: {"A.SW": "qa"})
+    monkeypatch.setattr(research_job.swiss_universe, "filter_domestic", lambda candidates: ({}, ["A.SW"], True))
+
+    research_job.start_today_scan()
+    status = _wait_until(research_job.get_today_status)
+
+    assert status["status"] == "error"
+    assert "Yahoo Finance is currently rate-limiting" in status["error"]
+    assert "YFRateLimitError" not in status["error"]  # no raw exception text leaking to the user
 
 
 # --- Today (big-loss) scan ---
