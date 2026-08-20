@@ -57,14 +57,26 @@ _MOVE_VERB_RE_FRAGMENT = (
     r"wobbl(?:e|es|ed|ing)|sink|dip(?:s|ped|ping)?|swoon(?:s|ed|ing)?|"
     r"spik(?:e|es|ed|ing)|skid(?:s|ded|ding)?)"
 )
+
+# 2026-08-20: two branches added/broadened after the fine-tune's Task A
+# eval surfaced these exact phrasings slipping through - "stock" added
+# as a subject alongside "shares" in the up/down/higher/lower branch,
+# and a new bait pattern for "Is X Still Y After Z" headlines whose
+# Z-clause names an actual price move (%, rally, surge, etc.) - kept
+# narrow after an early broader version false-positived on genuine
+# analysis headlines. See financial-sentiment-model's generate_real_
+# dataset.py module docstring for the full history/reasoning (ported
+# not imported, same convention as the rest of this filter).
 _LOW_CONTENT_HEADLINE_RE = re.compile(
     r"stock (?:is )?trad(?:ing|es) (?:up|down|higher|lower)"
-    r"|shares (?:are|is) (?:up|down|higher|lower) today"
+    r"|(?:shares|stock) (?:are|is) (?:up|down|higher|lower) today"
     r"|here.s why|here.s what (?:investors|we|you) (?:need to know|see)"
     r"|what you need to know|laps the stock market|what.s going on with"
     rf"|\bwhy\b.{{0,60}}\b(?:stock|shares?)\b.{{0,30}}\b{_MOVE_VERB_RE_FRAGMENT}\b"
     rf"|\b(?:stock|shares?)\b.{{0,20}}\b(?:is|are)\b.{{0,10}}\b{_MOVE_VERB_RE_FRAGMENT}(?:ing)?\b"
-    r"|^Is .+ a Good Stock|Stock a (?:Good )?Buy\b|^Should You Buy|Buy,? Hold,? (?:or|and) Sell"
+    r"|^Is .+ a Good Stock"
+    r"|^Is .{1,60}\bStill\b.{1,25}\bAfter\b.{0,40}(?:\d+%|rally|surge|drop|plunge|rout|gain|dip|slump|rebound)"
+    r"|Stock a (?:Good )?Buy\b|^Should You Buy|Buy,? Hold,? (?:or|and) Sell"
     r"|^\d+ (?:Reasons?|Stocks?)|Better Buy|Zacks (?:Investment|Rank)|Trending Stock"
     r"|shares (?:added to|removed from|acquired by|sold by|purchased by)"
     r"|^[\d,]+\+? Shares (?:in|of)|(?:Buys|Purchases?|Sells) Shares (?:in|of)"

@@ -72,6 +72,25 @@ def test_low_content_headline_leaves_real_news_alone():
     assert not news._is_low_content_headline("Tesla signs major Arizona power deal")
 
 
+def test_low_content_headline_catches_stock_is_up_today_not_just_shares_are_up_today():
+    assert news._is_low_content_headline("Why Netflix (NFLX) Stock Is Up Today")
+    assert news._is_low_content_headline("NVDA Stock Is Down Today")
+
+
+def test_low_content_headline_catches_is_x_still_attractive_after_bait_variant():
+    assert news._is_low_content_headline("Is Exxon Mobil (XOM) Still Attractive After A 49% One Year Share Price Surge?")
+    assert news._is_low_content_headline("Is Tesla Still a Buy After Its Recent Rally?")
+
+
+def test_low_content_headline_does_not_catch_genuine_is_x_still_after_analysis_headline():
+    # Regression: an early version of this pattern matched ANY "Is X
+    # Still Y After Z" shape regardless of what Z was about - the final
+    # version requires Z to itself name a price move.
+    assert not news._is_low_content_headline(
+        "Is the Federal Reserve Still Fighting Inflation After the Latest CPI Report Showed a Surprise Uptick"
+    )
+
+
 # --- _is_relevant_headline ---
 
 
