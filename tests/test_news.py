@@ -1,4 +1,5 @@
 import datetime
+import urllib.parse
 
 from app.services import news
 
@@ -146,6 +147,40 @@ def test_selects_most_recent_among_multiple_relevant_candidates(monkeypatch):
     result, published_date = news.fetch_live_news_rag("ORCL", "Oracle", "Technology")
     assert "Oracle cuts guidance" in result
     assert published_date == datetime.date(2026, 6, 22)
+
+
+def test_query_strips_exchange_suffix_before_searching(monkeypatch):
+    # Regression: once app.services.ticker started preserving an explicit
+    # exchange suffix ("$ARYN.SW" -> "ARYN.SW"), the SAME suffixed value
+    # flowed into the Google News query here - confirmed live, "ARYN.SW
+    # stock earnings financial news" returns ZERO results (no article's
+    # text contains that literal token), while the bare ticker or company
+    # name both return real results.
+    captured_urls = []
+    monkeypatch.setattr(news.httpx, "get", lambda url, timeout=None: (captured_urls.append(url), FakeResponse())[1])
+    monkeypatch.setattr(news.feedparser, "parse", lambda content: FakeFeed([
+        _entry("ARYZTA (SWX:ARYN) posts wider losses - Reuters"),
+    ]))
+
+    news.fetch_live_news_rag("ARYN.SW", "Aryzta", "Consumer Defensive")
+
+    assert len(captured_urls) == 1
+    assert "SW" not in urllib.parse.unquote(captured_urls[0]).split("q=")[1].split("&")[0]
+    assert "ARYN" in urllib.parse.unquote(captured_urls[0])
+
+
+def test_relevance_filter_matches_bare_ticker_when_input_has_exchange_suffix(monkeypatch):
+    # Same regression, the other direction: a headline that only ever
+    # writes the bare ticker ("SWX:ARYN") must still be recognized as
+    # relevant even though the ticker passed in has ".SW" attached -
+    # re.escape("ARYN.SW") would otherwise require the literal ".SW" text
+    # to appear in the headline too, which real articles never write.
+    _install(monkeypatch, [
+        _entry("ARYZTA (SWX:ARYN) posts wider losses - Reuters"),
+    ])
+    result, _published_date = news.fetch_live_news_rag("ARYN.SW", "Aryzta", "Consumer Defensive")
+    assert "ARYZTA" in result
+    assert result != "Data unavailable."
 
 
 def test_filters_out_low_quality_publisher(monkeypatch):

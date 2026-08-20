@@ -9,6 +9,24 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Strips a Yahoo-style exchange suffix (".SW", ".DE", ...) before using a
+# ticker for full-text search or headline matching - added 2026-08-20,
+# real bug found live: once app.services.ticker's cashtag regex started
+# preserving an explicit suffix ("$ARYN.SW" -> "ARYN.SW", see that
+# module's own history), the SAME suffixed value flowed into this file's
+# Google News query and into _is_relevant_headline's ticker match. Google
+# News search treats "ARYN.SW" as a literal token no article's text
+# actually contains - confirmed live: "ARYN.SW stock earnings financial
+# news" returned 0 entries, while the bare "ARYN stock earnings financial
+# news" returned 23 and the company name returned 38. The relevance
+# filter had the identical problem in reverse - re.escape("ARYN.SW")
+# requires the literal ".SW" in the headline text too, so a real,
+# relevant headline that only ever writes the bare ticker ("ARYZTA
+# (SWX:ARYN)") would have been wrongly rejected. yfinance calls
+# (fundamentals.py) still need and use the full suffixed ticker - only
+# this module's search/matching needs it stripped.
+_EXCHANGE_SUFFIX_RE = re.compile(r"\.[A-Za-z]{1,3}$")
+
 PUBLISHER_FALLBACK = "Google News"
 
 # How many raw RSS entries to consider as candidates before filtering -
@@ -226,8 +244,9 @@ def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.d
     ("Data unavailable.", None) if the feed is empty or every entry fails
     to parse, or on any fetch error.
     """
+    search_ticker = _EXCHANGE_SUFFIX_RE.sub("", ticker)
     try:
-        query = f"{ticker} stock earnings financial news"
+        query = f"{search_ticker} stock earnings financial news"
         encoded_query = urllib.parse.quote(query)
         rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
@@ -258,7 +277,7 @@ def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.d
             c for c in candidates
             if c.publisher not in LOW_QUALITY_PUBLISHERS and not _is_low_content_headline(c.title)
         ]
-        relevant = [c for c in quality_filtered if _is_relevant_headline(ticker, name, sector, c.title)]
+        relevant = [c for c in quality_filtered if _is_relevant_headline(search_ticker, name, sector, c.title)]
 
         if relevant:
             selected = _most_recent(relevant)
