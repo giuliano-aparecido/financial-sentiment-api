@@ -184,5 +184,5 @@ the test suite on every push/PR to `master`.
 ## Contributing
 
 No dedicated `CONTRIBUTING.md` yet, but the fleet-wide default (see the
-`CLAUDE.md` one directory up, outside this repo, alongside its sibling
+`AGENTS.md` one directory up, outside this repo, alongside its sibling
 repos) applies: **branch + PR, never push directly to `main`/`master`.**
