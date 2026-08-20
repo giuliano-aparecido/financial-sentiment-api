@@ -48,3 +48,32 @@ def test_falls_back_when_query_names_a_ticker_that_is_purely_lowercase():
     # match the fallback heuristic's \b[A-Z]{2,5}\b pattern, so this is
     # correctly a fallback, not a false positive.
     assert extract_ticker("what about aapl") == ("AAPL", False)
+
+
+def test_cashtag_preserves_explicit_exchange_suffix():
+    # Regression: an explicit "$ARYN.SW" used to have ".SW" silently
+    # stripped, forcing a dependency on fundamentals.resolve_ticker's
+    # live Yahoo search call to add it back - which can fail
+    # independently of whether the user already gave the right answer.
+    assert extract_ticker("Is $ARYN.SW a good investment now for long term?") == ("ARYN.SW", True)
+
+
+def test_cashtag_suffix_is_uppercased_with_the_rest():
+    assert extract_ticker("thoughts on $nesn.sw") == ("NESN.SW", True)
+
+
+def test_cashtag_without_suffix_still_works_unchanged():
+    assert extract_ticker("what about $NESN") == ("NESN", True)
+
+
+def test_cashtag_does_not_swallow_trailing_sentence_after_period():
+    # A period followed by a SPACE (a real sentence boundary) must not be
+    # mistaken for the start of an exchange suffix.
+    assert extract_ticker("$AAPL. Great stock overall.") == ("AAPL", True)
+
+
+def test_cashtag_does_not_swallow_overlong_trailing_text():
+    # "something-longer-here" is far more than a 1-3 letter exchange
+    # suffix - must fall back to just the base ticker, not a partial
+    # garbage match.
+    assert extract_ticker("$TSLA.something-longer-here") == ("TSLA", True)
