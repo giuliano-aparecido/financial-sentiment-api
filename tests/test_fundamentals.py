@@ -1,8 +1,13 @@
+import datetime
+
+import pandas as pd
+
 import app.services.fundamentals as fundamentals_module
 from app.services.fundamentals import (
     fetch_fundamentals,
     format_market_cap,
     market_data_block,
+    price_move_on_date,
     resolve_ticker,
     value_screen_metrics,
 )
@@ -201,3 +206,89 @@ def test_fetch_fundamentals_none_when_resolved_symbol_also_has_no_price(monkeypa
     monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(tickers[symbol]))
     monkeypatch.setattr(fundamentals_module.yf, "Search", lambda q: _FakeSearch([{"symbol": "NESN.SW", "quoteType": "EQUITY"}]))
     assert fetch_fundamentals("NESN") is None
+
+
+# --- price_move_on_date ---
+
+
+class _FakeHistoryTicker:
+    def __init__(self, hist):
+        self._hist = hist
+
+    def history(self, start=None, end=None):
+        return self._hist
+
+
+def _make_hist(rows):
+    """rows: list of (date, close) - builds a tz-naive DatetimeIndex'd
+    DataFrame the way yfinance's Ticker.history returns one."""
+    index = pd.DatetimeIndex([d for d, _ in rows])
+    return pd.DataFrame({"Close": [c for _, c in rows]}, index=index)
+
+
+# Mon 06-15 through Fri 06-19, then Mon 06-22 - a real trading calendar
+# (weekend gap between 06-19 and 06-22) used by several tests below.
+_WEEK_HIST = _make_hist([
+    (datetime.date(2026, 6, 15), 100.0),
+    (datetime.date(2026, 6, 16), 102.0),
+    (datetime.date(2026, 6, 17), 108.0),
+    (datetime.date(2026, 6, 18), 107.0),
+    (datetime.date(2026, 6, 19), 110.0),
+    (datetime.date(2026, 6, 22), 112.0),
+])
+
+
+def test_price_move_on_date_computes_single_day_move_not_trailing_window(monkeypatch):
+    # published on 06-17 (close 108) vs the PRECEDING day 06-16 (close
+    # 102) - not a multi-day trailing/cumulative figure.
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeHistoryTicker(_WEEK_HIST))
+    text, move_fraction = price_move_on_date("AAPL", datetime.date(2026, 6, 17))
+    assert move_fraction == (108.0 - 102.0) / 102.0
+    assert text == "AAPL moved +5.9% on the day this was published."
+
+
+def test_price_move_on_date_rolls_forward_across_weekend(monkeypatch):
+    # published Saturday 06-20 (not a trading day) - day-0 should roll
+    # forward to the next trading day, Monday 06-22 (close 112), vs the
+    # preceding trading day 06-19 (close 110).
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeHistoryTicker(_WEEK_HIST))
+    text, move_fraction = price_move_on_date("AAPL", datetime.date(2026, 6, 20))
+    assert move_fraction == (112.0 - 110.0) / 110.0
+    assert "AAPL moved" in text
+
+
+def test_price_move_on_date_none_when_published_date_is_none(monkeypatch):
+    called = []
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: called.append(symbol))
+    text, move_fraction = price_move_on_date("AAPL", None)
+    assert text == "Data unavailable."
+    assert move_fraction is None
+    assert called == []  # no yfinance call at all - nothing to look up
+
+
+def test_price_move_on_date_none_when_no_prior_trading_day_in_window(monkeypatch):
+    # published_date lands on the FIRST row of the fetched history - no
+    # preceding close available inside the window.
+    hist = _make_hist([(datetime.date(2026, 6, 17), 108.0), (datetime.date(2026, 6, 18), 107.0)])
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeHistoryTicker(hist))
+    text, move_fraction = price_move_on_date("AAPL", datetime.date(2026, 6, 17))
+    assert text == "Data unavailable."
+    assert move_fraction is None
+
+
+def test_price_move_on_date_none_when_history_empty(monkeypatch):
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeHistoryTicker(pd.DataFrame({"Close": []})))
+    text, move_fraction = price_move_on_date("AAPL", datetime.date(2026, 6, 17))
+    assert text == "Data unavailable."
+    assert move_fraction is None
+
+
+def test_price_move_on_date_none_on_fetch_failure(monkeypatch):
+    class _RaisingTicker:
+        def history(self, start=None, end=None):
+            raise RuntimeError("yfinance unavailable")
+
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _RaisingTicker())
+    text, move_fraction = price_move_on_date("AAPL", datetime.date(2026, 6, 17))
+    assert text == "Data unavailable."
+    assert move_fraction is None
