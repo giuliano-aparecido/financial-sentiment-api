@@ -31,8 +31,15 @@ async def lifespan(_app: FastAPI):
     # module first triggers a fetch), so seeding it here at startup - before
     # any request-path code gets a chance to make its OWN unseeded,
     # blocked-by-default crumb fetch - covers every yfinance call in the
-    # app, not just the research pages.
-    swiss_universe._seed_yf_session_from_env()
+    # app, not just the research pages. Wrapped defensively - this reads
+    # externally-set env vars (YF_SEED_COOKIES is JSON) and must never be
+    # able to take down the whole app's startup just because that value
+    # is malformed or missing; degrading to "no seed this boot" is far
+    # better than the entire service failing to come up.
+    try:
+        swiss_universe._seed_yf_session_from_env()
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to seed yfinance crumb/cookies at startup - continuing without a seed")
     # In-process cron for the rebound/volatility-indicator research scans -
     # see app/services/scheduler.py's own docstring for why this lives here
     # instead of an external trigger.
