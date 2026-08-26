@@ -38,15 +38,15 @@ concurrently for the same table, but never chosen automatically by
 trigger_rebound_scan()/trigger_indicator_scan() itself.
 
 Reliability note: this process is on Render's free tier (15-minute
-spin-down), currently kept warm 24/7 by an external UptimeRobot ping to
-/health - unrelated to this feature, already true for the live /api/
-analyze endpoint. That keeps APScheduler's cron firing close to on-time in
-the common case, but isn't something this module depends on for
-correctness: _catch_up_if_stale runs on every app startup and immediately
-schedules a same-process run for whichever table hasn't been scanned
-within its expected cadence, so a scan that got missed (a redeploy landing
-exactly at 04:00, a rare UptimeRobot gap) just runs a bit late instead of
-being silently skipped - fine for tables whose whole premise is "this
+spin-down) and free-sleeps whenever idle - nothing keeps it warm 24/7
+anymore, so APScheduler's cron trigger will routinely miss its exact
+firing time while the process is asleep. Not something this module
+depends on for correctness though: _catch_up_if_stale runs on every app
+startup and immediately schedules a same-process run for whichever table
+hasn't been scanned within its expected cadence, so a scan that got
+missed (asleep through 04:00, a redeploy landing at the wrong moment)
+just runs a bit late - whenever something next wakes the process - instead
+of being silently skipped. Fine for tables whose whole premise is "this
 doesn't change day to day."
 
 Batching (also explicit, "divide the swiss universe in 3, 4 or 5 batches
