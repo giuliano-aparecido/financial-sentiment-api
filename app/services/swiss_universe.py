@@ -539,10 +539,12 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
         country = info.get("country")
         avg_volume_10d = info.get("averageDailyVolume10Day")
         if country != "Switzerland":
-            print(f"  skip {symbol}: domiciled in {country!r}, not Switzerland")
+            logger.info("skip %s: domiciled in %r, not Switzerland", symbol, country)
             return symbol, None, False, False
         if avg_volume_10d is None or avg_volume_10d < MIN_AVG_DAILY_VOLUME_10D:
-            print(f"  skip {symbol}: 10-day avg volume {avg_volume_10d!r} below {MIN_AVG_DAILY_VOLUME_10D} floor")
+            logger.info(
+                "skip %s: 10-day avg volume %r below %d floor", symbol, avg_volume_10d, MIN_AVG_DAILY_VOLUME_10D
+            )
             return symbol, None, False, False
         return symbol, {
             "name": quote.get("longName") or quote.get("shortName") or symbol,
@@ -570,10 +572,10 @@ def _fetch_domestic_entry(symbol, quote, delay_seconds):
             "quote": quote,
         }, False, False
     except YFRateLimitError as e:
-        print(f"  skip {symbol}: info fetch failed ({e!r}) - Yahoo rate limit, not ticker-specific")
+        logger.warning("skip %s: info fetch failed (%r) - Yahoo rate limit, not ticker-specific", symbol, e)
         return symbol, None, True, True
     except Exception as e:
-        print(f"  skip {symbol}: info fetch failed ({e!r})")
+        logger.warning("skip %s: info fetch failed (%r)", symbol, e)
         return symbol, None, True, False
     finally:
         time.sleep(delay_seconds)

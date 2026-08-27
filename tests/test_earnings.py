@@ -31,6 +31,19 @@ def test_earnings_block_reports_in_line():
     assert "in line with est. $1.35" in earnings_block(earnings)
 
 
+def test_earnings_block_reports_in_line_within_float_tolerance():
+    # 0.003 diff, inside the 0.005 tolerance - not exactly equal to eps_estimate,
+    # but still "in line" rather than a spurious "beat".
+    earnings = {**FULL_EARNINGS, "eps_actual": 1.353}
+    assert "in line with est. $1.35" in earnings_block(earnings)
+
+
+def test_earnings_block_reports_beat_just_outside_float_tolerance():
+    # 0.006 diff, just past the 0.005 tolerance - must not collapse into "in line".
+    earnings = {**FULL_EARNINGS, "eps_actual": 1.356}
+    assert "beat est. $1.35" in earnings_block(earnings)
+
+
 def test_earnings_block_omits_yoy_when_unavailable():
     earnings = {**FULL_EARNINGS, "yoy_growth_pct": None}
     block = earnings_block(earnings)

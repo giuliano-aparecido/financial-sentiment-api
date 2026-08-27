@@ -1,5 +1,6 @@
 import datetime
 import logging
+import math
 
 import yfinance as yf
 
@@ -113,12 +114,15 @@ def earnings_block(earnings: dict | None) -> str:
     eps_note = ""
     actual, estimate = earnings.get("eps_actual"), earnings.get("eps_estimate")
     if actual is not None and estimate:
-        if actual > estimate:
-            eps_note = f", EPS ${actual:.2f} (beat est. ${estimate:.2f})"
-        elif actual < estimate:
-            eps_note = f", EPS ${actual:.2f} (missed est. ${estimate:.2f})"
-        else:
+        # abs_tol=0.005 (half a cent) rather than exact equality - actual/estimate
+        # are floats from yfinance, and values that display as the same 2-decimal
+        # EPS shouldn't be reported as a "beat"/"miss" over float noise.
+        if math.isclose(actual, estimate, abs_tol=0.005):
             eps_note = f", EPS ${actual:.2f} (in line with est. ${estimate:.2f})"
+        elif actual > estimate:
+            eps_note = f", EPS ${actual:.2f} (beat est. ${estimate:.2f})"
+        else:
+            eps_note = f", EPS ${actual:.2f} (missed est. ${estimate:.2f})"
 
     next_line = ""
     if earnings.get("next_earnings_date"):
