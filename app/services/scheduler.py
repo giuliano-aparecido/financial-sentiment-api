@@ -62,6 +62,7 @@ import datetime
 import logging
 import os
 import threading
+from collections.abc import Callable
 
 import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -102,6 +103,37 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict]:
     return df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
 
+def _run_guarded(
+    lock: threading.Lock,
+    get_running: Callable[[], bool],
+    set_running: Callable[[bool], None],
+    work: Callable[[], None],
+    *,
+    busy_message: str,
+    failure_message: str,
+) -> None:
+    """Single-flight wrapper shared by the rebound/indicator scan+retry
+    guarded entry points below: acquire lock, no-op if already running,
+    else mark running, run `work` (logging+swallowing any exception so a
+    failed scan doesn't crash the scheduler thread), then always clear
+    the running flag. `get_running`/`set_running` read/write the
+    relevant module-level `_rebound_running`/`_indicator_running` flag -
+    passed as callables rather than a shared mutable object since these
+    are plain module globals, not instance state."""
+    with lock:
+        if get_running():
+            logger.info(busy_message)
+            return
+        set_running(True)
+    try:
+        work()
+    except Exception:
+        logger.exception(failure_message)
+    finally:
+        with lock:
+            set_running(False)
+
+
 def _discover_domestic_batched() -> tuple[dict, list[str]]:
     candidates = swiss_universe.discover_candidates()
     # `hit_rate_limit` (2026-08-20 addition to filter_domestic_batched -
@@ -131,6 +163,11 @@ _rebound_running = False
 
 def is_rebound_scan_running() -> bool:
     return _rebound_running
+
+
+def _set_rebound_running(value: bool) -> None:
+    global _rebound_running
+    _rebound_running = value
 
 
 def _run_rebound_scan() -> None:
@@ -189,19 +226,11 @@ def _run_rebound_scan_guarded() -> None:
     functions via the event loop's default executor (a thread pool), not
     on the event loop itself, so this never blocks request handling while
     it runs (see apscheduler.executors.asyncio.AsyncIOExecutor)."""
-    global _rebound_running
-    with _rebound_lock:
-        if _rebound_running:
-            logger.info("Rebound scan requested but one is already running - no-op")
-            return
-        _rebound_running = True
-    try:
-        _run_rebound_scan()
-    except Exception:
-        logger.exception("Rebound scan failed")
-    finally:
-        with _rebound_lock:
-            _rebound_running = False
+    _run_guarded(
+        _rebound_lock, is_rebound_scan_running, _set_rebound_running, _run_rebound_scan,
+        busy_message="Rebound scan requested but one is already running - no-op",
+        failure_message="Rebound scan failed",
+    )
 
 
 def trigger_rebound_scan() -> bool:
@@ -225,19 +254,12 @@ def _retry_failed_rebound_tickers_guarded(scan_run_at: datetime.datetime, failed
     _run_rebound_scan_guarded (a retry and a full scan of the same table
     must never run concurrently), but runs _retry_failed_rebound_tickers
     instead."""
-    global _rebound_running
-    with _rebound_lock:
-        if _rebound_running:
-            logger.info("Rebound retry requested but a scan is already running - no-op")
-            return
-        _rebound_running = True
-    try:
-        _retry_failed_rebound_tickers(scan_run_at, failed_tickers)
-    except Exception:
-        logger.exception("Rebound retry failed")
-    finally:
-        with _rebound_lock:
-            _rebound_running = False
+    _run_guarded(
+        _rebound_lock, is_rebound_scan_running, _set_rebound_running,
+        lambda: _retry_failed_rebound_tickers(scan_run_at, failed_tickers),
+        busy_message="Rebound retry requested but a scan is already running - no-op",
+        failure_message="Rebound retry failed",
+    )
 
 
 def trigger_rebound_retry() -> bool:
@@ -269,6 +291,11 @@ _indicator_running = False
 
 def is_indicator_scan_running() -> bool:
     return _indicator_running
+
+
+def _set_indicator_running(value: bool) -> None:
+    global _indicator_running
+    _indicator_running = value
 
 
 def _run_indicator_scans() -> None:
@@ -320,19 +347,11 @@ def _run_indicator_scans_guarded() -> None:
     """Cron job function AND the full-scan manual trigger's background-
     thread target. See _run_rebound_scan_guarded's own docstring
     (identical reasoning, this is its indicator counterpart)."""
-    global _indicator_running
-    with _indicator_lock:
-        if _indicator_running:
-            logger.info("Volatility-indicator scan requested but one is already running - no-op")
-            return
-        _indicator_running = True
-    try:
-        _run_indicator_scans()
-    except Exception:
-        logger.exception("Volatility-indicator scan failed")
-    finally:
-        with _indicator_lock:
-            _indicator_running = False
+    _run_guarded(
+        _indicator_lock, is_indicator_scan_running, _set_indicator_running, _run_indicator_scans,
+        busy_message="Volatility-indicator scan requested but one is already running - no-op",
+        failure_message="Volatility-indicator scan failed",
+    )
 
 
 def trigger_indicator_scan() -> bool:
@@ -351,19 +370,12 @@ def trigger_indicator_scan() -> bool:
 def _retry_failed_indicator_tickers_guarded(scan_run_at: datetime.datetime, failed_tickers: list[str]) -> None:
     """trigger_indicator_retry's background-thread target - same lock as
     _run_indicator_scans_guarded."""
-    global _indicator_running
-    with _indicator_lock:
-        if _indicator_running:
-            logger.info("Volatility-indicator retry requested but a scan is already running - no-op")
-            return
-        _indicator_running = True
-    try:
-        _retry_failed_indicator_tickers(scan_run_at, failed_tickers)
-    except Exception:
-        logger.exception("Volatility-indicator retry failed")
-    finally:
-        with _indicator_lock:
-            _indicator_running = False
+    _run_guarded(
+        _indicator_lock, is_indicator_scan_running, _set_indicator_running,
+        lambda: _retry_failed_indicator_tickers(scan_run_at, failed_tickers),
+        busy_message="Volatility-indicator retry requested but a scan is already running - no-op",
+        failure_message="Volatility-indicator retry failed",
+    )
 
 
 def trigger_indicator_retry() -> bool:
