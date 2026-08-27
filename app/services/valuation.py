@@ -57,8 +57,21 @@
 # ported there - see this repo's PR history for the staged-rollout plan).
 
 import logging
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
+
+
+class BasisValuation(NamedTuple):
+    """The (basis, cf0, scenarios, intrinsic) 4-tuple that travels through
+    the blend/fallback steps of valuation_assessment_for - named so it
+    doesn't rely on positional order at every call site.
+    """
+
+    basis: str
+    cf0: float | None
+    scenarios: dict
+    intrinsic: float | None
 
 STAGE_1_YEARS = 5
 STAGE_2_YEARS = 5
@@ -686,14 +699,22 @@ def cash_flow_basis_value(basis: str, fundamentals: dict) -> float | None:
     return None
 
 
-def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[str, dict]:
-    """Assembles this company's normal/best/worst g1/g2/exit_multiple/
-    probability. Curated tickers (CURATED_SCENARIOS) use the analyst's
-    exact numbers verbatim. Everyone else is assembled from three
-    independently-sourced pieces, each confirmed live rather than a single
-    invented "generic" bundle:
+def _curated_scenarios(ticker: str | None, basis: str) -> dict[str, dict] | None:
+    """Curated tickers (CURATED_SCENARIOS) use the analyst's exact numbers
+    verbatim, bypassing the derived g1/g2/exit_multiple pipeline below
+    entirely. Returns None when this ticker/basis isn't curated, so the
+    caller falls through to the derived path.
+    """
+    if ticker and ticker in CURATED_SCENARIOS and CURATED_SCENARIOS_BASIS.get(ticker) == basis:
+        return {
+            name: {**scenario, "probability": SCENARIO_PROBABILITY}
+            for name, scenario in CURATED_SCENARIOS[ticker].items()
+        }
+    return None
 
-    - g1 (years 1-5 growth): a three-tier waterfall, each tier only used
+
+def _compute_g1_values(fundamentals: dict) -> dict[str, float]:
+    """g1 (years 1-5 growth): a three-tier waterfall, each tier only used
       when the one before it isn't usable. (1) A same-direction 0y/+1y
       consensus growth estimate (see fundamentals.fetch_fundamentals'
       growth_0y/growth_1y/growth_0y_low/growth_0y_high) - real analyst
@@ -712,28 +733,7 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
       G1_FALLBACK - a flat "average company" assumption, only when neither
       real data nor fundamentals are usable. Falling back at any tier is a
       deliberate "don't know", not a confidently wrong derived number.
-    - g2 (years 6-10 growth): GROWTH_BASIS_G2 for "eps"/"fcf"/"revenue"
-      (confirmed pattern - see its comment), or set equal to this
-      scenario's own g1 for "dividends" (a mature payer doesn't fade
-      further - also confirmed, see GROWTH_BASIS_G2's comment).
-    - exit_multiple: "revenue" uses the flat REVENUE_*_EXIT_MULTIPLE
-      constants (a P/S-style multiple - see their comment). "dividends"
-      shares eps/fcf's flat defaults (no confirmed evidence it needs a
-      different multiple - see the reverted DIVIDEND_*_EXIT_MULTIPLE
-      comment). "eps"/"fcf" anchor the normal exit multiple to
-      min(NORMAL_EXIT_MULTIPLE, max(this sector's SECTOR_MEDIAN_PE, the
-      company's OWN current trailing P/E)) - see that block's own comment
-      for why min() rather than the sector median outright, and why the
-      own-P/E floor exists; worst case uses
-      WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity sectors
-      (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT.
     """
-    if ticker and ticker in CURATED_SCENARIOS and CURATED_SCENARIOS_BASIS.get(ticker) == basis:
-        return {
-            name: {**scenario, "probability": SCENARIO_PROBABILITY}
-            for name, scenario in CURATED_SCENARIOS[ticker].items()
-        }
-
     g1_values = dict(G1_FALLBACK)
 
     sustainable_g1 = _sustainable_growth_rate(fundamentals)
@@ -796,48 +796,70 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
     # sources above (fallback/derived-normal/derived-best) so nothing
     # downstream of this point ever sees an un-bounded g1, regardless of
     # which source set it.
-    g1_values = {name: max(min(value, G1_CAP), G1_FLOOR) for name, value in g1_values.items()}
+    return {name: max(min(value, G1_CAP), G1_FLOOR) for name, value in g1_values.items()}
 
+
+def _compute_g2_values(basis: str, g1_values: dict[str, float]) -> dict[str, float]:
+    """g2 (years 6-10 growth): GROWTH_BASIS_G2 for "eps"/"fcf"/"revenue"
+    (confirmed pattern - see its comment), or set equal to this
+    scenario's own g1 for "dividends" (a mature payer doesn't fade
+    further - also confirmed, see GROWTH_BASIS_G2's comment).
+    """
     if basis == "dividends":
         # dividends' g2 = g1 (see GROWTH_BASIS_G2's comment for why that's
         # usually right for a mature payer) gets its OWN, separate floor
         # here - see G2_DIVIDENDS_FLOOR's own comment for why a temporary
         # dip (g1's claim) and a decade-long fade (g2's claim, if left as
         # a raw copy of a deeply negative g1) aren't the same claim.
-        g2_values = {name: max(value, G2_DIVIDENDS_FLOOR) for name, value in g1_values.items()}
-    else:
-        # g2 = min(the flat GROWTH_BASIS_G2 default, this SAME scenario's
-        # own g1) - not the flat default unconditionally. Originally only
-        # applied to the worst tier (a structurally declining company -
-        # a genuine "value trap" - was otherwise mathematically
-        # unrepresentable, since a fixed +4% worst-case g2 put a floor
-        # under how bad the worst case could ever look). Generalized to
-        # normal/best after re-examining what GROWTH_BASIS_G2's own
-        # "confirmed live" calibration actually shows: across all 6
-        # CURATED_SCENARIOS tickers and all 3 tiers (18 g1/g2 pairs
-        # total), g2 <= g1 in EVERY SINGLE case - AAPL/XOM/PEP even show
-        # g2 == g1 at their normal/best tiers. The flat 0.10/0.12 defaults
-        # only ever matched cases where g1 already happened to be
-        # positive and above them (NVDA 30%->10%, MSFT 15%->10%, NFLX
-        # 12%->10%, all real fades DOWN); applying those SAME flat values
-        # when g1 is small or negative was an unevidenced extrapolation
-        # in the untested direction - confirmed live it produced QCOM's
-        # "normal" scenario projecting years 1-5 at -7.8% (QCOM's own
-        # real, negative analyst consensus) then flipping to +10% GROWTH
-        # for years 6-10 with no basis for assuming that reversal. min()
-        # makes "hold at the already-identified rate" the default
-        # assumption instead of "assume an unexplained rebound to a
-        # fixed target" - consistent with every real analyst-vetted
-        # example on file, not just the worst tier's.
-        g2_values = {name: min(GROWTH_BASIS_G2[name], g1_values[name]) for name in GROWTH_BASIS_G2}
+        return {name: max(value, G2_DIVIDENDS_FLOOR) for name, value in g1_values.items()}
 
+    # g2 = min(the flat GROWTH_BASIS_G2 default, this SAME scenario's
+    # own g1) - not the flat default unconditionally. Originally only
+    # applied to the worst tier (a structurally declining company -
+    # a genuine "value trap" - was otherwise mathematically
+    # unrepresentable, since a fixed +4% worst-case g2 put a floor
+    # under how bad the worst case could ever look). Generalized to
+    # normal/best after re-examining what GROWTH_BASIS_G2's own
+    # "confirmed live" calibration actually shows: across all 6
+    # CURATED_SCENARIOS tickers and all 3 tiers (18 g1/g2 pairs
+    # total), g2 <= g1 in EVERY SINGLE case - AAPL/XOM/PEP even show
+    # g2 == g1 at their normal/best tiers. The flat 0.10/0.12 defaults
+    # only ever matched cases where g1 already happened to be
+    # positive and above them (NVDA 30%->10%, MSFT 15%->10%, NFLX
+    # 12%->10%, all real fades DOWN); applying those SAME flat values
+    # when g1 is small or negative was an unevidenced extrapolation
+    # in the untested direction - confirmed live it produced QCOM's
+    # "normal" scenario projecting years 1-5 at -7.8% (QCOM's own
+    # real, negative analyst consensus) then flipping to +10% GROWTH
+    # for years 6-10 with no basis for assuming that reversal. min()
+    # makes "hold at the already-identified rate" the default
+    # assumption instead of "assume an unexplained rebound to a
+    # fixed target" - consistent with every real analyst-vetted
+    # example on file, not just the worst tier's.
+    return {name: min(GROWTH_BASIS_G2[name], g1_values[name]) for name in GROWTH_BASIS_G2}
+
+
+def _compute_exit_multiples(basis: str, fundamentals: dict) -> dict[str, float]:
+    """exit_multiple: "revenue" uses the flat REVENUE_*_EXIT_MULTIPLE
+    constants (a P/S-style multiple - see their comment). "dividends"
+    shares eps/fcf's flat defaults (no confirmed evidence it needs a
+    different multiple - see the reverted DIVIDEND_*_EXIT_MULTIPLE
+    comment). "eps"/"fcf" anchor the normal exit multiple to
+    min(NORMAL_EXIT_MULTIPLE, max(this sector's SECTOR_MEDIAN_PE, the
+    company's OWN current trailing P/E)) - see that block's own comment
+    for why min() rather than the sector median outright, and why the
+    own-P/E floor exists; worst case uses
+    WORST_EXIT_MULTIPLE_ASSET_HEAVY for cyclical/commodity sectors
+    (ASSET_HEAVY_SECTORS), else WORST_EXIT_MULTIPLE_DEFAULT.
+    """
     if basis == "revenue":
-        exit_multiples = {
+        return {
             "normal": REVENUE_NORMAL_EXIT_MULTIPLE,
             "best": REVENUE_BEST_EXIT_MULTIPLE,
             "worst": REVENUE_WORST_EXIT_MULTIPLE,
         }
-    elif basis == "dividends":
+
+    if basis == "dividends":
         # Shares the flat eps/fcf normal/best defaults rather than a
         # separate, sector-anchored, or yield-theoretic set - see the
         # reverted DIVIDEND_*_EXIT_MULTIPLE comment above for why: no
@@ -851,55 +873,72 @@ def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[
             WORST_EXIT_MULTIPLE_ASSET_HEAVY if fundamentals.get("sector") in ASSET_HEAVY_SECTORS
             else WORST_EXIT_MULTIPLE_DEFAULT
         )
-        exit_multiples = {"normal": NORMAL_EXIT_MULTIPLE, "best": BEST_EXIT_MULTIPLE, "worst": worst_exit_multiple}
-    else:
-        # Sector-anchored ceiling on the normal exit multiple: the flat
-        # 20x applied identically regardless of sector directly
-        # contradicted SECTOR_MEDIAN_PE shown in the SAME prompt for
-        # lower-multiple sectors - confirmed live a no-consensus bank's
-        # fallback g1 implies a ~17.7x fair P/E against a stated sector
-        # median of 13.0, so banks/energy/utilities/materials read as
-        # undervalued by construction. min() rather than the sector
-        # median outright: the flat 20.0x/25.0x pair IS the calibrated
-        # value for Technology (CURATED_SCENARIOS' AAPL/NVDA/MSFT/NFLX -
-        # all Technology - use exactly 20.0x/25.0x normal/best), and
-        # Technology's sector median (28.0) is ABOVE that - anchoring to
-        # the median outright would raise Tech's exit multiple past its
-        # own curated calibration, the opposite of what this fix is for.
-        # min() only pulls DOWN sectors whose median is genuinely lower
-        # than the calibrated default, leaving Technology/Healthcare/
-        # Consumer Defensive (medians >= 20.0) exactly as calibrated. Best
-        # keeps the same +5 absolute spread the curated examples show
-        # (25-20=5), not a ratio - a ratio would shrink alongside a
-        # lowered normal multiple in a way no curated example supports.
-        #
-        # Floored at the company's OWN current trailing P/E, not just the
-        # sector median - confirmed live a real bug for any NON-curated
-        # ticker in a low-median sector: XOM (real trailing P/E 20.7x)
-        # would get capped at Energy's flat 12.0x median the moment it
-        # left CURATED_SCENARIOS, i.e. assuming the market prices it MORE
-        # cheaply in 10 years than it already does today. This path was
-        # never actually exercised for XOM specifically since it's stayed
-        # curated (bypasses this block entirely - see the early return
-        # above), but any other real Energy/Financial-Services/Utilities/
-        # Basic-Materials ticker a user queries through this live API and
-        # that ISN'T in CURATED_SCENARIOS hits this exact case whenever
-        # its own multiple sits above its sector's. max(sector_median,
-        # own_pe) keeps the sector floor for names genuinely trading at or
-        # below it, without dragging a premium-multiple name down to the
-        # sector's generic level.
-        sector = fundamentals.get("sector")
-        sector_median = SECTOR_MEDIAN_PE.get(sector)
-        own_pe = fundamentals.get("pe_trailing")
-        effective_median_candidates = [v for v in (sector_median, own_pe) if v is not None]
-        effective_median = max(effective_median_candidates) if effective_median_candidates else None
-        normal_exit_multiple = min(NORMAL_EXIT_MULTIPLE, effective_median) if effective_median is not None else NORMAL_EXIT_MULTIPLE
-        best_exit_multiple = normal_exit_multiple + (BEST_EXIT_MULTIPLE - NORMAL_EXIT_MULTIPLE)
-        worst_exit_multiple = (
-            WORST_EXIT_MULTIPLE_ASSET_HEAVY if sector in ASSET_HEAVY_SECTORS
-            else WORST_EXIT_MULTIPLE_DEFAULT
-        )
-        exit_multiples = {"normal": normal_exit_multiple, "best": best_exit_multiple, "worst": worst_exit_multiple}
+        return {"normal": NORMAL_EXIT_MULTIPLE, "best": BEST_EXIT_MULTIPLE, "worst": worst_exit_multiple}
+
+    # Sector-anchored ceiling on the normal exit multiple: the flat
+    # 20x applied identically regardless of sector directly
+    # contradicted SECTOR_MEDIAN_PE shown in the SAME prompt for
+    # lower-multiple sectors - confirmed live a no-consensus bank's
+    # fallback g1 implies a ~17.7x fair P/E against a stated sector
+    # median of 13.0, so banks/energy/utilities/materials read as
+    # undervalued by construction. min() rather than the sector
+    # median outright: the flat 20.0x/25.0x pair IS the calibrated
+    # value for Technology (CURATED_SCENARIOS' AAPL/NVDA/MSFT/NFLX -
+    # all Technology - use exactly 20.0x/25.0x normal/best), and
+    # Technology's sector median (28.0) is ABOVE that - anchoring to
+    # the median outright would raise Tech's exit multiple past its
+    # own curated calibration, the opposite of what this fix is for.
+    # min() only pulls DOWN sectors whose median is genuinely lower
+    # than the calibrated default, leaving Technology/Healthcare/
+    # Consumer Defensive (medians >= 20.0) exactly as calibrated. Best
+    # keeps the same +5 absolute spread the curated examples show
+    # (25-20=5), not a ratio - a ratio would shrink alongside a
+    # lowered normal multiple in a way no curated example supports.
+    #
+    # Floored at the company's OWN current trailing P/E, not just the
+    # sector median - confirmed live a real bug for any NON-curated
+    # ticker in a low-median sector: XOM (real trailing P/E 20.7x)
+    # would get capped at Energy's flat 12.0x median the moment it
+    # left CURATED_SCENARIOS, i.e. assuming the market prices it MORE
+    # cheaply in 10 years than it already does today. This path was
+    # never actually exercised for XOM specifically since it's stayed
+    # curated (bypasses this block entirely - see the early return
+    # above), but any other real Energy/Financial-Services/Utilities/
+    # Basic-Materials ticker a user queries through this live API and
+    # that ISN'T in CURATED_SCENARIOS hits this exact case whenever
+    # its own multiple sits above its sector's. max(sector_median,
+    # own_pe) keeps the sector floor for names genuinely trading at or
+    # below it, without dragging a premium-multiple name down to the
+    # sector's generic level.
+    sector = fundamentals.get("sector")
+    sector_median = SECTOR_MEDIAN_PE.get(sector)
+    own_pe = fundamentals.get("pe_trailing")
+    effective_median_candidates = [v for v in (sector_median, own_pe) if v is not None]
+    effective_median = max(effective_median_candidates) if effective_median_candidates else None
+    normal_exit_multiple = min(NORMAL_EXIT_MULTIPLE, effective_median) if effective_median is not None else NORMAL_EXIT_MULTIPLE
+    best_exit_multiple = normal_exit_multiple + (BEST_EXIT_MULTIPLE - NORMAL_EXIT_MULTIPLE)
+    worst_exit_multiple = (
+        WORST_EXIT_MULTIPLE_ASSET_HEAVY if sector in ASSET_HEAVY_SECTORS
+        else WORST_EXIT_MULTIPLE_DEFAULT
+    )
+    return {"normal": normal_exit_multiple, "best": best_exit_multiple, "worst": worst_exit_multiple}
+
+
+def build_scenarios(ticker: str | None, fundamentals: dict, basis: str) -> dict[str, dict]:
+    """Assembles this company's normal/best/worst g1/g2/exit_multiple/
+    probability. Curated tickers use the analyst's exact numbers verbatim
+    (see _curated_scenarios); everyone else is assembled from three
+    independently-sourced pieces, each confirmed live rather than a single
+    invented "generic" bundle - see _compute_g1_values, _compute_g2_values,
+    and _compute_exit_multiples for how each piece is derived.
+    """
+    curated = _curated_scenarios(ticker, basis)
+    if curated is not None:
+        return curated
+
+    g1_values = _compute_g1_values(fundamentals)
+    g2_values = _compute_g2_values(basis, g1_values)
+    exit_multiples = _compute_exit_multiples(basis, fundamentals)
 
     return {
         name: {
@@ -1139,6 +1178,148 @@ def valuation_block_for(fundamentals: dict | None, ticker: str | None = None) ->
     return valuation_assessment_for(fundamentals, ticker)[0]
 
 
+def _classify_basis_with_curation_override(ticker: str | None, fundamentals: dict) -> tuple[str, bool]:
+    """Curated tickers override the generic classifier's output rather than
+    merely being checked against it. Confirmed live: XOM's own real
+    consensus growth estimates are opposite-direction year-over-year (see
+    build_scenarios' docstring) - exactly why it was hand-curated in the
+    first place, since the generic pipeline can't be trusted for it. Tying
+    curated-data usage to "does today's classify_valuation_basis output
+    happen to agree" made curated tickers hostage to unrelated constants:
+    raising DIVIDEND_PAYOUT_THRESHOLD to fix QCOM's misrouting silently
+    knocked XOM from "dividends" to "fcf" (Energy is in
+    ASSET_HEAVY_SECTORS and XOM has positive free_cash_flow) - still not
+    "eps", still using_curated=False, for a ticker whose g1/g2/exit
+    numbers were calibrated specifically for the "eps" cf0. A human
+    already verified this ticker's basis against real analyst work; that
+    judgment should win outright, not just when it coincidentally matches
+    a sector/payout-ratio heuristic that has nothing to do with it.
+    """
+    basis = classify_valuation_basis(
+        fundamentals.get("eps_trailing"),
+        fundamentals.get("payout_ratio"),
+        fundamentals.get("sector"),
+        fundamentals.get("free_cash_flow"),
+    )
+    is_curated = bool(ticker and ticker in CURATED_SCENARIOS_BASIS)
+    if is_curated:
+        basis = CURATED_SCENARIOS_BASIS[ticker]
+    return basis, is_curated
+
+
+def _render_eps_one_time_item_skip(
+    ticker: str | None, fundamentals: dict, basis: str, is_curated: bool
+) -> tuple[str, None] | None:
+    """Skips the whole compute/blend/fallback pipeline below entirely when
+    the eps basis's trailing EPS looks one-time-item-distorted (see
+    EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD) - deliberately renders
+    "Not applicable" rather than falling back to another basis, unlike
+    every OTHER "no usable cf0" case below. Confirmed live the
+    fallback chain's implicit assumption ("some other basis is
+    probably clean") doesn't hold here: AMZN shows the same class of
+    distorted trailing EPS as GOOG (a 214% earnings surprise), but its
+    fcf fallback was ALSO distorted this same quarter, for an unrelated
+    reason (a heavy AI-infrastructure capex cycle crushing free cash
+    flow) - the fallback didn't produce a correct number, just a
+    DIFFERENTLY wrong one (flipped from wildly overvalued-looking to
+    wildly undervalued-looking). Not applied to curated tickers - a
+    human already verified those against real analyst work, which
+    would have caught a similarly distorted trailing figure.
+
+    Returns the (block, gap_pct) pair to return outright, or None when
+    this skip doesn't apply and the normal pipeline should continue.
+    """
+    if not is_curated and basis == "eps":
+        recent_eps_surprise = fundamentals.get("recent_eps_surprise")
+        if recent_eps_surprise is not None and recent_eps_surprise > EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD:
+            block = valuation_block(fundamentals["price"], None, "eps")
+            _log_valuation_computation(ticker, fundamentals, "eps", None, {}, None, block)
+            return block, None
+    return None
+
+
+def _compute_basis_valuation(
+    ticker: str | None, fundamentals: dict, basis: str, include_dividend_pv: bool
+) -> tuple[float | None, dict, float | None]:
+    """Two separate reasons to skip the dividend-stream add-on
+    (_dividend_stream_pv): (1) curated tickers - their g1/g2/
+    exit_multiple were fitted end-to-end against the analyst's own
+    target via the terminal-only formula ALONE, so adding a second,
+    uncalibrated dividend term would double-count relative to that
+    calibration; (2) the payout-threshold BLEND (see
+    _blend_across_payout_band) - confirmed live blending a dividend-PV-
+    augmented eps/fcf value against a full "dividends"-basis value
+    (which already captures the complete dividend stream itself, at its
+    own higher multiple) double-counts the dividend credit twice over
+    (ACN: eps-with-PV-addon $273.52 blended with dividends-basis $199.52
+    pushed intrinsic to $267, +86% vs the analyst - blending the PURE
+    terminal-only eps value against dividends instead fixes this; the
+    blend fraction itself already IS the "how much dividend credit"
+    mechanism near the threshold, so the standalone add-on is redundant
+    there specifically, not wrong in general - it still applies for
+    eps/fcf tickers OUTSIDE the blend band that pay a real but non-
+    threshold-adjacent dividend).
+    """
+    cf0 = cash_flow_basis_value(basis, fundamentals)
+    scenarios = build_scenarios(ticker, fundamentals, basis)
+    dividend_rate = fundamentals.get("dividend_rate") if include_dividend_pv else None
+    intrinsic = intrinsic_value(cf0, basis, scenarios, dividend_rate)
+    return cf0, scenarios, intrinsic
+
+
+def _blend_across_payout_band(
+    ticker: str | None, fundamentals: dict, basis: str, is_curated: bool
+) -> BasisValuation | None:
+    """Payout-threshold cliff smoothing (see DIVIDEND_PAYOUT_BLEND_HALF_
+    WIDTH) - only for non-curated, non-REIT, non-revenue tickers (a
+    revenue-basis company is unprofitable by definition; there's no
+    dividends-band payout_ratio for it to straddle). Returns None when
+    no blend applies and the caller should compute the plain single-
+    basis valuation instead.
+    """
+    blend_t = None
+    if not is_curated and basis not in ("revenue",) and fundamentals.get("sector") not in REIT_SECTORS:
+        blend_t = _payout_blend_fraction(fundamentals.get("payout_ratio"))
+    if blend_t is None:
+        return None
+
+    alt_basis = _classify_alternate_basis(fundamentals.get("sector"), fundamentals.get("free_cash_flow"))
+    div_cf0, div_scenarios, div_iv = _compute_basis_valuation(ticker, fundamentals, "dividends", False)
+    alt_cf0, alt_scenarios, alt_iv = _compute_basis_valuation(ticker, fundamentals, alt_basis, False)
+    if div_iv is not None and alt_iv is not None:
+        intrinsic = blend_t * div_iv + (1 - blend_t) * alt_iv
+        basis, cf0, scenarios = (
+            ("dividends", div_cf0, div_scenarios) if blend_t >= 0.5 else (alt_basis, alt_cf0, alt_scenarios)
+        )
+    elif div_iv is not None:
+        basis, cf0, scenarios, intrinsic = "dividends", div_cf0, div_scenarios, div_iv
+    else:
+        basis, cf0, scenarios, intrinsic = alt_basis, alt_cf0, alt_scenarios, alt_iv
+    return BasisValuation(basis, cf0, scenarios, intrinsic)
+
+
+def _fallback_to_other_basis(ticker: str | None, fundamentals: dict, current: BasisValuation) -> BasisValuation:
+    """The chosen basis (classify_valuation_basis's own pick, a curated
+    override, or the REIT sector override) has no usable cf0 for this
+    company right now - confirmed live this is a real failure mode both
+    for curated tickers (yfinance drops a field for one call) and REITs
+    (the REIT sector override forces "dividends" unconditionally with no
+    data check of its own - see REIT_SECTORS' comment). Rather than a
+    permanent "Not applicable" for a company that DOES have other usable
+    data, try every other basis in a fixed order until one works - same
+    fail-soft spirit as every other branch in this module, just applied
+    one level up (basis selection) instead of within a single basis's
+    math. Returns `current` unchanged if no fallback basis works either.
+    """
+    for fallback_basis in FALLBACK_BASIS_ORDER:
+        if fallback_basis == current.basis:
+            continue
+        fb_cf0, fb_scenarios, fb_intrinsic = _compute_basis_valuation(ticker, fundamentals, fallback_basis, True)
+        if fb_intrinsic is not None:
+            return BasisValuation(fallback_basis, fb_cf0, fb_scenarios, fb_intrinsic)
+    return current
+
+
 def valuation_assessment_for(fundamentals: dict | None, ticker: str | None = None) -> tuple[str, float | None]:
     """Convenience wrapper for callers holding a fundamentals.fetch_
     fundamentals() result - classifies the valuation basis, builds this
@@ -1165,123 +1346,22 @@ def valuation_assessment_for(fundamentals: dict | None, ticker: str | None = Non
     if not fundamentals or fundamentals.get("price") is None:
         return "Data unavailable.", None
 
-    basis = classify_valuation_basis(
-        fundamentals.get("eps_trailing"),
-        fundamentals.get("payout_ratio"),
-        fundamentals.get("sector"),
-        fundamentals.get("free_cash_flow"),
-    )
-    # Curated tickers override the generic classifier's output rather than
-    # merely being checked against it. Confirmed live: XOM's own real
-    # consensus growth estimates are opposite-direction year-over-year (see
-    # build_scenarios' docstring) - exactly why it was hand-curated in the
-    # first place, since the generic pipeline can't be trusted for it. Tying
-    # curated-data usage to "does today's classify_valuation_basis output
-    # happen to agree" made curated tickers hostage to unrelated constants:
-    # raising DIVIDEND_PAYOUT_THRESHOLD to fix QCOM's misrouting silently
-    # knocked XOM from "dividends" to "fcf" (Energy is in
-    # ASSET_HEAVY_SECTORS and XOM has positive free_cash_flow) - still not
-    # "eps", still using_curated=False, for a ticker whose g1/g2/exit
-    # numbers were calibrated specifically for the "eps" cf0. A human
-    # already verified this ticker's basis against real analyst work; that
-    # judgment should win outright, not just when it coincidentally matches
-    # a sector/payout-ratio heuristic that has nothing to do with it.
-    is_curated = bool(ticker and ticker in CURATED_SCENARIOS_BASIS)
-    if is_curated:
-        basis = CURATED_SCENARIOS_BASIS[ticker]
+    basis, is_curated = _classify_basis_with_curation_override(ticker, fundamentals)
 
-    # Skips the whole compute/blend/fallback pipeline below entirely when
-    # the eps basis's trailing EPS looks one-time-item-distorted (see
-    # EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD) - deliberately renders
-    # "Not applicable" rather than falling back to another basis, unlike
-    # every OTHER "no usable cf0" case below. Confirmed live the
-    # fallback chain's implicit assumption ("some other basis is
-    # probably clean") doesn't hold here: AMZN shows the same class of
-    # distorted trailing EPS as GOOG (a 214% earnings surprise), but its
-    # fcf fallback was ALSO distorted this same quarter, for an unrelated
-    # reason (a heavy AI-infrastructure capex cycle crushing free cash
-    # flow) - the fallback didn't produce a correct number, just a
-    # DIFFERENTLY wrong one (flipped from wildly overvalued-looking to
-    # wildly undervalued-looking). Not applied to curated tickers - a
-    # human already verified those against real analyst work, which
-    # would have caught a similarly distorted trailing figure.
-    if not is_curated and basis == "eps":
-        recent_eps_surprise = fundamentals.get("recent_eps_surprise")
-        if recent_eps_surprise is not None and recent_eps_surprise > EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD:
-            block = valuation_block(fundamentals["price"], None, "eps")
-            _log_valuation_computation(ticker, fundamentals, "eps", None, {}, None, block)
-            return block, None
+    skip_result = _render_eps_one_time_item_skip(ticker, fundamentals, basis, is_curated)
+    if skip_result is not None:
+        return skip_result
 
-    def compute(b: str, include_dividend_pv: bool):
-        cf0_ = cash_flow_basis_value(b, fundamentals)
-        scenarios_ = build_scenarios(ticker, fundamentals, b)
-        # Two separate reasons to skip the dividend-stream add-on
-        # (_dividend_stream_pv): (1) curated tickers - their g1/g2/
-        # exit_multiple were fitted end-to-end against the analyst's own
-        # target via the terminal-only formula ALONE, so adding a second,
-        # uncalibrated dividend term would double-count relative to that
-        # calibration; (2) the payout-threshold BLEND below - confirmed
-        # live blending a dividend-PV-augmented eps/fcf value against a
-        # full "dividends"-basis value (which already captures the
-        # complete dividend stream itself, at its own higher multiple)
-        # double-counts the dividend credit twice over (ACN: eps-with-
-        # PV-addon $273.52 blended with dividends-basis $199.52 pushed
-        # intrinsic to $267, +86% vs the analyst - blending the PURE
-        # terminal-only eps value against dividends instead fixes this;
-        # the blend fraction itself already IS the "how much dividend
-        # credit" mechanism near the threshold, so the standalone add-on
-        # is redundant there specifically, not wrong in general - it
-        # still applies for eps/fcf tickers OUTSIDE the blend band that
-        # pay a real but non-threshold-adjacent dividend).
-        dividend_rate_ = fundamentals.get("dividend_rate") if include_dividend_pv else None
-        intrinsic_ = intrinsic_value(cf0_, b, scenarios_, dividend_rate_)
-        return cf0_, scenarios_, intrinsic_
-
-    # Payout-threshold cliff smoothing (see DIVIDEND_PAYOUT_BLEND_HALF_
-    # WIDTH) - only for non-curated, non-REIT, non-revenue tickers (a
-    # revenue-basis company is unprofitable by definition; there's no
-    # dividends-band payout_ratio for it to straddle).
-    blend_t = None
-    if not is_curated and basis not in ("revenue",) and fundamentals.get("sector") not in REIT_SECTORS:
-        blend_t = _payout_blend_fraction(fundamentals.get("payout_ratio"))
-
-    if blend_t is not None:
-        alt_basis = _classify_alternate_basis(fundamentals.get("sector"), fundamentals.get("free_cash_flow"))
-        div_cf0, div_scenarios, div_iv = compute("dividends", False)
-        alt_cf0, alt_scenarios, alt_iv = compute(alt_basis, False)
-        if div_iv is not None and alt_iv is not None:
-            intrinsic = blend_t * div_iv + (1 - blend_t) * alt_iv
-            basis, cf0, scenarios = (
-                ("dividends", div_cf0, div_scenarios) if blend_t >= 0.5 else (alt_basis, alt_cf0, alt_scenarios)
-            )
-        elif div_iv is not None:
-            basis, cf0, scenarios, intrinsic = "dividends", div_cf0, div_scenarios, div_iv
-        else:
-            basis, cf0, scenarios, intrinsic = alt_basis, alt_cf0, alt_scenarios, alt_iv
+    blend_result = _blend_across_payout_band(ticker, fundamentals, basis, is_curated)
+    if blend_result is not None:
+        basis, cf0, scenarios, intrinsic = blend_result
     else:
-        cf0, scenarios, intrinsic = compute(basis, not is_curated)
+        cf0, scenarios, intrinsic = _compute_basis_valuation(ticker, fundamentals, basis, not is_curated)
 
     if intrinsic is None:
-        # The chosen basis (classify_valuation_basis's own pick, a
-        # curated override, or the REIT sector override) has no usable
-        # cf0 for this company right now - confirmed live this is a real
-        # failure mode both for curated tickers (yfinance drops a field
-        # for one call) and REITs (the REIT sector override forces
-        # "dividends" unconditionally with no data check of its own - see
-        # REIT_SECTORS' comment). Rather than a permanent "Not
-        # applicable" for a company that DOES have other usable data, try
-        # every other basis in a fixed order until one works - same
-        # fail-soft spirit as every other branch in this module, just
-        # applied one level up (basis selection) instead of within a
-        # single basis's math.
-        is_curated = False
-        for fallback_basis in FALLBACK_BASIS_ORDER:
-            if fallback_basis == basis:
-                continue
-            fb_cf0, fb_scenarios, fb_intrinsic = compute(fallback_basis, True)
-            if fb_intrinsic is not None:
-                basis, cf0, scenarios, intrinsic = fallback_basis, fb_cf0, fb_scenarios, fb_intrinsic
-                break
+        basis, cf0, scenarios, intrinsic = _fallback_to_other_basis(
+            ticker, fundamentals, BasisValuation(basis, cf0, scenarios, intrinsic)
+        )
 
     block = valuation_block(fundamentals["price"], intrinsic, basis)
     _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block)
