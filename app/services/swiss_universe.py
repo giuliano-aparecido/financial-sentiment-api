@@ -67,20 +67,19 @@ logger = logging.getLogger(__name__)
 # stop-gap, not a permanent fix (the seeded crumb/cookies will themselves
 # eventually expire on Yahoo's side, at an unknown time).
 #
-# The refresh itself is automated as of scripts/refresh_yf_crumb.py +
+# The refresh was automated via scripts/refresh_yf_crumb.py +
 # .github/workflows/refresh-yf-crumb.yml - a daily scheduled job that
-# re-captures a fresh crumb+cookie pair from a GitHub Actions runner (not
-# Render, since Render's own IP is exactly what's blocked). Originally
-# pushed the pair into YF_SEED_CRUMB/YF_SEED_COOKIES via Render's API and
-# triggered a redeploy for every refresh - revised 2026-08-20 at the
-# user's explicit request ("I dont want to always trigger and redeploy
-# the app") to instead call reseed_yf_session() below via the
-# /api/update-yf-crumb admin endpoint, hot-swapping the running process's
-# crumb with no restart at all. YF_SEED_CRUMB/YF_SEED_COOKIES (and this
-# function) still exist as the cold-start path for when the process DOES
-# restart for an unrelated reason (a real code deploy) - see that
-# script's own docstring for the full current reasoning.
-def _seed_yf_session_from_env():
+# re-captured a fresh crumb+cookie pair from a GitHub Actions runner (not
+# Render, since Render's own IP is exactly what's blocked), calling
+# reseed_yf_session() below via the /api/update-yf-crumb admin endpoint to
+# hot-swap the running process's crumb with no restart. That workflow was
+# removed along with the rest of .github/workflows/ - nothing currently
+# schedules this refresh, so scripts/refresh_yf_crumb.py must be run
+# manually (see that script's own docstring) whenever the seeded
+# crumb/cookies go stale. YF_SEED_CRUMB/YF_SEED_COOKIES (and this
+# function) still exist as the cold-start path for when the process
+# restarts for an unrelated reason (a real code deploy).
+def seed_yf_session_from_env():
     seed_crumb = os.environ.get("YF_SEED_CRUMB")
     seed_cookies_json = os.environ.get("YF_SEED_COOKIES")
     if not seed_crumb or not seed_cookies_json:
@@ -98,7 +97,7 @@ def reseed_yf_session(crumb: str, cookies: dict) -> None:
     """Hot-swaps the running process's yfinance crumb/cookie jar with a
     freshly captured pair - called from app/routers/admin.py's /api/
     update-yf-crumb endpoint, itself called by scripts/refresh_yf_crumb.py
-    (see that script's own docstring). Unlike _seed_yf_session_from_env
+    (see that script's own docstring). Unlike seed_yf_session_from_env
     above, this ALWAYS overwrites (no "already seeded, don't clobber"
     guard) - the whole point is refreshing an already-seeded, now-stale
     crumb without restarting the process at all, added 2026-08-20 at the
@@ -450,7 +449,7 @@ def _discover_candidates_live(min_market_cap, max_market_cap):
     volume, etc.) - callers needing "today" data (see
     swiss_today_screener.py) can read it straight off this dict,
     no extra fetch needed."""
-    _seed_yf_session_from_env()
+    seed_yf_session_from_env()
 
     query = yf.EquityQuery(
         "and",
@@ -653,25 +652,32 @@ def filter_domestic(candidates, delay_seconds=INFO_REQUEST_DELAY_SECONDS, max_wo
         pending = set(futures)
         for future in concurrent.futures.as_completed(futures):
             pending.discard(future)
-            try:
-                symbol, entry, failed, rate_limited = future.result()
-            except concurrent.futures.CancelledError:
-                # One of our own cancel() calls below landed on this
-                # future before it started - it was never actually
-                # attempted, but still belongs in failed_symbols (not
-                # silently dropped) so the next retry picks it up, same
-                # as a symbol whose fetch genuinely raised.
-                failed_symbols.append(futures[future])
-                continue
+            symbol, entry, failed_symbol, rate_limited = _handle_completed_future(future, futures[future])
             if entry is not None:
                 domestic[symbol] = entry
-            if failed:
-                failed_symbols.append(symbol)
+            if failed_symbol is not None:
+                failed_symbols.append(failed_symbol)
             if rate_limited and not hit_rate_limit:
                 hit_rate_limit = True
                 for other in pending:
                     other.cancel()
     return domestic, failed_symbols, hit_rate_limit
+
+
+def _handle_completed_future(future, symbol_for_future):
+    """Processes one completed future from filter_domestic's executor,
+    returning (symbol_or_None, entry_or_None, failed_symbol_or_None,
+    rate_limited). A future cancelled by an earlier rate-limit hit (see
+    filter_domestic) reports itself as failed too - one of our own
+    cancel() calls landed on it before it started, so it was never
+    actually attempted, but still belongs in failed_symbols (not
+    silently dropped) so the next retry picks it up, same as a symbol
+    whose fetch genuinely raised."""
+    try:
+        symbol, entry, failed, rate_limited = future.result()
+    except concurrent.futures.CancelledError:
+        return None, None, symbol_for_future, False
+    return symbol, entry, (symbol if failed else None), rate_limited
 
 
 def filter_domestic_batched(

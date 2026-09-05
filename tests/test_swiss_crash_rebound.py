@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 import app.services.swiss_crash_rebound as crash_rebound_module
-from app.services.swiss_crash_rebound import find_crash_then_rebound, run_scan
+from app.services.swiss_crash_rebound import ScanConfig, find_crash_then_rebound, run_scan
 
 
 def _ohlcv_frame(dates, closes, volumes):
@@ -42,8 +42,9 @@ def test_find_crash_then_rebound_detects_a_match(monkeypatch, today):
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
 
     assert len(results) == 1
     row = results.iloc[0]
@@ -66,8 +67,9 @@ def test_find_crash_then_rebound_matches_rebound_on_day_two(monkeypatch, today):
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
 
     assert len(results) == 1
     row = results.iloc[0]
@@ -92,8 +94,9 @@ def test_find_crash_then_rebound_baseline_is_crash_close_not_previous_day(monkey
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
     assert results.empty
 
 
@@ -107,8 +110,9 @@ def test_find_crash_then_rebound_no_match_outside_rebound_window(monkeypatch, to
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
     assert results.empty
 
 
@@ -122,9 +126,10 @@ def test_find_crash_then_rebound_respects_custom_rebound_window(monkeypatch, tod
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
-                                       rebound_window_days=5)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+        rebound_window_days=5,
+    ))
     assert len(results) == 1
     assert results.iloc[0]["days_to_rebound"] == 5
 
@@ -141,8 +146,9 @@ def test_find_crash_then_rebound_first_qualifying_day_wins_not_the_biggest(monke
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
 
     assert len(results) == 1
     row = results.iloc[0]
@@ -160,8 +166,9 @@ def test_find_crash_then_rebound_no_match_when_gain_too_small(monkeypatch, today
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
     assert results.empty
 
 
@@ -178,8 +185,9 @@ def test_find_crash_then_rebound_excludes_matches_outside_lookback_window(monkey
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=1,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=1, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
     assert results.empty
 
 
@@ -191,8 +199,9 @@ def test_find_crash_then_rebound_pe_approx_none_for_lossmaking_company(monkeypat
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": -1.5}}  # loss-making - no meaningful P/E
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
     assert results.iloc[0]["loss_pe_approx"] is None
     assert results.iloc[0]["gain_pe_approx"] is None
 
@@ -233,8 +242,9 @@ def test_find_crash_then_rebound_chunks_download_calls(monkeypatch, today):
     monkeypatch.setattr(crash_rebound_module.yf, "download", _tracking_fake_download)
 
     domestic = {s: {"trailing_eps": 5.0} for s in symbols}
-    results = find_crash_then_rebound(symbols, domestic, lookback_months=3,
-                                       history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(symbols, domestic, ScanConfig(
+        lookback_months=3, history_period="4mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
 
     # 5 symbols chunked at size 2 -> 3 separate, smaller calls, not one big
     # burst.
@@ -264,8 +274,9 @@ def test_find_crash_then_rebound_skips_nan_drop_pct_on_first_available_day(monke
     monkeypatch.setattr(crash_rebound_module.yf, "download", _fake_download)
 
     domestic = {"TEST.SW": {"trailing_eps": 5.0}}
-    results = find_crash_then_rebound(["TEST.SW"], domestic, lookback_months=12,
-                                       history_period="13mo", drop_threshold=-5.0, gain_threshold=5.0)
+    results = find_crash_then_rebound(["TEST.SW"], domestic, ScanConfig(
+        lookback_months=12, history_period="13mo", drop_threshold=-5.0, gain_threshold=5.0,
+    ))
 
     # Day 0 (NaN drop_pct) must never appear as a match, regardless of
     # whatever else in the short history does or doesn't qualify.

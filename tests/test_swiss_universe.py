@@ -288,6 +288,16 @@ def test_filter_domestic_cancels_queued_work_after_rate_limit(monkeypatch):
 
     def fake_ticker(symbol):
         call_count["n"] += 1
+        # A brief, deliberate delay before raising - with delay_seconds=0
+        # and an instant raise, the single worker thread can race ahead
+        # and pull several more queued futures before the main thread
+        # (pure Python, much faster per instruction) reacts to the first
+        # rate-limited result and cancels the rest - flaky without this,
+        # confirmed live (call_count reached 11 once under full-suite
+        # system load, vs. reliably <5 in isolation). This gives the main
+        # thread's cancel loop a comfortable head start every time,
+        # without weakening what's actually being tested.
+        time.sleep(0.01)
         raise YFRateLimitError()
 
     monkeypatch.setattr(swiss_universe_module.yf, "Ticker", fake_ticker)
@@ -420,7 +430,7 @@ def test_seed_yf_session_from_env_noop_when_unset(monkeypatch):
     # effects on the real yfinance singleton.
     monkeypatch.setattr(swiss_universe_module, "YfData", lambda: (_ for _ in ()).throw(
         AssertionError("YfData() should not be called when env vars are unset")))
-    swiss_universe_module._seed_yf_session_from_env()
+    swiss_universe_module.seed_yf_session_from_env()
 
 
 def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
@@ -429,7 +439,7 @@ def test_seed_yf_session_from_env_seeds_crumb_and_cookies(monkeypatch):
     fake = _FakeYfData()
     monkeypatch.setattr(swiss_universe_module, "YfData", lambda: fake)
 
-    swiss_universe_module._seed_yf_session_from_env()
+    swiss_universe_module.seed_yf_session_from_env()
 
     assert fake._crumb == "test-crumb-123"
     assert dict(fake._session.cookies) == {"A1": "abc", "A3": "def"}
@@ -584,14 +594,14 @@ def test_seed_yf_session_from_env_does_not_clobber_existing_crumb(monkeypatch):
     fake = _FakeYfData(crumb="already-have-one")
     monkeypatch.setattr(swiss_universe_module, "YfData", lambda: fake)
 
-    swiss_universe_module._seed_yf_session_from_env()
+    swiss_universe_module.seed_yf_session_from_env()
 
     assert fake._crumb == "already-have-one"
     assert dict(fake._session.cookies) == {}
 
 
 def test_reseed_yf_session_overwrites_existing_crumb(monkeypatch):
-    # Unlike _seed_yf_session_from_env, reseed_yf_session's whole point is
+    # Unlike seed_yf_session_from_env, reseed_yf_session's whole point is
     # replacing an already-seeded, now-stale crumb - it must NOT skip just
     # because one is already present.
     fake = _FakeYfData(crumb="old-stale-crumb")

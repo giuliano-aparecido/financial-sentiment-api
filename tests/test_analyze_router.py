@@ -12,18 +12,18 @@ def _patch_services(monkeypatch, fundamentals=None, earnings_data=None, price_mo
     captured = {}
 
     async def fake_analyze_two_stage(
-        ticker, user_query, live_context, market_data, valuation, earnings, price_context, gap_pct,
+        ticker, user_query, context, price_context, gap_pct,
         ticker_was_explicit=True,
     ):
         captured.update(
-            ticker=ticker, user_query=user_query, live_context=live_context,
-            market_data=market_data, valuation=valuation, earnings=earnings,
+            ticker=ticker, user_query=user_query, live_context=context.live_context,
+            market_data=context.market_data, valuation=context.valuation, earnings=context.earnings,
             price_context=price_context, gap_pct=gap_pct,
             ticker_was_explicit=ticker_was_explicit,
         )
         return {
             "recommendation": "HOLD", "news_reaction": "neutral",
-            "market_data": market_data, "valuation": valuation, "earnings": earnings,
+            "market_data": context.market_data, "valuation": context.valuation, "earnings": context.earnings,
         }
 
     monkeypatch.setattr(analyze_router, "analyze_two_stage", fake_analyze_two_stage)

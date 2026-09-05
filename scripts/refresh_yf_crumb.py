@@ -1,10 +1,13 @@
 """Automates the Yahoo crumb-refresh workaround documented in
-app/services/swiss_universe.py's _seed_yf_session_from_env()/reseed_
-yf_session(). Run on a schedule from a machine whose outbound IP ISN'T
-blocked by Yahoo (see .github/workflows/refresh-yf-crumb.yml - GitHub
-Actions runners, not Render, where this same fetch is what's actually
-blocked) - fetches a fresh crumb+cookie pair, then hot-swaps it into the
-running Render service via POST /api/update-yf-crumb.
+app/services/swiss_universe.py's seed_yf_session_from_env()/reseed_
+yf_session(). Run from a machine whose outbound IP ISN'T blocked by
+Yahoo (originally scheduled daily via .github/workflows/
+refresh-yf-crumb.yml on a GitHub Actions runner, not Render, where this
+same fetch is what's actually blocked - that workflow was removed along
+with the rest of .github/workflows/, so this now has to be run manually
+until/unless a replacement schedule is set up) - fetches a fresh
+crumb+cookie pair, then hot-swaps it into the running Render service via
+POST /api/update-yf-crumb.
 
 Why this has to run somewhere other than Render: the whole reason a
 seeded crumb is needed is that Render's own outbound IP is blocked
@@ -28,13 +31,16 @@ at all - see app/routers/admin.py's own docstring for that endpoint.
 YF_SEED_CRUMB/YF_SEED_COOKIES still exist as Render env vars (unchanged
 by this script now) purely as the cold-start fallback for whenever the
 process DOES restart for an unrelated reason (a real code deploy) - this
-script no longer keeps them in sync, so update them by hand in Render's
-dashboard occasionally if that fallback staying reasonably fresh
-matters to you; the daily run of this script no longer does it
-automatically.
+script never kept them in sync even when it ran on a schedule, so update
+them by hand in Render's dashboard occasionally if that fallback staying
+reasonably fresh matters to you. With no scheduled run at all now, the
+hot-swapped crumb this script pushes via /api/update-yf-crumb will
+itself go stale between manual runs - see swiss_universe.py's own
+comment for what that looks like when it happens.
 
-Required environment variables (set as GitHub Actions repo secrets - see
-the companion workflow file):
+Required environment variables (previously set as GitHub Actions repo
+secrets for the now-removed scheduled workflow; set them in your own
+shell/CI when running this manually):
     RAG_API_URL   - the deployed API's base URL (same value financial-
                     sentiment-web's proxy routes use)
     RAG_API_KEY   - the API key /api/update-yf-crumb is gated behind

@@ -39,6 +39,7 @@ twice.
 """
 
 import time
+from dataclasses import dataclass
 
 import pandas as pd
 import yfinance as yf
@@ -132,10 +133,20 @@ def download_ohlcv_chunked(symbols, period):
     return pd.concat(chunks, axis=1)
 
 
-def find_crash_then_rebound(
-    symbols, domestic, lookback_months, history_period, drop_threshold, gain_threshold,
-    rebound_window_days=REBOUND_WINDOW_TRADING_DAYS,
-):
+@dataclass(frozen=True)
+class ScanConfig:
+    """Bundles find_crash_then_rebound's threshold/window parameters (as
+    opposed to `symbols`/`domestic`, which are per-call data, not
+    config) - keeps run_scan's call site and the many test call sites
+    from having to name and reorder 5 positional values by hand."""
+    lookback_months: int
+    history_period: str
+    drop_threshold: float
+    gain_threshold: float
+    rebound_window_days: int = REBOUND_WINDOW_TRADING_DAYS
+
+
+def find_crash_then_rebound(symbols, domestic, config: ScanConfig):
     """Batch-downloads daily OHLCV for all `symbols` at once (one bulk
     request rather than one per ticker - yfinance/Yahoo handles this far
     better than a per-symbol loop for price history specifically, unlike
@@ -175,14 +186,9 @@ def find_crash_then_rebound(
     if not symbols:
         return pd.DataFrame()
 
-    data = download_ohlcv_chunked(symbols, history_period)
+    data = download_ohlcv_chunked(symbols, config.history_period)
 
-    cutoff = pd.Timestamp.today(tz=data.index.tz) - pd.DateOffset(months=lookback_months)
-
-    def approx_pe(close_price, trailing_eps):
-        if not trailing_eps or trailing_eps <= 0:
-            return None
-        return round(close_price / trailing_eps, 2)
+    cutoff = pd.Timestamp.today(tz=data.index.tz) - pd.DateOffset(months=config.lookback_months)
 
     matches = []
     for symbol in symbols:
@@ -218,48 +224,67 @@ def find_crash_then_rebound(
             # mid-week, not against an individual ticker's history being
             # shorter than the buffer itself. Explicit pd.isna check
             # covers both cases the bare comparison silently missed.
-            if pd.isna(drop_pct) or drop_pct > drop_threshold:
+            if pd.isna(drop_pct) or drop_pct > config.drop_threshold:
                 continue
             crash_close = close.iloc[i]
 
-            # First trading day within the window whose close clears
-            # gain_threshold% above crash_close - see this function's own
-            # docstring for why crash_close (not a rolling previous-day
-            # close) is the baseline on every day checked, not just day 1.
-            rebound_j = None
-            rebound_pct = None
-            for offset in range(1, rebound_window_days + 1):
-                j = i + offset
-                if j >= n:
-                    break
-                pct_vs_crash = (close.iloc[j] - crash_close) / crash_close * 100
-                if pct_vs_crash >= gain_threshold:
-                    rebound_j = j
-                    rebound_pct = pct_vs_crash
-                    break
+            rebound_j, rebound_pct = _find_rebound(
+                close, crash_close, i, n, config.rebound_window_days, config.gain_threshold,
+            )
             if rebound_j is None:
                 continue
 
-            matches.append({
-                "ticker": symbol,
-                "loss_date": pct_change.index[i].date().isoformat(),
-                "loss_open": round(ohlcv["Open"].iloc[i], 2),
-                "loss_high": round(ohlcv["High"].iloc[i], 2),
-                "loss_low": round(ohlcv["Low"].iloc[i], 2),
-                "loss_close": round(close.iloc[i], 2),
-                "loss_pe_approx": approx_pe(close.iloc[i], trailing_eps),
-                "drop_pct": round(drop_pct, 2),
-                "days_to_rebound": rebound_j - i,
-                "gain_date": pct_change.index[rebound_j].date().isoformat(),
-                "gain_open": round(ohlcv["Open"].iloc[rebound_j], 2),
-                "gain_high": round(ohlcv["High"].iloc[rebound_j], 2),
-                "gain_low": round(ohlcv["Low"].iloc[rebound_j], 2),
-                "gain_close": round(close.iloc[rebound_j], 2),
-                "gain_pe_approx": approx_pe(close.iloc[rebound_j], trailing_eps),
-                "gain_pct": round(rebound_pct, 2),
-            })
+            matches.append(_build_match_row(
+                symbol, ohlcv, close, pct_change, trailing_eps, i, rebound_j, drop_pct, rebound_pct,
+            ))
 
     return pd.DataFrame(matches)
+
+
+def _find_rebound(close, crash_close, i, n, rebound_window_days, gain_threshold):
+    """First trading day within `rebound_window_days` of index `i` whose
+    close clears `gain_threshold`% above `crash_close` - see
+    find_crash_then_rebound's own docstring for why crash_close (not a
+    rolling previous-day close) is the baseline on every day checked, not
+    just day 1. Returns (rebound_index, rebound_pct), or (None, None) if
+    no qualifying day exists within the window."""
+    for offset in range(1, rebound_window_days + 1):
+        j = i + offset
+        if j >= n:
+            break
+        pct_vs_crash = (close.iloc[j] - crash_close) / crash_close * 100
+        if pct_vs_crash >= gain_threshold:
+            return j, pct_vs_crash
+    return None, None
+
+
+def _build_match_row(symbol, ohlcv, close, pct_change, trailing_eps, i, rebound_j, drop_pct, rebound_pct):
+    """One match-row dict for the crash day at index `i` and its paired
+    rebound day at index `rebound_j` - see find_crash_then_rebound's own
+    docstring for the "_approx" P/E and no-per-event-volume rationale."""
+    def approx_pe(close_price):
+        if not trailing_eps or trailing_eps <= 0:
+            return None
+        return round(close_price / trailing_eps, 2)
+
+    return {
+        "ticker": symbol,
+        "loss_date": pct_change.index[i].date().isoformat(),
+        "loss_open": round(ohlcv["Open"].iloc[i], 2),
+        "loss_high": round(ohlcv["High"].iloc[i], 2),
+        "loss_low": round(ohlcv["Low"].iloc[i], 2),
+        "loss_close": round(close.iloc[i], 2),
+        "loss_pe_approx": approx_pe(close.iloc[i]),
+        "drop_pct": round(drop_pct, 2),
+        "days_to_rebound": rebound_j - i,
+        "gain_date": pct_change.index[rebound_j].date().isoformat(),
+        "gain_open": round(ohlcv["Open"].iloc[rebound_j], 2),
+        "gain_high": round(ohlcv["High"].iloc[rebound_j], 2),
+        "gain_low": round(ohlcv["Low"].iloc[rebound_j], 2),
+        "gain_close": round(close.iloc[rebound_j], 2),
+        "gain_pe_approx": approx_pe(close.iloc[rebound_j]),
+        "gain_pct": round(rebound_pct, 2),
+    }
 
 
 def run_scan(domestic: dict) -> pd.DataFrame:
@@ -271,8 +296,14 @@ def run_scan(domestic: dict) -> pd.DataFrame:
     never raises for "no results," only for a genuine fetch failure.
     """
     results = find_crash_then_rebound(
-        list(domestic.keys()), domestic, LOOKBACK_MONTHS, HISTORY_PERIOD, DROP_THRESHOLD_PCT, GAIN_THRESHOLD_PCT,
-        REBOUND_WINDOW_TRADING_DAYS,
+        list(domestic.keys()), domestic,
+        ScanConfig(
+            lookback_months=LOOKBACK_MONTHS,
+            history_period=HISTORY_PERIOD,
+            drop_threshold=DROP_THRESHOLD_PCT,
+            gain_threshold=GAIN_THRESHOLD_PCT,
+            rebound_window_days=REBOUND_WINDOW_TRADING_DAYS,
+        ),
     )
     if results.empty:
         return results

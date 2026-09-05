@@ -56,9 +56,14 @@ def _install_fake_client(monkeypatch, responses):
     return fake
 
 
+CONTEXT = inference.MarketContext(
+    market_data=MARKET_DATA, valuation=VALUATION, earnings=EARNINGS, live_context=NEWS,
+)
+
+
 def _run_two_stage(gap_pct=None, ticker_was_explicit=True):
     return inference.analyze_two_stage(
-        "AAPL", "Is AAPL a buy?", NEWS, MARKET_DATA, VALUATION, EARNINGS, PRICE_CONTEXT, gap_pct,
+        "AAPL", "Is AAPL a buy?", CONTEXT, PRICE_CONTEXT, gap_pct,
         ticker_was_explicit=ticker_was_explicit,
     )
 
@@ -110,9 +115,7 @@ def test_classify_news_returns_none_on_unrecognized_class(monkeypatch):
 
 def test_task_b_prompt_contains_all_blocks_and_given_recommendation(monkeypatch):
     fake = _install_fake_client(monkeypatch, [_analysis_response("Reasoning text.", "Yes, looks like a buy.")])
-    _run(inference.generate_analysis(
-        "AAPL", "Is AAPL a buy?", "overreaction_down", "BUY", MARKET_DATA, VALUATION, EARNINGS, NEWS,
-    ))
+    _run(inference.generate_analysis("AAPL", "Is AAPL a buy?", "overreaction_down", "BUY", CONTEXT))
 
     prompt = fake.payloads[0]["inputs"]
     assert "Current Market Data:\n" + MARKET_DATA in prompt
@@ -126,20 +129,20 @@ def test_task_b_prompt_contains_all_blocks_and_given_recommendation(monkeypatch)
 
 def test_task_b_requests_512_max_new_tokens(monkeypatch):
     fake = _install_fake_client(monkeypatch, [_analysis_response("r", "a")])
-    _run(inference.generate_analysis("AAPL", "", "good", "BUY", MARKET_DATA, VALUATION, EARNINGS, NEWS))
+    _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
     assert fake.payloads[0]["parameters"]["max_new_tokens"] == 512
 
 
 def test_generate_analysis_returns_reasoning_and_answer(monkeypatch):
     _install_fake_client(monkeypatch, [_analysis_response("Solid fundamentals.", "Yes, a reasonable buy.")])
-    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", MARKET_DATA, VALUATION, EARNINGS, NEWS))
+    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
     assert result["reasoning"] == "Solid fundamentals."
     assert result["answer"] == "Yes, a reasonable buy."
 
 
 def test_generate_analysis_falls_back_to_raw_response_on_unparseable_output(monkeypatch):
     _install_fake_client(monkeypatch, [_ok("not json at all, no braces here")])
-    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", MARKET_DATA, VALUATION, EARNINGS, NEWS))
+    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
     assert result == {"raw_response": "not json at all, no braces here"}
 
 

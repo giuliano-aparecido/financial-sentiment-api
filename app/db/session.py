@@ -1,5 +1,3 @@
-from collections.abc import Generator
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -43,16 +41,5 @@ def _session_factory() -> sessionmaker:
 def get_session() -> Session:
     """One-off session for non-request code (the scheduler's background
     jobs) - caller is responsible for closing it (context manager or
-    try/finally), unlike get_db() below which FastAPI closes itself via the
-    Depends/yield lifecycle."""
+    try/finally)."""
     return _session_factory()()
-
-
-def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency - one session per request, same pattern as
-    portfolio-manager-backend's app/db/session.py."""
-    db = get_session()
-    try:
-        yield db
-    finally:
-        db.close()

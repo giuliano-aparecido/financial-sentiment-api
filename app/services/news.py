@@ -261,50 +261,63 @@ def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.d
         if not feed.entries:
             return "Data unavailable.", None
 
-        candidates = []
-        for entry in feed.entries[:CANDIDATE_POOL_SIZE]:
-            raw_title = entry.get("title", "")
-            if not raw_title:
-                continue
-            title, publisher = _parse_title_and_publisher(raw_title)
-            published_display = entry.get("published", "")[:16]  # Date string snippet
-            candidates.append(_Candidate(title, publisher, published_display, _parse_published_date(entry)))
-
+        candidates = _build_candidates(feed)
         if not candidates:
             return "Data unavailable.", None
 
-        quality_filtered = [
-            c for c in candidates
-            if c.publisher not in LOW_QUALITY_PUBLISHERS and not _is_low_content_headline(c.title)
-        ]
-        relevant = [c for c in quality_filtered if _is_relevant_headline(search_ticker, name, sector, c.title)]
-
-        if relevant:
-            selected = _most_recent(relevant)
-        elif quality_filtered:
-            # Nothing relevant survived, but well-sourced/well-shaped
-            # headlines exist (e.g. a genuinely quiet news week for this
-            # specific company) - fall back to the most recent of those
-            # rather than "Data unavailable.": some context beats none,
-            # same fallback spirit the old quality-only fallback had.
-            selected = _most_recent(quality_filtered)
-            logger.info(
-                "fetch_live_news_rag[%s]: no candidate passed the relevance filter, falling back to most recent quality-filtered entry",
-                ticker,
-            )
-        else:
-            # Every candidate in the pool was low-quality - fall back to
-            # the single most recent raw entry rather than "Data
-            # unavailable.".
-            selected = _most_recent(candidates)
-            logger.info(
-                "fetch_live_news_rag[%s]: no candidate passed quality filtering, falling back to most recent raw entry",
-                ticker,
-            )
-
+        selected = _select_candidate(candidates, ticker, search_ticker, name, sector)
         text = f"- [{selected.published_display}] {selected.title} - {selected.publisher}"
         return text, selected.published_date
 
     except Exception as e:
         logger.warning("RAG Google News RSS error for %s: %s", ticker, e)
         return "Data unavailable.", None
+
+
+def _build_candidates(feed) -> list[_Candidate]:
+    """Builds the candidate pool from a parsed feedparser feed - see
+    fetch_live_news_rag's own docstring for the selection pipeline this
+    feeds into."""
+    candidates = []
+    for entry in feed.entries[:CANDIDATE_POOL_SIZE]:
+        raw_title = entry.get("title", "")
+        if not raw_title:
+            continue
+        title, publisher = _parse_title_and_publisher(raw_title)
+        # Google News RSS's published string is fixed-width (e.g. "Mon,
+        # 04 Sep 2026 12:34:56 GMT") - [:16] isolates just the "Mon, 04
+        # Sep 2026" date portion, dropping the time.
+        published_display = entry.get("published", "")[:16]
+        candidates.append(_Candidate(title, publisher, published_display, _parse_published_date(entry)))
+    return candidates
+
+
+def _select_candidate(candidates: list[_Candidate], ticker: str, search_ticker: str, name: str, sector) -> _Candidate:
+    """3-tier selection over a non-empty `candidates` list - see
+    fetch_live_news_rag's own docstring for the overall pipeline."""
+    quality_filtered = [
+        c for c in candidates
+        if c.publisher not in LOW_QUALITY_PUBLISHERS and not _is_low_content_headline(c.title)
+    ]
+    relevant = [c for c in quality_filtered if _is_relevant_headline(search_ticker, name, sector, c.title)]
+
+    if relevant:
+        return _most_recent(relevant)
+    if quality_filtered:
+        # Nothing relevant survived, but well-sourced/well-shaped
+        # headlines exist (e.g. a genuinely quiet news week for this
+        # specific company) - fall back to the most recent of those
+        # rather than "Data unavailable.": some context beats none,
+        # same fallback spirit the old quality-only fallback had.
+        logger.info(
+            "fetch_live_news_rag[%s]: no candidate passed the relevance filter, falling back to most recent quality-filtered entry",
+            ticker,
+        )
+        return _most_recent(quality_filtered)
+    # Every candidate in the pool was low-quality - fall back to the
+    # single most recent raw entry rather than "Data unavailable.".
+    logger.info(
+        "fetch_live_news_rag[%s]: no candidate passed quality filtering, falling back to most recent raw entry",
+        ticker,
+    )
+    return _most_recent(candidates)
