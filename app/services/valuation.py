@@ -516,12 +516,7 @@ G1_FLOOR = -0.10
 CONSENSUS_GROWTH_MAGNITUDE_CAP = 0.60
 
 
-def classify_valuation_basis(
-    eps_trailing: float | None,
-    payout_ratio: float | None,
-    sector: str | None,
-    free_cash_flow: float | None,
-) -> str:
+def classify_valuation_basis(fundamentals: dict) -> str:
     """Picks which metric to value, since a single metric can't meaningfully
     value both a bank and a pre-profit growth company. Evaluated in order:
 
@@ -554,6 +549,10 @@ def classify_valuation_basis(
     5. Otherwise -> "eps" (profitable, low payout, not asset-heavy - most
        tech/platform/growth names, and the fallback for financials, whose
        sector is never in ASSET_HEAVY_SECTORS)."""
+    eps_trailing = fundamentals.get("eps_trailing")
+    payout_ratio = fundamentals.get("payout_ratio")
+    sector = fundamentals.get("sector")
+    free_cash_flow = fundamentals.get("free_cash_flow")
     if sector in REIT_SECTORS:
         return "dividends"
     if eps_trailing is None or eps_trailing <= 0:
@@ -1014,9 +1013,10 @@ def _dividend_stream_pv(dividend_rate: float, g2: float, discount_rate: float) -
 
 
 def _scenario_pv(
-    basis: str, cf0: float, g1: float, g2: float, exit_multiple: float, discount_rate: float,
+    basis: str, cf0: float, scenario: dict, discount_rate: float,
     dividend_rate: float | None = None,
 ) -> float:
+    g1, g2, exit_multiple = scenario["g1"], scenario["g2"], scenario["exit_multiple"]
     if basis == "dividends":
         return scenario_dcf_value(cf0, g1, g2, exit_multiple, discount_rate)
     pv = scenario_terminal_value(cf0, g1, g2, exit_multiple, discount_rate)
@@ -1037,9 +1037,7 @@ def scenario_present_values(
     "dividends" basis itself (already IS cf0 there) - see _dividend_
     stream_pv's own comment for why it's added for eps/fcf."""
     return {
-        name: _scenario_pv(
-            basis, cf0, scenario["g1"], scenario["g2"], scenario["exit_multiple"], DISCOUNT_RATE, dividend_rate,
-        )
+        name: _scenario_pv(basis, cf0, scenario, DISCOUNT_RATE, dividend_rate)
         for name, scenario in scenarios.items()
     }
 
@@ -1112,7 +1110,7 @@ def valuation_block(price: float | None, intrinsic: float | None, basis: str) ->
     )
 
 
-def _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block):
+def _log_valuation_computation(ticker, fundamentals, basis_val: BasisValuation, block):
     # INFO (not DEBUG) so it shows up by default under this app's existing
     # logging.basicConfig(level=logging.INFO) (see main.py), matching
     # inference.py's prompt-logging convention - no config change needed to
@@ -1125,6 +1123,7 @@ def _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intr
     # up None (the "Not applicable" case) - that's exactly when knowing WHY
     # (which classification inputs were missing/unusable) is most useful,
     # not less.
+    basis, cf0, scenarios, intrinsic = basis_val
     pvs = scenario_present_values(cf0, basis, scenarios) if cf0 is not None and cf0 > 0 else {}
     source = "curated" if ticker and ticker in CURATED_SCENARIOS else "derived/generic"
     scenario_summary = "; ".join(
@@ -1195,12 +1194,7 @@ def _classify_basis_with_curation_override(ticker: str | None, fundamentals: dic
     judgment should win outright, not just when it coincidentally matches
     a sector/payout-ratio heuristic that has nothing to do with it.
     """
-    basis = classify_valuation_basis(
-        fundamentals.get("eps_trailing"),
-        fundamentals.get("payout_ratio"),
-        fundamentals.get("sector"),
-        fundamentals.get("free_cash_flow"),
-    )
+    basis = classify_valuation_basis(fundamentals)
     is_curated = bool(ticker and ticker in CURATED_SCENARIOS_BASIS)
     if is_curated:
         basis = CURATED_SCENARIOS_BASIS[ticker]
@@ -1208,7 +1202,7 @@ def _classify_basis_with_curation_override(ticker: str | None, fundamentals: dic
 
 
 def _render_eps_one_time_item_skip(
-    ticker: str | None, fundamentals: dict, basis: str, is_curated: bool
+    ticker: str | None, fundamentals: dict, basis: str
 ) -> tuple[str, None] | None:
     """Skips the whole compute/blend/fallback pipeline below entirely when
     the eps basis's trailing EPS looks one-time-item-distorted (see
@@ -1222,25 +1216,26 @@ def _render_eps_one_time_item_skip(
     reason (a heavy AI-infrastructure capex cycle crushing free cash
     flow) - the fallback didn't produce a correct number, just a
     DIFFERENTLY wrong one (flipped from wildly overvalued-looking to
-    wildly undervalued-looking). Not applied to curated tickers - a
-    human already verified those against real analyst work, which
-    would have caught a similarly distorted trailing figure.
+    wildly undervalued-looking). The caller (valuation_assessment_for)
+    only calls this for non-curated tickers - a human already verified
+    curated ones against real analyst work, which would have caught a
+    similarly distorted trailing figure.
 
     Returns the (block, gap_pct) pair to return outright, or None when
     this skip doesn't apply and the normal pipeline should continue.
     """
-    if not is_curated and basis == "eps":
+    if basis == "eps":
         recent_eps_surprise = fundamentals.get("recent_eps_surprise")
         if recent_eps_surprise is not None and recent_eps_surprise > EARNINGS_SURPRISE_ONE_TIME_ITEM_THRESHOLD:
             block = valuation_block(fundamentals["price"], None, "eps")
-            _log_valuation_computation(ticker, fundamentals, "eps", None, {}, None, block)
+            _log_valuation_computation(ticker, fundamentals, BasisValuation("eps", None, {}, None), block)
             return block, None
     return None
 
 
 def _compute_basis_valuation(
     ticker: str | None, fundamentals: dict, basis: str, include_dividend_pv: bool
-) -> tuple[float | None, dict, float | None]:
+) -> BasisValuation:
     """Two separate reasons to skip the dividend-stream add-on
     (_dividend_stream_pv): (1) curated tickers - their g1/g2/
     exit_multiple were fitted end-to-end against the analyst's own
@@ -1264,38 +1259,36 @@ def _compute_basis_valuation(
     scenarios = build_scenarios(ticker, fundamentals, basis)
     dividend_rate = fundamentals.get("dividend_rate") if include_dividend_pv else None
     intrinsic = intrinsic_value(cf0, basis, scenarios, dividend_rate)
-    return cf0, scenarios, intrinsic
+    return BasisValuation(basis, cf0, scenarios, intrinsic)
 
 
 def _blend_across_payout_band(
-    ticker: str | None, fundamentals: dict, basis: str, is_curated: bool
+    ticker: str | None, fundamentals: dict, basis: str
 ) -> BasisValuation | None:
     """Payout-threshold cliff smoothing (see DIVIDEND_PAYOUT_BLEND_HALF_
-    WIDTH) - only for non-curated, non-REIT, non-revenue tickers (a
+    WIDTH) - the caller (valuation_assessment_for) only calls this for
+    non-curated tickers; also skips non-REIT, non-revenue tickers here (a
     revenue-basis company is unprofitable by definition; there's no
     dividends-band payout_ratio for it to straddle). Returns None when
     no blend applies and the caller should compute the plain single-
     basis valuation instead.
     """
     blend_t = None
-    if not is_curated and basis not in ("revenue",) and fundamentals.get("sector") not in REIT_SECTORS:
+    if basis not in ("revenue",) and fundamentals.get("sector") not in REIT_SECTORS:
         blend_t = _payout_blend_fraction(fundamentals.get("payout_ratio"))
     if blend_t is None:
         return None
 
     alt_basis = _classify_alternate_basis(fundamentals.get("sector"), fundamentals.get("free_cash_flow"))
-    div_cf0, div_scenarios, div_iv = _compute_basis_valuation(ticker, fundamentals, "dividends", False)
-    alt_cf0, alt_scenarios, alt_iv = _compute_basis_valuation(ticker, fundamentals, alt_basis, False)
-    if div_iv is not None and alt_iv is not None:
-        intrinsic = blend_t * div_iv + (1 - blend_t) * alt_iv
-        basis, cf0, scenarios = (
-            ("dividends", div_cf0, div_scenarios) if blend_t >= 0.5 else (alt_basis, alt_cf0, alt_scenarios)
-        )
-    elif div_iv is not None:
-        basis, cf0, scenarios, intrinsic = "dividends", div_cf0, div_scenarios, div_iv
-    else:
-        basis, cf0, scenarios, intrinsic = alt_basis, alt_cf0, alt_scenarios, alt_iv
-    return BasisValuation(basis, cf0, scenarios, intrinsic)
+    div = _compute_basis_valuation(ticker, fundamentals, "dividends", False)
+    alt = _compute_basis_valuation(ticker, fundamentals, alt_basis, False)
+    if div.intrinsic is not None and alt.intrinsic is not None:
+        intrinsic = blend_t * div.intrinsic + (1 - blend_t) * alt.intrinsic
+        chosen = div if blend_t >= 0.5 else alt
+        return BasisValuation(chosen.basis, chosen.cf0, chosen.scenarios, intrinsic)
+    if div.intrinsic is not None:
+        return div
+    return alt
 
 
 def _fallback_to_other_basis(ticker: str | None, fundamentals: dict, current: BasisValuation) -> BasisValuation:
@@ -1314,9 +1307,9 @@ def _fallback_to_other_basis(ticker: str | None, fundamentals: dict, current: Ba
     for fallback_basis in FALLBACK_BASIS_ORDER:
         if fallback_basis == current.basis:
             continue
-        fb_cf0, fb_scenarios, fb_intrinsic = _compute_basis_valuation(ticker, fundamentals, fallback_basis, True)
-        if fb_intrinsic is not None:
-            return BasisValuation(fallback_basis, fb_cf0, fb_scenarios, fb_intrinsic)
+        candidate = _compute_basis_valuation(ticker, fundamentals, fallback_basis, True)
+        if candidate.intrinsic is not None:
+            return candidate
     return current
 
 
@@ -1348,24 +1341,23 @@ def valuation_assessment_for(fundamentals: dict | None, ticker: str | None = Non
 
     basis, is_curated = _classify_basis_with_curation_override(ticker, fundamentals)
 
-    skip_result = _render_eps_one_time_item_skip(ticker, fundamentals, basis, is_curated)
-    if skip_result is not None:
-        return skip_result
+    blend_result = None
+    if not is_curated:
+        skip_result = _render_eps_one_time_item_skip(ticker, fundamentals, basis)
+        if skip_result is not None:
+            return skip_result
 
-    blend_result = _blend_across_payout_band(ticker, fundamentals, basis, is_curated)
-    if blend_result is not None:
-        basis, cf0, scenarios, intrinsic = blend_result
-    else:
-        cf0, scenarios, intrinsic = _compute_basis_valuation(ticker, fundamentals, basis, not is_curated)
+        blend_result = _blend_across_payout_band(ticker, fundamentals, basis)
+    basis_val = (
+        blend_result if blend_result is not None else _compute_basis_valuation(ticker, fundamentals, basis, not is_curated)
+    )
 
-    if intrinsic is None:
-        basis, cf0, scenarios, intrinsic = _fallback_to_other_basis(
-            ticker, fundamentals, BasisValuation(basis, cf0, scenarios, intrinsic)
-        )
+    if basis_val.intrinsic is None:
+        basis_val = _fallback_to_other_basis(ticker, fundamentals, basis_val)
 
-    block = valuation_block(fundamentals["price"], intrinsic, basis)
-    _log_valuation_computation(ticker, fundamentals, basis, cf0, scenarios, intrinsic, block)
+    block = valuation_block(fundamentals["price"], basis_val.intrinsic, basis_val.basis)
+    _log_valuation_computation(ticker, fundamentals, basis_val, block)
     gap_pct = None
-    if intrinsic is not None and intrinsic != 0:
-        gap_pct = (fundamentals["price"] - intrinsic) / intrinsic * 100
+    if basis_val.intrinsic is not None and basis_val.intrinsic != 0:
+        gap_pct = (fundamentals["price"] - basis_val.intrinsic) / basis_val.intrinsic * 100
     return block, gap_pct

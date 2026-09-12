@@ -6,7 +6,7 @@ from app.deps import verify_api_key
 from app.models import QueryRequest
 from app.services.earnings import earnings_block, fetch_earnings
 from app.services.fundamentals import fetch_fundamentals, market_data_block, price_move_on_date
-from app.services.inference import analyze_two_stage
+from app.services.inference import MarketContext, analyze_two_stage
 from app.services.news import fetch_live_news_rag
 from app.services.ticker import extract_ticker
 from app.services.valuation import valuation_assessment_for
@@ -53,7 +53,8 @@ async def analyze_stock(req: QueryRequest):
     market_data = market_data_block(fundamentals)
     valuation, gap_pct = valuation_assessment_for(fundamentals, ticker=valuation_ticker)
     earnings = earnings_block(earnings_data)
+    context = MarketContext(market_data=market_data, valuation=valuation, earnings=earnings, live_context=live_context)
     return await analyze_two_stage(
-        ticker, req.user_query, live_context, market_data, valuation, earnings, price_context, gap_pct,
+        ticker, req.user_query, context, price_context, gap_pct,
         ticker_was_explicit=ticker_was_explicit,
     )

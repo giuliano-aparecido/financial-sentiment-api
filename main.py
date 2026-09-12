@@ -20,7 +20,7 @@ async def lifespan(_app: FastAPI):
     await inference.start_client()
     # Seeds the process-wide yfinance crumb/cookie singleton from YF_SEED_
     # CRUMB/YF_SEED_COOKIES (see swiss_universe.py's own docstring on
-    # _seed_yf_session_from_env for the full "why" - Render's outbound IP
+    # seed_yf_session_from_env for the full "why" - Render's outbound IP
     # is blocked at Yahoo's crumb-fetch endpoint). Confirmed live
     # (2026-08-20): this was previously called ONLY from inside the Swiss
     # research scan's discover_candidates() - the seeded crumb protected
@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI):
     # is malformed or missing; degrading to "no seed this boot" is far
     # better than the entire service failing to come up.
     try:
-        swiss_universe._seed_yf_session_from_env()
+        swiss_universe.seed_yf_session_from_env()
     except Exception:
         logging.getLogger(__name__).exception("Failed to seed yfinance crumb/cookies at startup - continuing without a seed")
     # In-process cron for the rebound/volatility-indicator research scans -

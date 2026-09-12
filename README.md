@@ -25,7 +25,7 @@ doing it properly, not because it needs to scale or handle real traffic.
   module's own comments)
 - **APScheduler** — in-process cron for those same two scans (`app/
   services/scheduler.py`) — no external trigger (GitHub Actions, etc.)
-- **pytest** — run via GitHub Actions on every push/PR
+- **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
 
 ## Architecture
 
@@ -178,8 +178,9 @@ pytest
 ## Deployment
 
 Render, via the `Dockerfile` (pinned base image digest, non-root user,
-healthcheck against `/health`). CI (`.github/workflows/test.yml`) runs
-the test suite on every push/PR to `master`.
+healthcheck against `/health`). No CI is currently configured (the
+`.github/workflows/` directory was removed) — run `pytest` locally
+before opening a PR.
 
 ## Contributing
 

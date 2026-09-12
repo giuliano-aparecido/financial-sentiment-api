@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from dataclasses import dataclass
 
 import httpx
 from fastapi import HTTPException
@@ -173,9 +174,20 @@ Recent News & Results:
 """
 
 
+@dataclass(frozen=True)
+class MarketContext:
+    """Bundles the fetched-context blocks threaded through the Task B
+    pipeline (_build_analysis_prompt/generate_analysis/analyze_two_stage)
+    - already-rendered text from market_data_block/valuation_assessment_
+    for/earnings_block/fetch_live_news_rag, not fetched again here."""
+    market_data: str
+    valuation: str
+    earnings: str
+    live_context: str
+
+
 def _build_analysis_prompt(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str,
-    market_data: str, valuation: str, earnings: str, live_context: str,
+    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
 ) -> str:
     # Canonical Task B template - same sync requirement as
     # _build_reaction_prompt above. news_reaction/recommendation are
@@ -200,16 +212,16 @@ News Reaction: {news_reaction}
 Recommended Action: {recommendation}
 
 Current Market Data:
-{market_data}
+{context.market_data}
 
 Valuation:
-{valuation}
+{context.valuation}
 
 Recent Earnings:
-{earnings}
+{context.earnings}
 
 Recent News & Results:
-{live_context}
+{context.live_context}
 
 ### Response:
 
@@ -240,8 +252,7 @@ async def classify_news(ticker: str, price_context: str, live_context: str) -> s
 
 
 async def generate_analysis(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str,
-    market_data: str, valuation: str, earnings: str, live_context: str,
+    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
 ) -> dict:
     """Task B: writes reasoning/answer given an ALREADY-DECIDED news_
     reaction + recommendation (never asked to produce either). Returns
@@ -251,9 +262,7 @@ async def generate_analysis(
     regardless, since none of those ever depended on this call
     succeeding (a strict improvement over the old single-call design,
     where a parse failure lost the recommendation entirely)."""
-    prompt = _build_analysis_prompt(
-        ticker, user_query, news_reaction, recommendation, market_data, valuation, earnings, live_context,
-    )
+    prompt = _build_analysis_prompt(ticker, user_query, news_reaction, recommendation, context)
     raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis")
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
@@ -268,10 +277,7 @@ async def generate_analysis(
 async def analyze_two_stage(
     ticker: str,
     user_query: str,
-    live_context: str,
-    market_data: str,
-    valuation: str,
-    earnings: str,
+    context: MarketContext,
     price_context: str,
     gap_pct: float | None,
     ticker_was_explicit: bool = True,
@@ -284,7 +290,7 @@ async def analyze_two_stage(
     old single-call analyze_with_hf. ticker_was_explicit just passes
     through to the result dict (see ticker.extract_ticker) - never
     affects Task A/B or fusion, purely informational for the frontend."""
-    news_reaction = await classify_news(ticker, price_context, live_context)
+    news_reaction = await classify_news(ticker, price_context, context.live_context)
     news_reaction_fallback = news_reaction is None
     if news_reaction_fallback:
         # Fusion still yields a valuation-driven recommendation off
@@ -297,23 +303,20 @@ async def analyze_two_stage(
 
     fusion_result = fuse(news_reaction, gap_pct)
 
-    analysis = await generate_analysis(
-        ticker, user_query, news_reaction, fusion_result.recommendation,
-        market_data, valuation, earnings, live_context,
-    )
+    analysis = await generate_analysis(ticker, user_query, news_reaction, fusion_result.recommendation, context)
 
     result = {
         "model_architecture": MODEL_ARCHITECTURE,
         "ticker": ticker,
         "ticker_was_explicit": ticker_was_explicit,
-        "live_news_retrieved": live_context,
+        "live_news_retrieved": context.live_context,
         "recommendation": fusion_result.recommendation,
         "confidence": fusion_result.confidence,
         "news_reaction": news_reaction,
         "valuation_gap_pct": gap_pct,
-        "market_data": market_data,
-        "valuation": valuation,
-        "earnings": earnings,
+        "market_data": context.market_data,
+        "valuation": context.valuation,
+        "earnings": context.earnings,
         "raw_json": {"task_a": {"news_reaction": news_reaction}, "task_b": analysis.get("raw_json")},
     }
     if news_reaction_fallback:

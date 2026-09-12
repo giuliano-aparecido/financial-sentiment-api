@@ -56,6 +56,28 @@ def fetch_earnings(ticker: str) -> dict | None:
         return None
     income, earnings_dates = statements
 
+    revenue_info = _extract_revenue_and_growth(income)
+    if revenue_info is None:
+        return None
+    last_period, revenue, yoy_growth_pct = revenue_info
+
+    eps_actual, eps_estimate, next_earnings_date = _extract_eps_fields(earnings_dates)
+
+    return {
+        "last_quarter_date": last_period.date().isoformat(),
+        "revenue": revenue,
+        "yoy_growth_pct": yoy_growth_pct,
+        "eps_actual": eps_actual,
+        "eps_estimate": eps_estimate,
+        "next_earnings_date": next_earnings_date,
+    }
+
+
+def _extract_revenue_and_growth(income):
+    """(last_period, revenue, yoy_growth_pct) for the most recent reported
+    quarter in `income` (see fetch_earnings), or None if there's no usable
+    revenue row at all. yoy_growth_pct is None when no quarter ~365 days
+    earlier exists to compare against."""
     revenue_row = income.loc["Total Revenue"].dropna()
     if revenue_row.empty:
         return None
@@ -71,32 +93,36 @@ def fetch_earnings(ticker: str) -> dict | None:
         if prior_revenue:
             yoy_growth_pct = (revenue - prior_revenue) / prior_revenue * 100
 
+    return last_period, revenue, yoy_growth_pct
+
+
+def _extract_eps_fields(earnings_dates):
+    """(eps_actual, eps_estimate, next_earnings_date) from `earnings_dates`
+    (see fetch_earnings) - eps_actual/eps_estimate come from the most
+    recent PAST row with a reported EPS; next_earnings_date is the
+    earliest FUTURE row's date, independent of whether that row has EPS
+    data yet (it never would, being in the future)."""
     eps_actual, eps_estimate, next_earnings_date = None, None, None
-    if earnings_dates is not None and not earnings_dates.empty:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        if earnings_dates.index.tz is None:
-            now = now.replace(tzinfo=None)
+    if earnings_dates is None or earnings_dates.empty:
+        return eps_actual, eps_estimate, next_earnings_date
 
-        if "Reported EPS" in earnings_dates.columns:
-            reported = earnings_dates.dropna(subset=["Reported EPS"])
-            past = reported[reported.index < now]
-            if not past.empty:
-                row = past.sort_index(ascending=False).iloc[0]
-                eps_actual = row.get("Reported EPS")
-                eps_estimate = row.get("EPS Estimate")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if earnings_dates.index.tz is None:
+        now = now.replace(tzinfo=None)
 
-        future = earnings_dates[earnings_dates.index > now]
-        if not future.empty:
-            next_earnings_date = future.sort_index().index.min().date().isoformat()
+    if "Reported EPS" in earnings_dates.columns:
+        reported = earnings_dates.dropna(subset=["Reported EPS"])
+        past = reported[reported.index < now]
+        if not past.empty:
+            row = past.sort_index(ascending=False).iloc[0]
+            eps_actual = row.get("Reported EPS")
+            eps_estimate = row.get("EPS Estimate")
 
-    return {
-        "last_quarter_date": last_period.date().isoformat(),
-        "revenue": revenue,
-        "yoy_growth_pct": yoy_growth_pct,
-        "eps_actual": eps_actual,
-        "eps_estimate": eps_estimate,
-        "next_earnings_date": next_earnings_date,
-    }
+    future = earnings_dates[earnings_dates.index > now]
+    if not future.empty:
+        next_earnings_date = future.sort_index().index.min().date().isoformat()
+
+    return eps_actual, eps_estimate, next_earnings_date
 
 
 def earnings_block(earnings: dict | None) -> str:

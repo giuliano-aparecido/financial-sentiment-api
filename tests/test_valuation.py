@@ -28,26 +28,26 @@ def test_classify_reit_uses_dividends_basis_regardless_of_low_payout_ratio():
     # against depreciation-depressed GAAP earnings, not the real cash REITs
     # actually distribute. The Real Estate sector override must win even
     # when payout_ratio alone would say "eps".
-    assert classify_valuation_basis(eps_trailing=11.49, payout_ratio=0.34, sector="Real Estate", free_cash_flow=None) == "dividends"
+    assert classify_valuation_basis({"eps_trailing": 11.49, "payout_ratio": 0.34, "sector": "Real Estate", "free_cash_flow": None}) == "dividends"
 
 
 def test_classify_reit_uses_dividends_basis_even_when_technically_unprofitable():
     # GAAP depreciation can push a healthy REIT's reported EPS to zero or
     # negative - the sector override must win before the profitability
     # check, not after it (a REIT should never fall to "revenue").
-    assert classify_valuation_basis(eps_trailing=-0.5, payout_ratio=None, sector="Real Estate", free_cash_flow=None) == "dividends"
+    assert classify_valuation_basis({"eps_trailing": -0.5, "payout_ratio": None, "sector": "Real Estate", "free_cash_flow": None}) == "dividends"
 
 
 def test_classify_unprofitable_company_uses_revenue_basis():
-    assert classify_valuation_basis(eps_trailing=-1.0, payout_ratio=None, sector="Technology", free_cash_flow=None) == "revenue"
+    assert classify_valuation_basis({"eps_trailing": -1.0, "payout_ratio": None, "sector": "Technology", "free_cash_flow": None}) == "revenue"
 
 
 def test_classify_missing_eps_uses_revenue_basis():
-    assert classify_valuation_basis(eps_trailing=None, payout_ratio=0.5, sector="Energy", free_cash_flow=1e9) == "revenue"
+    assert classify_valuation_basis({"eps_trailing": None, "payout_ratio": 0.5, "sector": "Energy", "free_cash_flow": 1e9}) == "revenue"
 
 
 def test_classify_zero_eps_uses_revenue_basis():
-    assert classify_valuation_basis(eps_trailing=0.0, payout_ratio=None, sector="Technology", free_cash_flow=None) == "revenue"
+    assert classify_valuation_basis({"eps_trailing": 0.0, "payout_ratio": None, "sector": "Technology", "free_cash_flow": None}) == "revenue"
 
 
 def test_classify_high_payout_uses_dividends_basis():
@@ -56,11 +56,11 @@ def test_classify_high_payout_uses_dividends_basis():
     # payout ratio (~0.525) - see CURATED_SCENARIOS_BASIS's override in
     # valuation_block_for, which wins for curated tickers regardless of
     # what this classifier alone would say.
-    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=0.62, sector="Consumer Defensive", free_cash_flow=1e9) == "dividends"
+    assert classify_valuation_basis({"eps_trailing": 3.5, "payout_ratio": 0.62, "sector": "Consumer Defensive", "free_cash_flow": 1e9}) == "dividends"
 
 
 def test_classify_payout_exactly_at_threshold_uses_dividends_basis():
-    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=DIVIDEND_PAYOUT_THRESHOLD, sector="Technology", free_cash_flow=None) == "dividends"
+    assert classify_valuation_basis({"eps_trailing": 3.5, "payout_ratio": DIVIDEND_PAYOUT_THRESHOLD, "sector": "Technology", "free_cash_flow": None}) == "dividends"
 
 
 def test_classify_payout_above_ceiling_falls_through_to_fcf_not_dividends():
@@ -70,7 +70,7 @@ def test_classify_payout_above_ceiling_falls_through_to_fcf_not_dividends():
     # chemicals company holding its dividend flat, not a genuine
     # Kinder-Morgan-style cash-cow payout policy - it should fall through
     # to the asset-heavy/fcf check, not get caught by the payout check.
-    assert classify_valuation_basis(eps_trailing=1.4, payout_ratio=1.79, sector="Basic Materials", free_cash_flow=5e8) == "fcf"
+    assert classify_valuation_basis({"eps_trailing": 1.4, "payout_ratio": 1.79, "sector": "Basic Materials", "free_cash_flow": 5e8}) == "fcf"
 
 
 def test_classify_payout_above_ceiling_falls_through_to_eps_when_fcf_unusable():
@@ -78,38 +78,38 @@ def test_classify_payout_above_ceiling_falls_through_to_eps_when_fcf_unusable():
     # currently negative (also confirmed live for DSM-Firmenich) - must
     # land on "eps", not get stuck on "dividends" via the excluded payout
     # check, and not misfire into "fcf" with an unusable negative figure.
-    assert classify_valuation_basis(eps_trailing=1.4, payout_ratio=1.79, sector="Basic Materials", free_cash_flow=-1.4e8) == "eps"
+    assert classify_valuation_basis({"eps_trailing": 1.4, "payout_ratio": 1.79, "sector": "Basic Materials", "free_cash_flow": -1.4e8}) == "eps"
 
 
 def test_classify_payout_at_ceiling_still_uses_dividends_basis():
-    assert classify_valuation_basis(eps_trailing=3.5, payout_ratio=1.20, sector="Technology", free_cash_flow=None) == "dividends"
+    assert classify_valuation_basis({"eps_trailing": 3.5, "payout_ratio": 1.20, "sector": "Technology", "free_cash_flow": None}) == "dividends"
 
 
 def test_classify_asset_heavy_sector_with_positive_fcf_uses_fcf_basis():
-    assert classify_valuation_basis(eps_trailing=5.0, payout_ratio=0.10, sector="Industrials", free_cash_flow=2e9) == "fcf"
+    assert classify_valuation_basis({"eps_trailing": 5.0, "payout_ratio": 0.10, "sector": "Industrials", "free_cash_flow": 2e9}) == "fcf"
 
 
 def test_classify_asset_heavy_sector_without_fcf_falls_back_to_eps():
     # Confirmed live: yfinance's freeCashflow is None for banks (Financial
     # Services isn't in ASSET_HEAVY_SECTORS anyway, but this also covers an
     # asset-heavy company mid capex-spike with no usable FCF figure).
-    assert classify_valuation_basis(eps_trailing=5.0, payout_ratio=0.10, sector="Industrials", free_cash_flow=None) == "eps"
+    assert classify_valuation_basis({"eps_trailing": 5.0, "payout_ratio": 0.10, "sector": "Industrials", "free_cash_flow": None}) == "eps"
 
 
 def test_classify_asset_heavy_sector_with_negative_fcf_falls_back_to_eps():
-    assert classify_valuation_basis(eps_trailing=5.0, payout_ratio=0.10, sector="Energy", free_cash_flow=-5e8) == "eps"
+    assert classify_valuation_basis({"eps_trailing": 5.0, "payout_ratio": 0.10, "sector": "Energy", "free_cash_flow": -5e8}) == "eps"
 
 
 def test_classify_profitable_low_payout_non_asset_heavy_uses_eps_basis():
     # Matches AAPL-style tech (real payout ratio ~0.12).
-    assert classify_valuation_basis(eps_trailing=8.71, payout_ratio=0.12, sector="Technology", free_cash_flow=1e11) == "eps"
+    assert classify_valuation_basis({"eps_trailing": 8.71, "payout_ratio": 0.12, "sector": "Technology", "free_cash_flow": 1e11}) == "eps"
 
 
 def test_classify_bank_uses_eps_basis_via_fallback():
     # Financial Services is never in ASSET_HEAVY_SECTORS, and yfinance's
     # freeCashflow is None for banks in practice (confirmed live for JPM) -
     # both independently route here to "eps".
-    assert classify_valuation_basis(eps_trailing=15.0, payout_ratio=0.26, sector="Financial Services", free_cash_flow=None) == "eps"
+    assert classify_valuation_basis({"eps_trailing": 15.0, "payout_ratio": 0.26, "sector": "Financial Services", "free_cash_flow": None}) == "eps"
 
 
 # --- cash_flow_basis_value ---
@@ -739,9 +739,7 @@ def test_valuation_block_for_curated_ticker_overrides_generic_classification():
         "free_cash_flow": 3.0e10,
         "market_cap": 4.5e11,
     }
-    assert classify_valuation_basis(
-        fundamentals["eps_trailing"], fundamentals["payout_ratio"], fundamentals["sector"], fundamentals["free_cash_flow"]
-    ) == "fcf"
+    assert classify_valuation_basis(fundamentals) == "fcf"
     assert "EPS-based" in valuation_block_for(fundamentals, ticker="XOM")
 
 
