@@ -238,6 +238,12 @@ async def classify_news(ticker: str, price_context: str, live_context: str) -> s
     on an unrecognized reaction by design (a real bug should never be
     silently masked by an accidental fallback recommendation)."""
     prompt = _build_reaction_prompt(ticker, price_context, live_context)
+    # 48 is sized for this task's entire output: {"news_reaction": "<one of
+    # _VALID_NEWS_REACTIONS>"} - a handful of tokens for the label plus JSON
+    # punctuation, nothing more. Too low here would silently truncate the
+    # JSON mid-object rather than error, so json.loads below would fail and
+    # this would fall back to None with no indication the real cause was
+    # truncation rather than a genuinely malformed response.
     raw_text = await _call_model(prompt, max_new_tokens=48, ticker=ticker, task_label="reaction")
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
@@ -263,6 +269,12 @@ async def generate_analysis(
     succeeding (a strict improvement over the old single-call design,
     where a parse failure lost the recommendation entirely)."""
     prompt = _build_analysis_prompt(ticker, user_query, news_reaction, recommendation, context)
+    # 512 has to cover this task's full {"reasoning": "...", "answer": "..."}
+    # output - multi-sentence prose, not a short label like Task A's. Too low
+    # here would silently truncate the JSON mid-object rather than error, so
+    # json.loads below would fail and this would fall back to raw_response
+    # with no indication the real cause was truncation rather than a
+    # genuinely malformed response.
     raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis")
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
