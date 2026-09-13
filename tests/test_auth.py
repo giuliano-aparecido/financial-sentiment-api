@@ -36,6 +36,15 @@ def test_update_inference_url_rejects_disallowed_host(client):
     assert response.status_code == 400
 
 
+def test_update_inference_url_rejects_http_scheme_for_allowed_host(client):
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "http://abc123.ngrok-free.app"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 400
+
+
 def test_update_inference_url_accepts_allowed_host(client):
     response = client.post(
         "/api/update-inference-url",
