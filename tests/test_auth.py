@@ -37,10 +37,6 @@ def test_update_inference_url_rejects_disallowed_host(client):
 
 
 def test_update_inference_url_rejects_http_scheme_for_allowed_host(client):
-    # The only other rejection test (rejects_disallowed_host) uses a URL
-    # that's both http AND a disallowed host, so it never isolates the
-    # scheme check on its own - this confirms the https-only guard rejects
-    # an otherwise-allowlisted host too, not just non-allowlisted ones.
     response = client.post(
         "/api/update-inference-url",
         json={"url": "http://abc123.ngrok-free.app"},
