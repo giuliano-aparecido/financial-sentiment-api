@@ -13,6 +13,25 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 HF_API_TOKEN = os.getenv("HF_TOKEN")
 
+
+def require_hf_api_token() -> None:
+    """Fails loudly and specifically if HF_API_TOKEN is missing - same
+    style as DATABASE_CONNECTION_STRING's check in app/db/session.py's
+    _session_factory(). Without this, app/services/inference.py's
+    _call_model sends `Authorization: Bearer None` on every call, and
+    every one fails with the SAME generic 502 a real backend outage would
+    produce - indistinguishable from this repo's own misconfiguration.
+    Called from inference.start_client() (app startup, main.py's
+    lifespan), not at import time here, so unrelated code that merely
+    imports this module (alembic migrations, tests that never exercise
+    inference) isn't forced to have HF_TOKEN set just to import it - same
+    lazy-check reasoning as _session_factory()'s own comment."""
+    if not HF_API_TOKEN:
+        raise RuntimeError(
+            "HF_TOKEN is not set - required for calling the Hugging Face inference backend (app/services/inference.py)."
+        )
+
+
 # Neon Postgres connection string for the research-scan persistence layer
 # (app/db, app/services/scan_persistence.py) - same variable name already
 # set on Render (see that service's env vars), not the DATABASE_URL name
@@ -33,13 +52,38 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_URL", DEFAULT_MODELS.get(MODEL_ARCHITECTURE,
 
 DEFAULT_HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL") or f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}"
 
-ALLOWED_INFERENCE_HOST_SUFFIXES = tuple(
-    suffix.strip()
-    for suffix in os.getenv(
+# Modal endpoints for different models - defaults to HF API for llama
+LLAMA_INFERENCE_URL = os.getenv("LLAMA_INFERENCE_URL", DEFAULT_HF_INFERENCE_URL)
+APERTUS_INFERENCE_URL = os.getenv("APERTUS_INFERENCE_URL")  # Must be set for apertus model
+
+
+def get_inference_url_for_model(model: str) -> str:
+    """Returns the inference endpoint URL for the given model name."""
+    model_lower = (model or "llama").lower().strip()
+    if model_lower == "apertus":
+        if not APERTUS_INFERENCE_URL:
+            raise RuntimeError("APERTUS_INFERENCE_URL is not set - required to use the apertus model")
+        return APERTUS_INFERENCE_URL
+    elif model_lower in ("llama", ""):
+        return LLAMA_INFERENCE_URL
+    else:
+        raise ValueError(f"Unknown model: {model_lower}. Supported: 'llama', 'apertus'")
+
+
+def _parse_allowed_host_suffixes(raw: str) -> tuple[str, ...]:
+    # Lowercased so this matches regardless of the case an operator sets
+    # ALLOWED_INFERENCE_HOST_SUFFIXES in - is_allowed_inference_host below
+    # compares against a host its caller has already lowercased (see
+    # admin.py's update_inference_url), so a mixed-case suffix here used to
+    # silently never match anything, fail-closed.
+    return tuple(suffix.strip().lower() for suffix in raw.split(",") if suffix.strip())
+
+
+ALLOWED_INFERENCE_HOST_SUFFIXES = _parse_allowed_host_suffixes(
+    os.getenv(
         "ALLOWED_INFERENCE_HOST_SUFFIXES",
         "ngrok-free.app,ngrok-free.dev,ngrok-free.pizza,ngrok.io,ngrok.app,huggingface.cloud,huggingface.co,modal.run",
-    ).split(",")
-    if suffix.strip()
+    )
 )
 
 

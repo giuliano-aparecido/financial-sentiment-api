@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from app.services import inference
 
 MARKET_DATA = "Price: $189.30 | Market Cap: $2.95T\nP/E (trailing): 31.2 | P/E (forward): 27.8\nEPS (trailing): $6.07 | Dividend Yield: 0.55%\n52-Week Range: $164.08 - $237.23"
@@ -66,6 +68,33 @@ def _run_two_stage(gap_pct=None, ticker_was_explicit=True):
         "AAPL", "Is AAPL a buy?", CONTEXT, PRICE_CONTEXT, gap_pct,
         ticker_was_explicit=ticker_was_explicit,
     )
+
+
+# --- start_client (HF_API_TOKEN presence check) ---
+
+
+def test_start_client_checks_hf_api_token_presence(monkeypatch):
+    calls = []
+    monkeypatch.setattr(inference, "require_hf_api_token", lambda: calls.append(1))
+    _run(inference.start_client())
+    try:
+        assert calls == [1]
+    finally:
+        _run(inference.stop_client())
+
+
+def test_start_client_propagates_missing_token_error(monkeypatch):
+    # Regression: HF_API_TOKEN used to have no presence check at all -
+    # _call_model would send `Authorization: Bearer None` and every
+    # inference call would fail with the same generic 502 a real backend
+    # outage produces. start_client() (run at app startup, see main.py's
+    # lifespan) must now fail loudly and specifically instead.
+    def _boom():
+        raise RuntimeError("HF_TOKEN is not set - required for calling the Hugging Face inference backend.")
+
+    monkeypatch.setattr(inference, "require_hf_api_token", _boom)
+    with pytest.raises(RuntimeError, match="HF_TOKEN"):
+        _run(inference.start_client())
 
 
 # --- classify_news (Task A) ---

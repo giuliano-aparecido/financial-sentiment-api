@@ -100,6 +100,34 @@ def test_merge_rebound_retry_rows_noop_on_empty_list(sqlite_session):
     assert [r["ticker"] for r in rows] == ["NESN.SW"]
 
 
+def test_merge_rebound_retry_rows_is_idempotent_after_a_crash_before_failed_tickers_update(sqlite_session):
+    # Regression: merge_rebound_retry_rows and the subsequent
+    # update_rebound_run_failed_tickers call commit in SEPARATE sessions
+    # (see scheduler._retry_failed_rebound_tickers) - a crash between the
+    # two used to leave a ticker both persisted here AND still listed as
+    # failed, so the NEXT retry re-fetched and re-merged the SAME ticker,
+    # inserting a second row for it under the same scan_run_at instead of
+    # replacing the first.
+    scan_run_at = _dt(2026, 8, 19, 6, 0)
+    scan_persistence.save_rebound_scan(
+        [{"ticker": "NESN.SW"}], failed_tickers=["ZURN.SW"], scan_run_at=scan_run_at,
+    )
+
+    # First retry recovers ZURN.SW - simulate the crash by never calling
+    # update_rebound_run_failed_tickers afterwards.
+    scan_persistence.merge_rebound_retry_rows(scan_run_at, [{"ticker": "ZURN.SW", "drop_pct": -4.0}])
+
+    # Next retry still thinks ZURN.SW is failing (failed_tickers was never
+    # updated) and re-merges a fresh row for it.
+    scan_persistence.merge_rebound_retry_rows(scan_run_at, [{"ticker": "ZURN.SW", "drop_pct": -4.5}])
+
+    rows, _scan_run_at, _failed = scan_persistence.get_latest_rebound_scan()
+    zurn_rows = [r for r in rows if r["ticker"] == "ZURN.SW"]
+    assert len(zurn_rows) == 1  # not duplicated
+    assert zurn_rows[0]["drop_pct"] == -4.5  # latest merge wins
+    assert {r["ticker"] for r in rows} == {"NESN.SW", "ZURN.SW"}
+
+
 def test_update_rebound_run_failed_tickers_overwrites_the_list(sqlite_session):
     scan_run_at = _dt(2026, 8, 19, 6, 0)
     scan_persistence.save_rebound_scan(
@@ -173,6 +201,25 @@ def test_merge_indicator_retry_rows_noop_on_empty_list(sqlite_session):
 
     rows, _run_at, _failed = scan_persistence.get_latest_indicator_scan(2.0)
     assert [r["ticker"] for r in rows] == ["A.SW"]
+
+
+def test_merge_indicator_retry_rows_is_idempotent_after_a_crash_before_failed_tickers_update(sqlite_session):
+    # Same regression as test_merge_rebound_retry_rows_is_idempotent_
+    # after_a_crash_before_failed_tickers_update, for the indicator-scan
+    # counterpart (merge_indicator_retry_rows / scheduler._retry_failed_
+    # indicator_tickers).
+    scan_run_at = _dt(2026, 8, 1, 4, 0)
+    scan_persistence.save_indicator_scan(
+        [{"ticker": "A.SW"}], threshold_pct=2.0, failed_tickers=["ZURN.SW"], scan_run_at=scan_run_at,
+    )
+
+    scan_persistence.merge_indicator_retry_rows(scan_run_at, 2.0, [{"ticker": "ZURN.SW", "loss_days": 3}])
+    scan_persistence.merge_indicator_retry_rows(scan_run_at, 2.0, [{"ticker": "ZURN.SW", "loss_days": 4}])
+
+    rows, _run_at, _failed = scan_persistence.get_latest_indicator_scan(2.0)
+    zurn_rows = [r for r in rows if r["ticker"] == "ZURN.SW"]
+    assert len(zurn_rows) == 1  # not duplicated
+    assert zurn_rows[0]["loss_days"] == 4  # latest merge wins
 
 
 def test_update_indicator_run_failed_tickers_overwrites_the_shared_list(sqlite_session):
