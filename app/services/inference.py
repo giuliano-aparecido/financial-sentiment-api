@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import HTTPException
 
-from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE, require_hf_api_token
+from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE, get_inference_url_for_model, require_hf_api_token
 from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
@@ -81,21 +81,15 @@ def _client_or_raise() -> httpx.AsyncClient:
     return _client
 
 
-async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_label: str) -> str:
-    """POSTs `prompt` to the configured HF inference endpoint and returns
-    the raw generated text - the shared transport core both classify_news
-    (Task A) and generate_analysis (Task B) build on. Raises
-    HTTPException(502) on any transport failure, non-200 response, or
-    unexpected response shape; a PARSE failure of otherwise-successful
+async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_label: str, model: str = "llama") -> str:
+    """POSTs `prompt` to the configured inference endpoint for the given
+    model and returns the raw generated text - the shared transport core
+    both classify_news (Task A) and generate_analysis (Task B) build on.
+    Raises HTTPException(502) on any transport failure, non-200 response,
+    or unexpected response shape; a PARSE failure of otherwise-successful
     generated text is each caller's own concern, not this function's."""
-    # Full prompt, not truncated - unlike the response-body logging below,
-    # the whole point here is to let you verify exactly what data/formatting
-    # reached the model (e.g. confirming market_data/valuation/earnings are
-    # populated and not silently "Data unavailable."), so cutting it short
-    # would defeat that. INFO (not DEBUG) so it shows up by default under
-    # this app's logging.basicConfig(level=logging.INFO) - no config change
-    # needed to see it in Render's log stream.
-    logger.info("Prompt sent to [%s/%s] for ticker=%s:\n%s", MODEL_ARCHITECTURE, task_label, ticker, prompt)
+    inference_url = get_inference_url_for_model(model)
+    logger.info("Prompt sent to [%s/%s] (model=%s) for ticker=%s:\n%s", MODEL_ARCHITECTURE, task_label, model, ticker, prompt)
 
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {
@@ -109,9 +103,9 @@ async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_lab
 
     client = _client_or_raise()
     try:
-        response = await client.post(_hf_inference_url, headers=headers, json=payload)
+        response = await client.post(inference_url, headers=headers, json=payload)
     except httpx.RequestError as e:
-        logger.warning("HF inference request failed for [%s/%s] at %s: %s", MODEL_ARCHITECTURE, task_label, _hf_inference_url, e)
+        logger.warning("HF inference request failed for [%s/%s] at %s: %s", MODEL_ARCHITECTURE, task_label, inference_url, e)
         raise HTTPException(status_code=502, detail="Failed to reach the inference backend.")
 
     if response.status_code != 200:
@@ -233,7 +227,7 @@ Recent News & Results:
 """
 
 
-async def classify_news(ticker: str, price_context: str, live_context: str) -> str | None:
+async def classify_news(ticker: str, price_context: str, live_context: str, model: str = "llama") -> str | None:
     """Task A: classifies how the market has reacted to `live_context`
     given `price_context` (see fundamentals.price_move_on_date). Returns
     the news_reaction string on success, or None if the model's output
@@ -243,7 +237,7 @@ async def classify_news(ticker: str, price_context: str, live_context: str) -> s
     on an unrecognized reaction by design (a real bug should never be
     silently masked by an accidental fallback recommendation)."""
     prompt = _build_reaction_prompt(ticker, price_context, live_context)
-    raw_text = await _call_model(prompt, max_new_tokens=48, ticker=ticker, task_label="reaction")
+    raw_text = await _call_model(prompt, max_new_tokens=48, ticker=ticker, task_label="reaction", model=model)
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
         reaction = json.loads(json_str)["news_reaction"]
@@ -257,7 +251,7 @@ async def classify_news(ticker: str, price_context: str, live_context: str) -> s
 
 
 async def generate_analysis(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
+    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext, model: str = "llama",
 ) -> dict:
     """Task B: writes reasoning/answer given an ALREADY-DECIDED news_
     reaction + recommendation (never asked to produce either). Returns
@@ -268,7 +262,7 @@ async def generate_analysis(
     succeeding (a strict improvement over the old single-call design,
     where a parse failure lost the recommendation entirely)."""
     prompt = _build_analysis_prompt(ticker, user_query, news_reaction, recommendation, context)
-    raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis")
+    raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis", model=model)
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
         parsed = json.loads(json_str)
@@ -286,6 +280,7 @@ async def analyze_two_stage(
     price_context: str,
     gap_pct: float | None,
     ticker_was_explicit: bool = True,
+    model: str = "llama",
 ) -> dict:
     """Orchestrates the two-stage pipeline: Task A classifies news_
     reaction -> fusion.fuse() computes the ONLY recommendation this
@@ -295,7 +290,7 @@ async def analyze_two_stage(
     old single-call analyze_with_hf. ticker_was_explicit just passes
     through to the result dict (see ticker.extract_ticker) - never
     affects Task A/B or fusion, purely informational for the frontend."""
-    news_reaction = await classify_news(ticker, price_context, context.live_context)
+    news_reaction = await classify_news(ticker, price_context, context.live_context, model=model)
     news_reaction_fallback = news_reaction is None
     if news_reaction_fallback:
         # Fusion still yields a valuation-driven recommendation off
@@ -308,7 +303,7 @@ async def analyze_two_stage(
 
     fusion_result = fuse(news_reaction, gap_pct)
 
-    analysis = await generate_analysis(ticker, user_query, news_reaction, fusion_result.recommendation, context)
+    analysis = await generate_analysis(ticker, user_query, news_reaction, fusion_result.recommendation, context, model=model)
 
     result = {
         "model_architecture": MODEL_ARCHITECTURE,

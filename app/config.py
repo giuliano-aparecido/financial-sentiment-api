@@ -52,6 +52,23 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_URL", DEFAULT_MODELS.get(MODEL_ARCHITECTURE,
 
 DEFAULT_HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL") or f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}"
 
+# Modal endpoints for different models - defaults to HF API for llama
+LLAMA_INFERENCE_URL = os.getenv("LLAMA_INFERENCE_URL", DEFAULT_HF_INFERENCE_URL)
+APERTUS_INFERENCE_URL = os.getenv("APERTUS_INFERENCE_URL")  # Must be set for apertus model
+
+
+def get_inference_url_for_model(model: str) -> str:
+    """Returns the inference endpoint URL for the given model name."""
+    model_lower = (model or "llama").lower().strip()
+    if model_lower == "apertus":
+        if not APERTUS_INFERENCE_URL:
+            raise RuntimeError("APERTUS_INFERENCE_URL is not set - required to use the apertus model")
+        return APERTUS_INFERENCE_URL
+    elif model_lower in ("llama", ""):
+        return LLAMA_INFERENCE_URL
+    else:
+        raise ValueError(f"Unknown model: {model_lower}. Supported: 'llama', 'apertus'")
+
 
 def _parse_allowed_host_suffixes(raw: str) -> tuple[str, ...]:
     # Lowercased so this matches regardless of the case an operator sets
