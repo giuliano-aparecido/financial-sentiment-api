@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import HTTPException
 
-from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE
+from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE, require_hf_api_token
 from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
@@ -50,6 +50,11 @@ def set_hf_inference_url(url: str) -> None:
 
 async def start_client() -> None:
     global _client
+    # Fails app startup loudly and specifically if HF_TOKEN is missing,
+    # rather than letting every /api/analyze request fail later with the
+    # same generic 502 _call_model raises for a real backend outage - see
+    # require_hf_api_token's own docstring.
+    require_hf_api_token()
     # 45.0 -> 280.0: too short for a scale-to-zero backend (financial-
     # sentiment-model's modal/serve_model.py) - confirmed live, a cold
     # start alone (container boot + model load) measured ~120s, well past

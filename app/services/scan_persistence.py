@@ -90,14 +90,32 @@ def get_latest_rebound_scan() -> tuple[list[dict], datetime.datetime | None, lis
 
 
 def merge_rebound_retry_rows(scan_run_at: datetime.datetime, rows: list[dict]) -> None:
-    """Appends newly-recovered rows to an EXISTING scan_run_at's rows -
-    does not delete/replace anything, unlike save_rebound_scan. Called by
+    """Upserts newly-recovered rows into an EXISTING scan_run_at's rows -
+    per-ticker delete-then-insert (mirroring save_rebound_scan's own
+    replace-on-write pattern), not a bare append. Called by
     scheduler._retry_failed_rebound_tickers once per retry; pair with
     update_rebound_run_failed_tickers to record which tickers, if any,
-    are still failing after the retry."""
+    are still failing after the retry.
+
+    The per-ticker delete matters because this call and
+    update_rebound_run_failed_tickers commit in SEPARATE sessions/
+    transactions (see scheduler._retry_failed_rebound_tickers): a crash
+    in between leaves a ticker both persisted here AND still listed as
+    failed, so the NEXT retry re-fetches and re-merges that SAME ticker.
+    A plain append would then insert a second row for the same
+    ticker/scan_run_at instead of replacing the first - deleting any
+    existing row for these tickers first keeps a retry-after-crash
+    idempotent."""
     if not rows:
         return
+    tickers = [row["ticker"] for row in rows]
     with get_session() as session:
+        session.execute(
+            delete(ReboundScanRow).where(
+                ReboundScanRow.scan_run_at == scan_run_at,
+                ReboundScanRow.ticker.in_(tickers),
+            )
+        )
         session.add_all([
             ReboundScanRow(scan_run_at=scan_run_at, ticker=row["ticker"], data=row)
             for row in rows
@@ -179,13 +197,26 @@ def get_latest_indicator_scan(threshold_pct: float) -> tuple[list[dict], datetim
 
 
 def merge_indicator_retry_rows(scan_run_at: datetime.datetime, threshold_pct: float, rows: list[dict]) -> None:
-    """Same as merge_rebound_retry_rows, scoped to one threshold_pct -
-    scheduler._retry_failed_indicator_tickers calls this once per
-    threshold (a recovered ticker's row differs per threshold), then
-    update_indicator_run_failed_tickers ONCE after the loop."""
+    """Same upsert (delete-then-insert per ticker) as merge_rebound_retry_
+    rows, scoped to one threshold_pct - see that function's own docstring
+    for why the delete matters (a crash between this commit and
+    update_indicator_run_failed_tickers's, across the per-threshold loop
+    in scheduler._retry_failed_indicator_tickers, must not duplicate a
+    ticker's row on the next retry). scheduler._retry_failed_indicator_
+    tickers calls this once per threshold (a recovered ticker's row
+    differs per threshold), then update_indicator_run_failed_tickers ONCE
+    after the loop."""
     if not rows:
         return
+    tickers = [row["ticker"] for row in rows]
     with get_session() as session:
+        session.execute(
+            delete(VolatilityIndicatorScanRow).where(
+                VolatilityIndicatorScanRow.scan_run_at == scan_run_at,
+                VolatilityIndicatorScanRow.threshold_pct == threshold_pct,
+                VolatilityIndicatorScanRow.ticker.in_(tickers),
+            )
+        )
         session.add_all([
             VolatilityIndicatorScanRow(
                 scan_run_at=scan_run_at, threshold_pct=threshold_pct, ticker=row["ticker"], data=row,
