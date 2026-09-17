@@ -65,12 +65,12 @@ def send_email(subject: str, body: str) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = config.ALERT_EMAIL_FROM
-    msg["To"] = config.ALERT_EMAIL_TO
+    msg["To"] = ", ".join(config.ALERT_EMAIL_TO)
     msg.set_content(body)
     with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        smtp.send_message(msg)
+        smtp.send_message(msg, to_addrs=list(config.ALERT_EMAIL_TO))
 
 
 def _finished_at_or_after(status: dict, started_at: str) -> bool:

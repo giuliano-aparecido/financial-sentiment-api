@@ -159,7 +159,45 @@ def test_is_email_configured_is_false_when_any_required_value_is_missing(monkeyp
     from app import config
 
     for name in REQUIRED_EMAIL_SETTINGS:
-        monkeypatch.setattr(config, name, "x")
+        monkeypatch.setattr(config, name, ("x",) if name == "ALERT_EMAIL_TO" else "x")
     assert alerts.is_email_configured() is True
-    monkeypatch.setattr(config, missing, None)
+    monkeypatch.setattr(config, missing, () if missing == "ALERT_EMAIL_TO" else None)
     assert alerts.is_email_configured() is False
+
+
+def test_send_email_addresses_every_recipient(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "SMTP_HOST", "smtp.test")
+    monkeypatch.setattr(config, "SMTP_USER", "bot@x.test")
+    monkeypatch.setattr(config, "SMTP_PASSWORD", "pw")
+    monkeypatch.setattr(config, "ALERT_EMAIL_FROM", "bot@x.test")
+    monkeypatch.setattr(config, "ALERT_EMAIL_TO", ("a@x.test", "b@y.test"))
+    calls = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            calls["connect"] = (host, port)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self):
+            calls["tls"] = True
+
+        def login(self, user, password):
+            calls["login"] = user
+
+        def send_message(self, msg, to_addrs=None):
+            calls["to_header"] = msg["To"]
+            calls["to_addrs"] = to_addrs
+
+    monkeypatch.setattr(alerts.smtplib, "SMTP", FakeSMTP)
+    alerts.send_email("subj", "body")
+
+    assert calls["to_header"] == "a@x.test, b@y.test"
+    assert calls["to_addrs"] == ["a@x.test", "b@y.test"]
+    assert calls["tls"] and calls["login"] == "bot@x.test"

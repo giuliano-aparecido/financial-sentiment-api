@@ -83,3 +83,11 @@ def test_normalize_model_name(raw, expected):
             config_module.normalize_model_name(raw)
     else:
         assert config_module.normalize_model_name(raw) == expected
+
+
+# --- alert recipients ---
+
+
+def test_parse_email_list_splits_trims_and_drops_empty_entries():
+    assert config_module._parse_email_list(" a@x.test, b@y.test ,, c@z.test,") == ("a@x.test", "b@y.test", "c@z.test")
+    assert config_module._parse_email_list("") == ()
