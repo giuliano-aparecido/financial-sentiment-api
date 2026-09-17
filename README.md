@@ -24,7 +24,8 @@ doing it properly, not because it needs to scale or handle real traffic.
   `portfolio-manager-backend`'s DB layer, adapted where noted (see that
   module's own comments)
 - **APScheduler** — in-process cron for those same two scans (`app/
-  services/scheduler.py`) — no external trigger (GitHub Actions, etc.)
+  services/scheduler.py`); the big-loss email alert is the one
+  externally-triggered job (see Key design decisions)
 - **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
 
 ## Architecture
@@ -151,6 +152,27 @@ app/
   bit late instead of being silently skipped. The "today" big-loss
   screener is untouched — it stays fully live/on-demand, since intraday
   data has no meaningful cache window.
+- **The big-loss email alert is triggered externally, by a GitHub
+  Actions cron** (`.github/workflows/big-loss-alert.yml` → `POST
+  /api/research/volatility/today/alert` → `app/services/alerts.py`),
+  twice a day at 12:00 and 17:30 Europe/Zurich. The in-process
+  scheduler can't do this one: on Render's free tier the process is
+  asleep between requests, and a cron inside a sleeping process never
+  fires (the rebound/indicator scans get away with it because their
+  startup catch-up runs them late; "today" is only meaningful at the
+  scheduled moment). This is the same mechanism the bullet above rejects
+  — and the 24-minute drift observed then is fine here: the workflow
+  gates on a one-hour Swiss-time window and a late alert is still an
+  alert, whereas a late keep-alive ping was a missed one. The API emails
+  the result whatever it is — a populated table, "none today", or the
+  scan's error — so a missing email means the trigger didn't fire or the
+  process died mid-wait (a redeploy, or Render's idle spin-down), never
+  that there was nothing to say. Two ways the trigger stops firing
+  silently: GitHub disables `schedule` workflows in a repo with no
+  commits for 60 days (re-enable from the Actions tab), and a failed
+  `curl` only shows up as GitHub's failed-run notification email. The
+  workflow needs two repository secrets, `API_KEY` and `API_BASE_URL`;
+  the API needs `SMTP_*` and `ALERT_EMAIL_*` (see `.env.example`).
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since
@@ -192,8 +214,8 @@ pytest
 ## Deployment
 
 Render, via the `Dockerfile` (pinned base image digest, non-root user,
-healthcheck against `/health`). No CI is currently configured (the
-`.github/workflows/` directory was removed) — run `pytest` locally
+healthcheck against `/health`). No CI is configured — the only workflow in
+`.github/workflows/` is the big-loss alert cron, not a test runner — run `pytest` locally
 before opening a PR.
 
 ## Contributing

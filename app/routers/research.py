@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.deps import verify_api_key
 from app.limiter import limiter
-from app.services import scan_persistence, scheduler
+from app.services import alerts, scan_persistence, scheduler
 from app.services.research_job import get_today_status, start_today_scan
 from app.services.swiss_volatility_indicator import ALLOWED_THRESHOLD_PCTS
 
@@ -126,3 +126,12 @@ async def start_today_volatility_scan(request: Request):
 @limiter.limit("30/minute")
 async def today_volatility_scan_status(request: Request):
     return get_today_status()
+
+
+@router.post("/api/research/volatility/today/alert", dependencies=[Depends(verify_api_key)])
+async def start_today_volatility_alert(request: Request):
+    """Runs the today scan and emails the result - for the external
+    scheduler (.github/workflows/big-loss-alert.yml)."""
+    if not alerts.is_email_configured():
+        raise HTTPException(status_code=503, detail="Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/ALERT_EMAIL_TO).")
+    return alerts.start_today_alert()

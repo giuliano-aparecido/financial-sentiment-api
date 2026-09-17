@@ -54,6 +54,36 @@ def test_today_status_delegates_to_research_job(client, monkeypatch):
     assert response.json() == fake_status
 
 
+# --- today (big-loss) alert - external-scheduler trigger ---
+
+
+def test_today_alert_requires_api_key(client):
+    response = client.post("/api/research/volatility/today/alert")
+    assert response.status_code == 401
+
+
+def test_today_alert_returns_503_when_email_is_not_configured(client, monkeypatch):
+    from app.services import alerts
+
+    monkeypatch.setattr(alerts, "is_email_configured", lambda: False)
+    started = []
+    monkeypatch.setattr(alerts, "start_today_alert", lambda: started.append(1))
+    response = client.post("/api/research/volatility/today/alert", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 503
+    assert "SMTP_HOST" in response.json()["detail"]
+    assert started == []
+
+
+def test_today_alert_delegates_to_alerts_when_configured(client, monkeypatch):
+    from app.services import alerts
+
+    monkeypatch.setattr(alerts, "is_email_configured", lambda: True)
+    monkeypatch.setattr(alerts, "start_today_alert", lambda: {"status": "running", "started_at": "now"})
+    response = client.post("/api/research/volatility/today/alert", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 200
+    assert response.json() == {"status": "running", "started_at": "now"}
+
+
 # --- rebound: scheduled-scan read + manual trigger ---
 
 
