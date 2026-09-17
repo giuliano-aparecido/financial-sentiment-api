@@ -10,20 +10,15 @@ from app.services.swiss_volatility_indicator import ALLOWED_THRESHOLD_PCTS
 
 router = APIRouter()
 
-# --- Scheduled-scan reads + manual trigger (rebound, volatility-indicator) ---
+# --- Persisted-scan reads + manual trigger (rebound, volatility-indicator) ---
 #
-# These two tables are no longer scanned live on every request - see
-# app/services/scheduler.py's own docstring for why (user's explicit
-# request: cache daily/monthly instead of hammering Yahoo on every button
-# click). The GET routes below just read whatever the scheduler most
-# recently persisted (app/services/scan_persistence.py) - cheap (one
-# indexed DB query) - plus whether a scan is CURRENTLY running, since the
-# user explicitly wants the frontend to show that state (button disabled,
-# no table) regardless of whether that in-progress scan was started by
-# the schedule or by a manual Refresh click. The POST .../start routes
-# trigger a manual FULL scan through the EXACT SAME guarded pipeline the
-# cron uses (scheduler.trigger_rebound_scan/trigger_indicator_scan) -
-# single-flight per table, a click while one's already running is a
+# These two tables are never scanned on a request's behalf: the GET routes
+# below read whatever was most recently persisted (app/services/
+# scan_persistence.py) - cheap (one indexed DB query), no Yahoo call -
+# plus whether a scan is CURRENTLY running, so the frontend can disable
+# the button. The POST .../start routes trigger a manual FULL scan through
+# the single-flight guarded pipeline (scheduler.trigger_rebound_scan/
+# trigger_indicator_scan) - a click while one's already running is a
 # no-op, not an error. POST .../retry (separate, only meaningful when
 # failed_ticker_count > 0 - see the frontend, which only renders that
 # button then) retries JUST the failed tickers from the latest same-

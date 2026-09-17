@@ -8,163 +8,12 @@ import app.services.scheduler as scheduler_module
 from app.services.swiss_volatility_indicator import ALLOWED_THRESHOLD_PCTS
 
 
-class _FakeAPScheduler:
-    """Stands in for apscheduler.schedulers.asyncio.AsyncIOScheduler - real
-    one would actually start a background thread/event-loop integration,
-    which these tests have no need to exercise (see conftest.py's
-    RESEARCH_SCHEDULER_DISABLED guard for why the real one must never run
-    during tests anyway)."""
-
-    def __init__(self, *args, **kwargs):
-        self.jobs = []
-        self.started = False
-        self.shutdown_called = False
-
-    def add_job(self, func, trigger=None, **kwargs):
-        self.jobs.append({"func": func, "trigger": trigger, **kwargs})
-
-    def start(self):
-        self.started = True
-
-    def shutdown(self, wait=True):
-        self.shutdown_called = True
-
-
-def _job_ids(fake):
-    return [j["id"] for j in fake.jobs]
-
-
-def _install_fake(monkeypatch):
-    monkeypatch.setenv("RESEARCH_SCHEDULER_DISABLED", "0")
-    monkeypatch.setattr(scheduler_module, "AsyncIOScheduler", _FakeAPScheduler)
-    monkeypatch.setattr(scheduler_module, "_scheduler", None)
-
-
 def teardown_function(_fn):
-    # start()/shutdown() mutate the module-level _scheduler global, and
     # trigger_*/{_run_*_guarded} mutate _rebound_running/_indicator_running -
-    # reset all of them after every test in this file regardless of
-    # pass/fail, so one test's state can't leak into the next.
-    scheduler_module._scheduler = None
+    # reset after every test in this file regardless of pass/fail, so one
+    # test's state can't leak into the next.
     scheduler_module._rebound_running = False
     scheduler_module._indicator_running = False
-
-
-# --- RESEARCH_SCHEDULER_DISABLED guard ---
-
-
-def test_start_noops_when_disabled(monkeypatch):
-    monkeypatch.setenv("RESEARCH_SCHEDULER_DISABLED", "1")
-    monkeypatch.setattr(
-        scheduler_module, "AsyncIOScheduler",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("AsyncIOScheduler should not be constructed")),
-    )
-    scheduler_module.start()
-    assert scheduler_module.is_running() is False
-
-
-# --- staleness checks ---
-
-
-def test_is_rebound_stale_true_when_never_run(monkeypatch):
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
-    assert scheduler_module._is_rebound_stale() is True
-
-
-def test_is_rebound_stale_false_when_run_today(monkeypatch):
-    today = scheduler_module._now()
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_rebound_scan", lambda: ([{}], today, []))
-    assert scheduler_module._is_rebound_stale() is False
-
-
-def test_is_rebound_stale_true_when_run_yesterday(monkeypatch):
-    yesterday = scheduler_module._now() - datetime.timedelta(days=1)
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_rebound_scan", lambda: ([{}], yesterday, []))
-    assert scheduler_module._is_rebound_stale() is True
-
-
-def test_is_indicator_stale_true_when_never_run(monkeypatch):
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([], None, []))
-    assert scheduler_module._is_indicator_stale() is True
-
-
-def test_is_indicator_stale_false_when_run_this_month(monkeypatch):
-    this_month = scheduler_module._now()
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([{}], this_month, []))
-    assert scheduler_module._is_indicator_stale() is False
-
-
-def test_is_indicator_stale_true_when_run_last_month(monkeypatch):
-    now = scheduler_module._now()
-    # Roll back to the 1st of the current month, then one more day, to land
-    # safely in the previous month regardless of what day "now" actually is.
-    last_month = now.replace(day=1) - datetime.timedelta(days=1)
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_indicator_scan", lambda threshold_pct: ([{}], last_month, []))
-    assert scheduler_module._is_indicator_stale() is True
-
-
-def test_is_indicator_stale_checks_only_the_first_allowed_threshold(monkeypatch):
-    # Documents the deliberate simplification (see _is_indicator_stale's
-    # own comment): all three thresholds are always written together by
-    # run_indicator_scans_job, so checking ALLOWED_THRESHOLD_PCTS[0] alone
-    # is enough - this test pins that assumption instead of leaving it
-    # implicit.
-    seen_thresholds = []
-
-    def fake_get(threshold_pct):
-        seen_thresholds.append(threshold_pct)
-        return [{}], scheduler_module._now(), []
-
-    monkeypatch.setattr(scheduler_module.scan_persistence, "get_latest_indicator_scan", fake_get)
-    scheduler_module._is_indicator_stale()
-    assert seen_thresholds == [ALLOWED_THRESHOLD_PCTS[0]]
-
-
-# --- start() catch-up scheduling ---
-
-
-def test_start_schedules_catchup_jobs_when_both_stale(monkeypatch):
-    _install_fake(monkeypatch)
-    monkeypatch.setattr(scheduler_module, "_is_rebound_stale", lambda: True)
-    monkeypatch.setattr(scheduler_module, "_is_indicator_stale", lambda: True)
-
-    scheduler_module.start()
-
-    fake = scheduler_module._scheduler
-    assert fake.started is True
-    assert "rebound_scan" in _job_ids(fake)  # the recurring cron job
-    assert "volatility_indicator_scan" in _job_ids(fake)  # the recurring cron job
-    assert "rebound_scan_catchup" in _job_ids(fake)
-    assert "volatility_indicator_scan_catchup" in _job_ids(fake)
-
-
-def test_start_skips_catchup_jobs_when_both_fresh(monkeypatch):
-    _install_fake(monkeypatch)
-    monkeypatch.setattr(scheduler_module, "_is_rebound_stale", lambda: False)
-    monkeypatch.setattr(scheduler_module, "_is_indicator_stale", lambda: False)
-
-    scheduler_module.start()
-
-    fake = scheduler_module._scheduler
-    ids = _job_ids(fake)
-    assert "rebound_scan_catchup" not in ids
-    assert "volatility_indicator_scan_catchup" not in ids
-    # The recurring cron jobs are always registered regardless of staleness.
-    assert "rebound_scan" in ids
-    assert "volatility_indicator_scan" in ids
-
-
-def test_shutdown_calls_underlying_scheduler_and_clears_reference(monkeypatch):
-    _install_fake(monkeypatch)
-    monkeypatch.setattr(scheduler_module, "_is_rebound_stale", lambda: False)
-    monkeypatch.setattr(scheduler_module, "_is_indicator_stale", lambda: False)
-    scheduler_module.start()
-    fake = scheduler_module._scheduler
-
-    scheduler_module.shutdown()
-
-    assert fake.shutdown_called is True
-    assert scheduler_module.is_running() is False
 
 
 # --- _run_rebound_scan / _run_indicator_scans (the actual pipeline) ---
@@ -465,9 +314,8 @@ def test_trigger_indicator_retry_noops_when_already_running(monkeypatch):
     assert scheduler_module.trigger_indicator_retry() is False
 
 
-# --- Guarded execution + manual trigger, unified with the cron (see
-# module docstring: is_*_scan_running() must reflect BOTH a cron firing
-# and a manual Refresh click identically) ---
+# --- Guarded execution + manual trigger (is_*_scan_running() is the one
+# flag the frontend reads, for a full scan and a retry alike) ---
 
 
 def test_is_rebound_scan_running_reflects_module_state():
@@ -537,8 +385,6 @@ def test_trigger_rebound_scan_runs_the_guarded_pipeline_in_the_background(monkey
 
     assert result is True
     assert started.wait(timeout=2) is True
-    # A manual trigger's in-progress state is indistinguishable from a
-    # cron firing's - same flag, same getter.
     assert scheduler_module.is_rebound_scan_running() is True
 
     finish.set()

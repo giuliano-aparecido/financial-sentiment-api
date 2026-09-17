@@ -465,7 +465,7 @@ def test_discover_candidates_static_fallback_includes_smi_names(monkeypatch):
     assert "INRN.SW" in candidates
 
 
-# --- filter_domestic_batched (scheduled-scan batching, see scheduler.py) ---
+# --- filter_domestic_batched (persisted-scan batching, see scheduler.py) ---
 
 
 def _four_candidates():
@@ -522,8 +522,8 @@ def test_filter_domestic_batched_merges_results_and_failures_across_batches(monk
 def test_filter_domestic_batched_stops_issuing_further_batches_after_rate_limit(monkeypatch):
     # T0/T1 are batch 1, T2/T3 are batch 2 - batch 1's rate limit must
     # stop batch 2 from ever being attempted (no sleep, no live calls),
-    # with T2/T3 still landing in failed_symbols for the next scheduled
-    # run's retry rather than silently vanishing.
+    # with T2/T3 still landing in failed_symbols for the Retry button
+    # rather than silently vanishing.
     sleep_calls = []
     fetched = []
 

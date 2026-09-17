@@ -84,7 +84,55 @@ def test_today_alert_delegates_to_alerts_when_configured(client, monkeypatch):
     assert response.json() == {"status": "running", "started_at": "now"}
 
 
-# --- rebound: scheduled-scan read + manual trigger ---
+# --- rebound / indicator GET handlers never trigger a scan ---
+
+
+@pytest.mark.parametrize("path", ["/api/research/volatility/rebound", "/api/research/volatility/indicator?threshold_pct=5"])
+def test_read_routes_serve_persisted_data_without_starting_a_scan(client, monkeypatch, path):
+    from app.services import scheduler, swiss_universe
+
+    monkeypatch.setattr(
+        research_router.scan_persistence, "get_latest_rebound_scan",
+        lambda: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc), []),
+    )
+    monkeypatch.setattr(
+        research_router.scan_persistence, "get_latest_indicator_scan",
+        lambda threshold_pct: ([{"ticker": "NESN.SW"}], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc), []),
+    )
+    touched = []
+    for name in ("trigger_rebound_scan", "trigger_indicator_scan", "trigger_rebound_retry", "trigger_indicator_retry"):
+        monkeypatch.setattr(scheduler, name, lambda *a, n=name: touched.append(n))
+    for name in ("discover_candidates", "filter_domestic", "filter_domestic_batched"):
+        monkeypatch.setattr(swiss_universe, name, lambda *a, n=name: touched.append(n))
+
+    response = client.get(path, headers={"X-API-Key": VALID_KEY})
+
+    assert response.status_code == 200
+    assert response.json()["rows"] == [{"ticker": "NESN.SW"}]
+    assert touched == []
+
+
+def test_app_startup_reads_no_scan_table_and_starts_no_scan(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.services import scan_persistence, scheduler, swiss_universe
+    from main import app
+
+    def boom(*a, **k):
+        raise AssertionError("startup must not touch scans, the DB, or Yahoo")
+
+    for name in ("get_latest_rebound_scan", "get_latest_indicator_scan"):
+        monkeypatch.setattr(scan_persistence, name, boom)
+    for name in ("trigger_rebound_scan", "trigger_indicator_scan", "_run_rebound_scan_guarded", "_run_indicator_scans_guarded"):
+        monkeypatch.setattr(scheduler, name, boom)
+    for name in ("discover_candidates", "filter_domestic", "filter_domestic_batched"):
+        monkeypatch.setattr(swiss_universe, name, boom)
+
+    with TestClient(app):
+        pass
+
+
+# --- rebound: persisted read + manual trigger ---
 
 
 def test_get_rebound_scan_requires_api_key(client):
@@ -115,11 +163,7 @@ def test_get_rebound_scan_returns_null_scan_run_at_when_nothing_saved(client, mo
     assert response.json() == {"rows": [], "scan_run_at": None, "is_running": False, "failed_ticker_count": 0}
 
 
-def test_get_rebound_scan_reports_is_running_true_regardless_of_trigger_source(client, monkeypatch):
-    # Whether a scan currently running was started by the cron or by a
-    # manual Refresh click, scheduler.is_rebound_scan_running() is the
-    # ONE source of truth this route reads - see scheduler.py's own
-    # module docstring for why that unification matters.
+def test_get_rebound_scan_reports_is_running_from_the_scheduler_flag(client, monkeypatch):
     monkeypatch.setattr(research_router.scan_persistence, "get_latest_rebound_scan", lambda: ([], None, []))
     monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
     response = client.get("/api/research/volatility/rebound", headers={"X-API-Key": VALID_KEY})
@@ -150,9 +194,8 @@ def test_rebound_start_triggers_the_scheduler_and_returns_started_true(client, m
 
 
 def test_rebound_start_returns_started_false_when_already_running(client, monkeypatch):
-    # Single-flight, matching the pre-scheduling behavior: clicking
-    # Refresh while a scan is already in progress is a safe no-op, not
-    # an error - see scheduler.trigger_rebound_scan's own docstring.
+    # Single-flight: clicking Refresh while a scan is already in progress
+    # is a safe no-op, not an error - see scheduler.trigger_rebound_scan.
     monkeypatch.setattr(research_router.scheduler, "trigger_rebound_scan", lambda: False)
     monkeypatch.setattr(research_router.scheduler, "is_rebound_scan_running", lambda: True)
     response = client.post("/api/research/volatility/rebound/start", headers={"X-API-Key": VALID_KEY})
@@ -184,7 +227,7 @@ def test_rebound_retry_returns_started_false_when_nothing_to_retry(client, monke
     assert response.json() == {"started": False, "is_running": False}
 
 
-# --- volatility-indicator: scheduled-scan read + manual trigger ---
+# --- volatility-indicator: persisted read + manual trigger ---
 
 
 def test_get_indicator_scan_requires_api_key(client):

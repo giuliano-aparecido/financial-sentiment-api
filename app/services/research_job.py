@@ -3,12 +3,10 @@ Background-job runner for the Swiss "today" (big-loss) volatility scan
 (swiss_today_screener.py), backing app/routers/research.py's today
 start/status endpoints. Rebound and volatility-indicator used to live
 here too (three independent job slots) - moved 2026-08-19 to app/
-services/scheduler.py's daily/monthly in-process cron instead, at the
-user's explicit request to cut Yahoo Finance call volume for those two
-tables (their underlying data doesn't change meaningfully more often than
-that). "Today" stays here, unchanged: it's the one table where "as of
-right now" is the whole point, so a cached/scheduled result would defeat
-its purpose.
+services/scheduler.py, which persists their results to Postgres so the
+page can show the last run without a new scan. "Today" stays here,
+unchanged: it's the one table where "as of right now" is the whole
+point, so a persisted result would defeat its purpose.
 
 A full scan takes 1-3 minutes (universe discovery + ~100+ per-ticker
 domicile checks + a batch price-history download), which is far past what

@@ -9,12 +9,6 @@ os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.setdefault("HF_TOKEN", "test-hf-token")
 os.environ.setdefault("DEFAULT_MODEL", "llama")
 os.environ.setdefault("LLAMA_INFERENCE_URL", "https://test-llama.example.test/generate")
-# Every test using the `client` fixture below runs the app's REAL lifespan
-# (TestClient as a context manager) - without this, app/services/
-# scheduler.py's catch-up-on-stale logic would hit the real Neon DB and
-# schedule a genuine live Yahoo-scanning job on every such test. See that
-# module's start() docstring for the incident this guards against.
-os.environ.setdefault("RESEARCH_SCHEDULER_DISABLED", "1")
 
 from main import app  # noqa: E402
 from app.services import inference  # noqa: E402
