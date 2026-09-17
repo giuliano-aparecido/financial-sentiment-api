@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import HTTPException
 
-from app.config import DEFAULT_MODEL, HF_API_TOKEN, INFERENCE_URLS, require_hf_api_token, resolve_model
+from app.config import DEFAULT_MODEL, HF_API_TOKEN, INFERENCE_URLS, normalize_model_name, require_hf_api_token
 from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
@@ -32,26 +32,30 @@ def _sanitize_user_query(user_query: str) -> str:
     return sanitized.strip()
 
 # Mutable at runtime via /api/update-inference-url so a Colab/ngrok tunnel can
-# repoint a model without a redeploy. Single-process, in-memory by design - this
-# app runs one worker and doesn't need it to survive a restart.
-_inference_urls: dict[str, str | None] = dict(INFERENCE_URLS)
+# repoint (or register) a model without a redeploy. Single-process, in-memory
+# by design - this app runs one worker and doesn't need it to survive a restart.
+_inference_urls: dict[str, str] = dict(INFERENCE_URLS)
 
 _client: httpx.AsyncClient | None = None
 
 
-def configured_inference_url(model: str = DEFAULT_MODEL) -> str | None:
-    return _inference_urls[resolve_model(model)]
+def inference_urls() -> dict[str, str]:
+    return dict(_inference_urls)
+
+
+def resolve_model(model: str | None) -> str:
+    name = normalize_model_name(model or DEFAULT_MODEL)
+    if name not in _inference_urls:
+        raise ValueError(f"Unknown model {name!r}. Configured: {', '.join(sorted(_inference_urls))}")
+    return name
 
 
 def get_inference_url(model: str = DEFAULT_MODEL) -> str:
-    url = configured_inference_url(model)
-    if not url:
-        raise HTTPException(status_code=503, detail=f"No inference endpoint is configured for model {model!r}.")
-    return url
+    return _inference_urls[resolve_model(model)]
 
 
-def set_inference_url(url: str, model: str = DEFAULT_MODEL) -> None:
-    _inference_urls[resolve_model(model)] = url
+def set_inference_url(url: str, model: str) -> None:
+    _inference_urls[normalize_model_name(model)] = url
 
 
 async def start_client() -> None:

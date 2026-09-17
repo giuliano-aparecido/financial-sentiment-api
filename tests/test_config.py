@@ -41,3 +41,46 @@ def test_require_hf_api_token_raises_when_blank(monkeypatch):
 def test_require_hf_api_token_noop_when_set(monkeypatch):
     monkeypatch.setattr(config_module, "HF_API_TOKEN", "some-real-token")
     config_module.require_hf_api_token()  # must not raise
+
+
+# --- model registry from env ---
+
+
+def test_inference_urls_from_env_registers_every_suffixed_var_by_lowercased_prefix():
+    env = {
+        "LLAMA_INFERENCE_URL": "https://llama.modal.run",
+        "APERTUS_INFERENCE_URL": "https://apertus.modal.run",
+        "KIM_INFERENCE_URL": "https://kim.modal.run",
+        "MY_KIM_INFERENCE_URL": "https://my-kim.modal.run",
+    }
+    assert config_module.inference_urls_from_env(env) == {
+        "llama": "https://llama.modal.run",
+        "apertus": "https://apertus.modal.run",
+        "kim": "https://kim.modal.run",
+        "my_kim": "https://my-kim.modal.run",
+    }
+
+
+def test_inference_urls_from_env_ignores_the_legacy_single_model_var_blank_values_and_unrelated_vars():
+    env = {
+        "HF_INFERENCE_URL": "https://legacy.modal.run",
+        "KIM_INFERENCE_URL": "   ",
+        "APERTUS_INFERENCE_URL_BACKUP": "https://nope.modal.run",
+        "DATABASE_CONNECTION_STRING": "postgresql://x",
+        "LLAMA_INFERENCE_URL": " https://llama.modal.run ",
+    }
+    assert config_module.inference_urls_from_env(env) == {"llama": "https://llama.modal.run"}
+
+
+def test_inference_urls_from_env_rejects_a_var_whose_prefix_is_not_a_valid_model_name():
+    with pytest.raises(ValueError, match="Invalid model name"):
+        config_module.inference_urls_from_env({"_INFERENCE_URL": "https://x.modal.run"})
+
+
+@pytest.mark.parametrize("raw, expected", [("llama", "llama"), (" Kim ", "kim"), ("qwen-2.5", "qwen-2.5"), ("my_model-v2", "my_model-v2"), ("../etc", None), ("", None), ("a" * 65, None)])
+def test_normalize_model_name(raw, expected):
+    if expected is None:
+        with pytest.raises(ValueError, match="Invalid model name"):
+            config_module.normalize_model_name(raw)
+    else:
+        assert config_module.normalize_model_name(raw) == expected

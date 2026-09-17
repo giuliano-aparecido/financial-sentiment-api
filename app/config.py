@@ -1,4 +1,6 @@
 import os
+import re
+from collections.abc import Mapping
 
 from dotenv import load_dotenv
 
@@ -52,22 +54,33 @@ HF_MODEL_REPO = os.getenv("HF_MODEL_URL", DEFAULT_MODELS.get(MODEL_ARCHITECTURE,
 
 DEFAULT_HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL") or f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}"
 
-INFERENCE_URLS: dict[str, str | None] = {
-    "llama": os.getenv("LLAMA_INFERENCE_URL") or DEFAULT_HF_INFERENCE_URL,
-    "apertus": os.getenv("APERTUS_INFERENCE_URL"),
-}
-SUPPORTED_MODELS = tuple(INFERENCE_URLS)
+MODEL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "llama").lower()
-if DEFAULT_MODEL not in INFERENCE_URLS:
-    raise RuntimeError(f"DEFAULT_MODEL={DEFAULT_MODEL!r} is not one of {SUPPORTED_MODELS}")
+_INFERENCE_URL_SUFFIX = "_INFERENCE_URL"
+_LEGACY_SINGLE_MODEL_URL_VAR = "HF_INFERENCE_URL"
 
 
-def resolve_model(model: str | None) -> str:
-    name = (model or DEFAULT_MODEL).strip().lower()
-    if name not in INFERENCE_URLS:
-        raise ValueError(f"Unknown model {name!r}. Supported: {', '.join(SUPPORTED_MODELS)}")
-    return name
+def normalize_model_name(name: str) -> str:
+    normalized = name.strip().lower()
+    if not MODEL_NAME_RE.fullmatch(normalized):
+        raise ValueError(f"Invalid model name {name!r}: letters, digits, '.', '-' or '_' (max 64 chars, not starting with '.')")
+    return normalized
+
+
+def inference_urls_from_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Every `<NAME>_INFERENCE_URL` env var registers model `<name>`."""
+    urls: dict[str, str] = {}
+    for var, url in env.items():
+        if not var.endswith(_INFERENCE_URL_SUFFIX) or var == _LEGACY_SINGLE_MODEL_URL_VAR or not url.strip():
+            continue
+        urls[normalize_model_name(var[: -len(_INFERENCE_URL_SUFFIX)])] = url.strip()
+    return urls
+
+
+DEFAULT_MODEL = normalize_model_name(os.getenv("DEFAULT_MODEL") or "llama")
+
+INFERENCE_URLS = inference_urls_from_env(os.environ)
+INFERENCE_URLS.setdefault(DEFAULT_MODEL, DEFAULT_HF_INFERENCE_URL)
 
 
 def _parse_allowed_host_suffixes(raw: str) -> tuple[str, ...]:

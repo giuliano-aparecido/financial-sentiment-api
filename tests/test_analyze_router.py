@@ -160,6 +160,9 @@ def test_analyze_route_defaults_to_llama_when_no_model_given(client, monkeypatch
 
 
 def test_analyze_route_forwards_model_query_param_normalized(client, monkeypatch):
+    from app.services import inference
+
+    monkeypatch.setattr(inference, "_inference_urls", {"llama": "https://l.modal.run", "apertus": "https://a.modal.run"})
     captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
 
     response = client.post(
@@ -181,3 +184,17 @@ def test_analyze_route_rejects_unknown_model_before_fetching_anything(client, mo
     assert response.status_code == 400
     assert "gpt9" in response.json()["detail"]
     assert fetches == []
+
+
+def test_analyze_route_accepts_any_model_registered_at_runtime(client, monkeypatch):
+    from app.services import inference
+
+    monkeypatch.setattr(inference, "_inference_urls", {"llama": "https://old.modal.run", "kim": "https://kim.modal.run"})
+    captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
+
+    response = client.post(
+        "/api/analyze?model=kim", json={"user_query": "Is $AAPL a buy?"}, headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == "kim"

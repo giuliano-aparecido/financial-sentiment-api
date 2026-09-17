@@ -1,3 +1,5 @@
+import pytest
+
 from app.routers import admin as admin_router
 
 VALID_KEY = "test-api-key"  # matches conftest.py's API_KEY env var
@@ -105,10 +107,10 @@ def test_update_inference_url_accepts_modal_run(client):
     assert response.json()["hf_inference_url"] == "https://gaparecido--financial-sentiment-reasoner-generate.modal.run"
 
 
-def test_update_inference_url_defaults_to_llama_and_only_repoints_that_model(client):
+def test_update_inference_url_defaults_to_the_default_model_and_only_repoints_that_one(client, monkeypatch):
     from app.services import inference
 
-    before = inference.configured_inference_url("apertus")
+    monkeypatch.setattr(inference, "_inference_urls", {"llama": "https://old.modal.run", "other": "https://other.modal.run"})
     response = client.post(
         "/api/update-inference-url",
         json={"url": "https://abc123.ngrok-free.app"},
@@ -116,31 +118,39 @@ def test_update_inference_url_defaults_to_llama_and_only_repoints_that_model(cli
     )
     assert response.status_code == 200
     assert response.json()["model"] == "llama"
-    assert inference.configured_inference_url("llama") == "https://abc123.ngrok-free.app"
-    assert inference.configured_inference_url("apertus") == before
+    assert inference.inference_urls() == {"llama": "https://abc123.ngrok-free.app", "other": "https://other.modal.run"}
 
 
-def test_update_inference_url_repoints_named_model(client):
+def test_update_inference_url_registers_a_new_model_that_analyze_then_accepts(client, monkeypatch):
     from app.services import inference
+
+    monkeypatch.setattr(inference, "_inference_urls", {"llama": "https://old.modal.run"})
+    with pytest.raises(ValueError):
+        inference.resolve_model("kim")
 
     response = client.post(
         "/api/update-inference-url",
-        json={"url": "https://x--apertus.modal.run", "model": "apertus"},
+        json={"url": "https://x--kim.modal.run", "model": " Kim "},
         headers={"X-API-Key": VALID_KEY},
     )
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "model": "apertus", "hf_inference_url": "https://x--apertus.modal.run"}
-    assert inference.configured_inference_url("apertus") == "https://x--apertus.modal.run"
+    assert response.json() == {"status": "ok", "model": "kim", "hf_inference_url": "https://x--kim.modal.run"}
+    assert inference.resolve_model("kim") == "kim"
+    assert inference.get_inference_url("kim") == "https://x--kim.modal.run"
 
 
-def test_update_inference_url_rejects_unknown_model(client):
+def test_update_inference_url_rejects_malformed_model_name(client, monkeypatch):
+    from app.services import inference
+
+    monkeypatch.setattr(inference, "_inference_urls", {"llama": "https://old.modal.run"})
     response = client.post(
         "/api/update-inference-url",
-        json={"url": "https://abc123.ngrok-free.app", "model": "gpt9"},
+        json={"url": "https://abc123.ngrok-free.app", "model": "../etc"},
         headers={"X-API-Key": VALID_KEY},
     )
     assert response.status_code == 400
-    assert "gpt9" in response.json()["detail"]
+    assert "Invalid model name" in response.json()["detail"]
+    assert inference.inference_urls() == {"llama": "https://old.modal.run"}
 
 
 def test_update_yf_crumb_rejects_missing_key(client):

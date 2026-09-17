@@ -2,7 +2,8 @@ import secrets
 
 from fastapi import Header, HTTPException, Query
 
-from app.config import API_KEY, DEFAULT_MODEL, SUPPORTED_MODELS, resolve_model
+from app.config import API_KEY, DEFAULT_MODEL
+from app.services.inference import resolve_model
 
 
 async def verify_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")):
@@ -11,7 +12,7 @@ async def verify_api_key(x_api_key: str | None = Header(default=None, alias="X-A
 
 
 async def selected_model(
-    model: str = Query(DEFAULT_MODEL, description=f"One of: {', '.join(SUPPORTED_MODELS)}"),
+    model: str = Query(DEFAULT_MODEL, description="A configured model name - GET /health lists them"),
 ) -> str:
     try:
         return resolve_model(model)

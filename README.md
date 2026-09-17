@@ -61,14 +61,20 @@ app/
 
 ## Key design decisions
 
-- **Multiple models behind one API.** `/api/analyze?model=<name>` picks
-  which fine-tuned model answers; `DEFAULT_MODEL` (default `llama`) is
-  used when the param is absent, and an unknown name is a 400. Each
-  model has its own endpoint env var (`LLAMA_INFERENCE_URL`, falling
-  back to `HF_INFERENCE_URL`; `APERTUS_INFERENCE_URL`, no fallback — a
-  request for an unconfigured model is a 503). `/health` lists which
-  ones are configured. All models share the same auth (`HF_TOKEN` as
-  bearer), host allowlist, and rate limit.
+- **Multiple models behind one API, with no model names in code.**
+  `/api/analyze?model=<name>` picks which fine-tuned model answers;
+  `DEFAULT_MODEL` (default `llama`) is used when the param is absent,
+  and a name that isn't registered is a 400. Models are registered two
+  ways, neither needing a code change:
+  - **Env var convention at startup:** every `<NAME>_INFERENCE_URL`
+    env var registers model `<name>` (lowercased) — `KIM_INFERENCE_URL`
+    makes `?model=kim` work. `HF_INFERENCE_URL` is the legacy
+    single-model var and still means "the `DEFAULT_MODEL`'s URL" when
+    that model has no dedicated var.
+  - **At runtime:** `POST /api/update-inference-url` with a `model`
+    that isn't registered yet registers it (see next bullet).
+  `GET /health` lists what's registered. All models share the same auth
+  (`HF_TOKEN` as bearer), host allowlist, and rate limit.
 - **The per-model inference URLs are mutable, in-memory globals**,
   updatable via `POST /api/update-inference-url` (`{"url": ...,
   "model": ...}`, `model` defaulting to `DEFAULT_MODEL`) — this exists
