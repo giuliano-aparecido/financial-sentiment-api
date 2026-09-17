@@ -68,9 +68,8 @@ app/
   ways, neither needing a code change:
   - **Env var convention at startup:** every `<NAME>_INFERENCE_URL`
     env var registers model `<name>` (lowercased) — `KIM_INFERENCE_URL`
-    makes `?model=kim` work. `HF_INFERENCE_URL` is the legacy
-    single-model var and still means "the `DEFAULT_MODEL`'s URL" when
-    that model has no dedicated var.
+    makes `?model=kim` work. `DEFAULT_MODEL` must have one, or the app
+    refuses to start.
   - **At runtime:** `POST /api/update-inference-url` with a `model`
     that isn't registered yet registers it (see next bullet).
   `GET /health` lists what's registered. All models share the same auth

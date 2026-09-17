@@ -44,7 +44,6 @@ DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 MODEL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 _INFERENCE_URL_SUFFIX = "_INFERENCE_URL"
-_LEGACY_SINGLE_MODEL_URL_VAR = "HF_INFERENCE_URL"
 
 
 def normalize_model_name(name: str) -> str:
@@ -60,7 +59,7 @@ def inference_urls_from_env(env: Mapping[str, str]) -> dict[str, str]:
     """Every `<NAME>_INFERENCE_URL` env var registers model `<name>`."""
     urls: dict[str, str] = {}
     for var, url in env.items():
-        if not var.endswith(_INFERENCE_URL_SUFFIX) or var == _LEGACY_SINGLE_MODEL_URL_VAR or not url.strip():
+        if not var.endswith(_INFERENCE_URL_SUFFIX) or not url.strip():
             continue
         urls[normalize_model_name(var[: -len(_INFERENCE_URL_SUFFIX)])] = url.strip()
     return urls
@@ -68,28 +67,9 @@ def inference_urls_from_env(env: Mapping[str, str]) -> dict[str, str]:
 
 DEFAULT_MODEL = normalize_model_name(os.getenv("DEFAULT_MODEL") or "llama")
 
-MODEL_ARCHITECTURE = os.getenv("MODEL_ARCHITECTURE", DEFAULT_MODEL).lower()
-
-DEFAULT_MODELS = {
-    "llama": "gaparecido/llama-3.2-3b-financial-reasoner",
-    "apertus": "gaparecido/apertus-8b-financial-reasoner",
-    "qwen": "gaparecido/qwen-2.5-7b-financial-reasoner",
-    "mistral": "gaparecido/mistral-7b-financial-reasoner",
-}
-
-HF_MODEL_REPO = os.getenv("HF_MODEL_URL") or DEFAULT_MODELS.get(MODEL_ARCHITECTURE)
-
-DEFAULT_HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL") or (
-    f"https://api-inference.huggingface.co/models/{HF_MODEL_REPO}" if HF_MODEL_REPO else None
-)
-
 INFERENCE_URLS = inference_urls_from_env(os.environ)
-if DEFAULT_HF_INFERENCE_URL:
-    INFERENCE_URLS.setdefault(DEFAULT_MODEL, DEFAULT_HF_INFERENCE_URL)
 if DEFAULT_MODEL not in INFERENCE_URLS:
-    raise RuntimeError(
-        f"DEFAULT_MODEL={DEFAULT_MODEL!r} has no endpoint: set {DEFAULT_MODEL.upper()}_INFERENCE_URL or HF_INFERENCE_URL"
-    )
+    raise RuntimeError(f"DEFAULT_MODEL={DEFAULT_MODEL!r} has no endpoint: set {DEFAULT_MODEL.upper()}_INFERENCE_URL")
 
 
 def _parse_allowed_host_suffixes(raw: str) -> tuple[str, ...]:

@@ -61,9 +61,8 @@ def test_inference_urls_from_env_registers_every_suffixed_var_by_lowercased_pref
     }
 
 
-def test_inference_urls_from_env_ignores_the_legacy_single_model_var_blank_values_and_unrelated_vars():
+def test_inference_urls_from_env_ignores_blank_values_and_unrelated_vars():
     env = {
-        "HF_INFERENCE_URL": "https://legacy.modal.run",
         "KIM_INFERENCE_URL": "   ",
         "APERTUS_INFERENCE_URL_BACKUP": "https://nope.modal.run",
         "DATABASE_CONNECTION_STRING": "postgresql://x",
