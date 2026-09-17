@@ -41,6 +41,19 @@ def require_hf_api_token() -> None:
 # of something already configured.
 DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+ALERT_EMAIL_FROM = os.getenv("ALERT_EMAIL_FROM") or SMTP_USER
+
+
+def _parse_email_list(raw: str) -> tuple[str, ...]:
+    return tuple(address.strip() for address in raw.split(",") if address.strip())
+
+
+ALERT_EMAIL_TO = _parse_email_list(os.getenv("ALERT_EMAIL_TO", ""))
+
 MODEL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 _INFERENCE_URL_SUFFIX = "_INFERENCE_URL"

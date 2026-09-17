@@ -1,0 +1,40 @@
+name: Big-loss alert
+
+# Wakes the (scale-to-zero) API and asks it to run the Swiss big-loss scan
+# and email the result. GitHub cron is UTC-only, so each Swiss-time target
+# is scheduled at both its CET and CEST UTC equivalents and the gate step
+# keeps only the one that lands in the target window in Europe/Zurich.
+on:
+  schedule:
+    - cron: "0 10,11 * * 1-5"   # 12:00 Europe/Zurich (CEST / CET)
+    - cron: "30 15,16 * * 1-5"  # 17:30 Europe/Zurich (CEST / CET)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on Swiss local time
+        id: gate
+        run: |
+          now=$(TZ=Europe/Zurich date +%H%M)
+          echo "Europe/Zurich time: $now"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             || { [ "$now" -ge 1200 ] && [ "$now" -lt 1300 ]; } \
+             || { [ "$now" -ge 1730 ] && [ "$now" -lt 1830 ]; }; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger scan + email
+        if: steps.gate.outputs.run == 'true'
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          curl --silent --show-error --fail-with-body \
+            --retry 4 --retry-delay 30 --retry-all-errors --max-time 120 \
+            -X POST \
+            -H "X-API-Key: $API_KEY" \
+            "$API_BASE_URL/api/research/volatility/today/alert"
