@@ -19,13 +19,10 @@ doing it properly, not because it needs to scale or handle real traffic.
   fundamentals.py`/`earnings.py`/`valuation.py`)
 - **slowapi** — global rate limit
 - **SQLAlchemy 2.0** + **Alembic** + **psycopg3** — Postgres (Neon)
-  persistence for the two scheduled research scans (`app/db/`,
+  persistence for the two on-demand research scans (`app/db/`,
   `app/services/scan_persistence.py`) — same pattern as
   `portfolio-manager-backend`'s DB layer, adapted where noted (see that
   module's own comments)
-- **APScheduler** — in-process cron for those same two scans (`app/
-  services/scheduler.py`); the big-loss email alert is the one
-  externally-triggered job (see Key design decisions)
 - **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
 
 ## Architecture
@@ -129,41 +126,34 @@ app/
   but the model's actual JSON output quality against the new prompt is
   untested until the cutover happens. Do not treat this as "the analyst
   pipeline is live" until that model swap is confirmed.
-- **The rebound and volatility-indicator research tables are scanned on a
-  schedule (daily / monthly), not live on button click.** Added at the
-  user's explicit request to cut Yahoo Finance call volume, since neither
-  table's underlying data changes meaningfully more often than that. An
-  in-process APScheduler cron (`app/services/scheduler.py`) runs each
-  scan in the early morning, batches the ~150-ticker universe discovery
-  into several groups with a delay between them (on top of, not instead
-  of, `swiss_universe.filter_domestic`'s existing per-ticker pacing —
-  affordable for an unattended overnight job in a way it isn't for a
-  live one), and persists the result to Neon Postgres
-  (`app/services/scan_persistence.py`). `GET /api/research/volatility/
-  {rebound,indicator}` just reads the latest saved run — no scan runs on
-  request anymore for these two. Deliberately NOT an external trigger
-  (GitHub Actions cron, Render Cron Jobs): this repo already tried a
-  GitHub Actions cron for a different purpose (keeping Render's free
-  tier warm) and it proved unreliable in practice (see git history:
-  `ci/remove-keep-alive-workflow` — a `*/10` schedule silently went 24+
-  minutes without firing). A catch-up check runs on every app startup
-  (`scheduler._is_rebound_stale`/`_is_indicator_stale`) so a missed
-  scheduled firing (a redeploy landing exactly on the hour) just runs a
-  bit late instead of being silently skipped. The "today" big-loss
-  screener is untouched — it stays fully live/on-demand, since intraday
-  data has no meaningful cache window.
+- **The rebound and volatility-indicator research tables are on-demand,
+  served from the last persisted run.** `GET /api/research/volatility/
+  {rebound,indicator}` reads the latest saved scan from Neon Postgres
+  (`app/services/scan_persistence.py`) — one indexed query, no Yahoo
+  call — so the page always shows whatever data exists, with its "Last
+  updated" time. A scan only runs when the user clicks Refresh (`POST
+  …/start`), through the single-flight guarded pipeline in
+  `app/services/scheduler.py` (the name is historical). The daily/
+  monthly APScheduler cron and its startup catch-up that used to drive
+  these two were removed on 2026-09-17: the Yahoo Finance request budget
+  is the scarce resource, and it now goes to the twice-daily big-loss
+  alert (next bullet) — the old startup catch-up would have launched a
+  full ~150-ticker rebound scan at the exact moment the alert woke the
+  process. The batched discovery (`RESEARCH_SCAN_NUM_BATCHES`,
+  `RESEARCH_SCAN_BATCH_DELAY_SECONDS`) is kept for the on-demand runs:
+  the user waits a few extra minutes behind a disabled button, but the
+  rate-limit safety is worth more than the wait.
 - **The big-loss email alert is triggered externally, by a GitHub
   Actions cron** (`.github/workflows/big-loss-alert.yml` → `POST
   /api/research/volatility/today/alert` → `app/services/alerts.py`),
-  twice a day at 12:00 and 17:30 Europe/Zurich. The in-process
-  scheduler can't do this one: on Render's free tier the process is
-  asleep between requests, and a cron inside a sleeping process never
-  fires (the rebound/indicator scans get away with it because their
-  startup catch-up runs them late; "today" is only meaningful at the
-  scheduled moment). This is the same mechanism the bullet above rejects
-  — and the 24-minute drift observed then is fine here: the workflow
-  gates on a one-hour Swiss-time window and a late alert is still an
-  alert, whereas a late keep-alive ping was a missed one. The API emails
+  twice a day at 12:00 and 17:30 Europe/Zurich. An in-process cron
+  can't do this: on Render's free tier the process is asleep between
+  requests, and a cron inside a sleeping process never fires. A GitHub
+  Actions cron was rejected once before in this repo (a `*/10`
+  keep-alive drifted 24+ minutes — see git history: `ci/remove-keep-
+  alive-workflow`); that drift is fine here, because the workflow gates
+  on a one-hour Swiss-time window and a late alert is still an alert,
+  whereas a late keep-alive ping was a missed one. The API emails
   the result whatever it is — a populated table, "none today", or the
   scan's error — so a missing email means the trigger didn't fire or the
   process died mid-wait (a redeploy, or Render's idle spin-down), never
@@ -194,7 +184,7 @@ uvicorn main:app --reload
 host suffixes, etc.). `.env` is loaded automatically (`python-dotenv`) if
 present — copy `.env.example` to start.
 
-The scheduled-scan feature additionally needs `DATABASE_CONNECTION_STRING`
+The persisted research scans additionally need `DATABASE_CONNECTION_STRING`
 (a Neon Postgres connection string) and a migration:
 
 ```bash
@@ -202,8 +192,7 @@ python -m alembic upgrade head
 ```
 
 Tests never touch the real database or trigger a real scan — see
-`conftest.py`'s `RESEARCH_SCHEDULER_DISABLED` guard and `tests/
-test_scan_persistence.py`'s in-memory-SQLite fixture.
+`tests/test_scan_persistence.py`'s in-memory-SQLite fixture.
 
 ## Tests
 

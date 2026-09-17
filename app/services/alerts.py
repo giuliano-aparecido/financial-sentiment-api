@@ -1,8 +1,8 @@
 """Emails the result of a today/big-loss scan (research_job.py) to
 ALERT_EMAIL_TO. Triggered by POST /api/research/volatility/today/alert,
 which an external scheduler (.github/workflows/big-loss-alert.yml) calls
-twice a day - the in-process APScheduler can't do this itself because the
-Render free tier sleeps the process between requests.
+twice a day - an in-process cron can't do this because the Render free
+tier sleeps the process between requests.
 """
 
 import datetime

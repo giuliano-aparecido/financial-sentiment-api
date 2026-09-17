@@ -24,7 +24,7 @@ _JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
 
 
 class ReboundScanRow(Base):
-    """One crash-then-rebound match from one scheduled scan run (see
+    """One crash-then-rebound match from one persisted scan run (see
     app/services/scheduler.py) - `data` is the full row dict exactly as
     swiss_crash_rebound.run_scan() produced it (ticker/name/sector/
     market_cap/loss_*/gain_*/... - see that function's own docstring for
@@ -82,9 +82,9 @@ class IndicatorScanRun(Base):
 
 
 class VolatilityIndicatorScanRow(Base):
-    """One company's row from one scheduled volatility-indicator scan run,
+    """One company's row from one persisted volatility-indicator scan run,
     for one threshold_pct (see swiss_volatility_indicator.ALLOWED_
-    THRESHOLD_PCTS - the scheduled job runs all three and stores each
+    THRESHOLD_PCTS - one scan runs all three and stores each
     separately, so the frontend's threshold selector still works without
     a live scan). Same JSONB-blob-plus-a-few-real-columns shape as
     ReboundScanRow above, for the same reason."""

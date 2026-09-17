@@ -8,7 +8,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.limiter import limiter
 from app.routers import admin, analyze, health, research
-from app.services import inference, scheduler, swiss_universe
+from app.services import inference, swiss_universe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -40,14 +40,9 @@ async def lifespan(_app: FastAPI):
         swiss_universe.seed_yf_session_from_env()
     except Exception:
         logging.getLogger(__name__).exception("Failed to seed yfinance crumb/cookies at startup - continuing without a seed")
-    # In-process cron for the rebound/volatility-indicator research scans -
-    # see app/services/scheduler.py's own docstring for why this lives here
-    # instead of an external trigger.
-    scheduler.start()
     try:
         yield
     finally:
-        scheduler.shutdown()
         await inference.stop_client()
 
 

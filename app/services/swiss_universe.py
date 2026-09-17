@@ -689,12 +689,12 @@ def filter_domestic_batched(
     `num_batches` roughly-equal chunks and sleeps `batch_delay_seconds`
     between them, instead of running every ticker's .info fetch (already
     internally paced/bounded-concurrent - see filter_domestic's own
-    docstring) as one contiguous burst. Only worth using for the
-    unattended scheduled scans (app/services/scheduler.py) - they have no
-    one waiting on a response, so spreading ~150 calls across many extra
-    minutes overnight is free safety margin against Yahoo rate-limiting
-    that a live, user-triggered scan (app/services/research_job.py) can't
-    afford to add on top of its own latency. num_batches=1 (or candidates
+    docstring) as one contiguous burst. Used by the persisted
+    rebound/indicator scans (app/services/scheduler.py), where the user
+    waits behind a disabled button and the extra minutes buy safety
+    margin against Yahoo rate-limiting; the live "today" scan
+    (app/services/research_job.py) can't add that on top of its own
+    latency and calls filter_domestic directly. num_batches=1 (or candidates
     smaller than num_batches) degrades to a single filter_domestic call
     with no sleep, same behavior as calling it directly.
 
@@ -705,8 +705,8 @@ def filter_domestic_batched(
     another batch anyway would defeat that; whatever batches already
     completed are still returned, remaining candidates simply aren't
     attempted this run (they land in `failed_symbols` the same way a
-    cancelled in-batch fetch does - see filter_domestic - so the next
-    scheduled run's retry path picks them up naturally).
+    cancelled in-batch fetch does - see filter_domestic - so the Retry
+    button's path picks them up).
     """
     items = list(candidates.items())
     if num_batches <= 1 or not items:

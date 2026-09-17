@@ -23,13 +23,12 @@ module constant.
 
 Deliberately does its OWN independent universe discovery (discover_
 candidates()/filter_domestic_batched()) rather than reusing the
-`domestic` dict the crash-rebound scan already computed - each is scanned
-on its own schedule (see app/services/scheduler.py: rebound daily,
-this table monthly), so sharing a cached `domestic` across them would
-either let this table's discovery go stale between refreshes, or require
-threading a shared cache through two independently-scheduled jobs for no
-real benefit - simpler and safer to pay the discovery cost again on this
-table's OWN run.
+`domestic` dict the crash-rebound scan already computed - each table is
+refreshed independently (see app/services/scheduler.py), so sharing a
+cached `domestic` across them would either let this table's discovery go
+stale between refreshes, or require threading a shared cache through two
+independent jobs for no real benefit - simpler and safer to pay the
+discovery cost again on this table's OWN run.
 
 Reuses swiss_crash_rebound.py's download_ohlcv_chunked (identical
 chunking/pacing, not a second copy - see that function's own docstring)

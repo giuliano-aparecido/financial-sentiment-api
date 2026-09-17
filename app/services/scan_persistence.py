@@ -1,10 +1,10 @@
 """
-Persistence layer backing the scheduled research scans (see
+Persistence layer backing the on-demand research scans (see
 app/services/scheduler.py): writes one scan run's rows to Neon Postgres,
 and reads back the latest run's rows for the read-only endpoints in
 app/routers/research.py. Deliberately dumb - no business logic here, just
-save/load - so scheduler.py stays the one place that decides WHEN a scan
-runs (and whether it's a full scan or a failed-ticker-only retry) and
+save/load - so scheduler.py stays the one place that runs a scan (full or
+failed-ticker-only retry, both user-triggered) and
 research.py the one place that decides how it's exposed over HTTP.
 
 Replace-on-write, not append-forever: each save_* call first deletes every
@@ -13,7 +13,7 @@ delete(...).where(... < scan_run_at) calls below) rather than keeping
 every historical run. Keeping full history was considered (cheap at this
 row count, free trend data later) but rejected for now - nothing in this
 feature reads anything but the latest run, and an unbounded table growing
-by one scan's worth of rows every day/month forever is a maintenance
+by one scan's worth of rows on every Refresh forever is a maintenance
 question nobody's asked for yet. If history ever becomes wanted, this is
 the one place to change.
 
@@ -29,9 +29,7 @@ specific tickers (merge_*_retry_rows/update_*_run_failed_tickers below)
 instead of redoing the whole scan. Kept in Neon (not in-memory, unlike
 the OLDER research_job.py's same-day discovery-retry cache for "today")
 because a retry needs to work correctly even if Render restarted between
-the original scan and the retry - see scheduler.py's own module
-docstring for why that matters for these two scheduled tables
-specifically.
+the original scan and the retry.
 """
 
 import datetime
@@ -74,8 +72,8 @@ def save_rebound_scan(
 
 def get_latest_rebound_scan() -> tuple[list[dict], datetime.datetime | None, list[str]]:
     """Returns (rows, scan_run_at, failed_tickers) for the most recent
-    saved scan - ([], None, []) if nothing has ever been saved (e.g. the
-    first scheduled run hasn't fired yet)."""
+    saved scan - ([], None, []) if nothing has ever been saved (no one
+    has clicked Refresh yet)."""
     with get_session() as session:
         latest = session.execute(select(func.max(ReboundScanRow.scan_run_at))).scalar_one_or_none()
         if latest is None:
