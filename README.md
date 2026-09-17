@@ -118,8 +118,8 @@ app/
   docstring for the two earlier, rejected attempts at fixing this and why
   they made it worse.
 - **`/api/analyze` sends the full v4 prompt (market data + valuation +
-  earnings + news), but no v4 model is live yet.** `HF_INFERENCE_URL`
-  still points at whatever model is currently deployed via
+  earnings + news), but no v4 model is live yet.** The default model's
+  inference URL still points at whatever is currently deployed via
   `/api/update-inference-url` — until `financial-sentiment-model`'s
   v4 model is trained, evaluated, and that URL is repointed, this app is
   serving the new prompt shape to an OLDER model that was never trained on

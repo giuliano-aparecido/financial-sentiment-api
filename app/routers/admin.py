@@ -30,7 +30,7 @@ async def update_inference_url(req: UpdateInferenceURLRequest, request: Request)
     # risk, it's a token-exfiltration one.
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not is_allowed_inference_host(host):
-        logger.warning("update-inference-url REJECTED from %s: %r (disallowed scheme/host)", caller_ip, new_url)
+        logger.warning("update-inference-url REJECTED from %s for [%s]: %r (disallowed scheme/host)", caller_ip, model, new_url)
         raise HTTPException(
             status_code=400,
             detail="url must be https and match an allowed host (see ALLOWED_INFERENCE_HOST_SUFFIXES)",

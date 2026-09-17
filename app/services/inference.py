@@ -31,9 +31,6 @@ def _sanitize_user_query(user_query: str) -> str:
     sanitized = _QUERY_SANITIZE_MARKER_RE.sub("", sanitized)
     return sanitized.strip()
 
-# Mutable at runtime via /api/update-inference-url so a Colab/ngrok tunnel can
-# repoint (or register) a model without a redeploy. Single-process, in-memory
-# by design - this app runs one worker and doesn't need it to survive a restart.
 _inference_urls: dict[str, str] = dict(INFERENCE_URLS)
 
 _client: httpx.AsyncClient | None = None
