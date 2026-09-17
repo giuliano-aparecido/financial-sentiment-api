@@ -29,9 +29,12 @@ jobs:
 
       - name: Trigger scan + email
         if: steps.gate.outputs.run == 'true'
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
         run: |
           curl --silent --show-error --fail-with-body \
             --retry 4 --retry-delay 30 --retry-all-errors --max-time 120 \
             -X POST \
-            -H "X-API-Key: ${{ secrets.API_KEY }}" \
-            "${{ secrets.API_BASE_URL }}/api/research/volatility/today/alert"
+            -H "X-API-Key: $API_KEY" \
+            "$API_BASE_URL/api/research/volatility/today/alert"
