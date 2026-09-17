@@ -123,10 +123,13 @@ async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_lab
 
     try:
         res_data = response.json()
-        return res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
+        generated_text = res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
         logger.warning("Unexpected inference response shape for [%s/%s]: %s - body: %s", model, task_label, e, response.text[:1000])
         raise HTTPException(status_code=502, detail="The inference backend returned an unexpected response.")
+
+    logger.info("Raw output from [%s/%s] for ticker=%s:\n%s", model, task_label, ticker, generated_text)
+    return generated_text
 
 
 def _clean_model_output(raw_text: str) -> str:
