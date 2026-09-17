@@ -54,20 +54,29 @@ app/
                               earnings-date fetch + block renderer
     inference.py                HF inference call + response parsing;
                               also holds the mutable in-memory
-                              HF_INFERENCE_URL (see below)
+                              per-model inference URLs (see below)
   routers/
     health.py, analyze.py, admin.py   Thin HTTP layer only
 ```
 
 ## Key design decisions
 
-- **`HF_INFERENCE_URL` is a mutable, in-memory global**, updatable via
-  `POST /api/update-inference-url` — this exists so a Colab-hosted model
-  (behind an ngrok tunnel that gets a new URL on every restart) can push
-  its current URL without a redeploy. Deliberately not made more
-  robust/persistent: this app runs a single process/instance and doesn't
-  need to scale, so the added complexity of a shared store wouldn't earn
-  its keep.
+- **Multiple models behind one API.** `/api/analyze?model=<name>` picks
+  which fine-tuned model answers; `DEFAULT_MODEL` (default `llama`) is
+  used when the param is absent, and an unknown name is a 400. Each
+  model has its own endpoint env var (`LLAMA_INFERENCE_URL`, falling
+  back to `HF_INFERENCE_URL`; `APERTUS_INFERENCE_URL`, no fallback — a
+  request for an unconfigured model is a 503). `/health` lists which
+  ones are configured. All models share the same auth (`HF_TOKEN` as
+  bearer), host allowlist, and rate limit.
+- **The per-model inference URLs are mutable, in-memory globals**,
+  updatable via `POST /api/update-inference-url` (`{"url": ...,
+  "model": ...}`, `model` defaulting to `DEFAULT_MODEL`) — this exists
+  so a Colab-hosted model (behind an ngrok tunnel that gets a new URL on
+  every restart) can push its current URL without a redeploy.
+  Deliberately not made more robust/persistent: this app runs a single
+  process/instance and doesn't need to scale, so the added complexity
+  of a shared store wouldn't earn its keep.
 - **The update-inference-url host allowlist** (`ALLOWED_INFERENCE_HOST_SUFFIXES`)
   matches on an exact host or a `.`-bounded suffix, not a bare
   `str.endswith()` — a plain `endswith` would accept a registered

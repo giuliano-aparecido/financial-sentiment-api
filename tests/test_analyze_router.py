@@ -13,13 +13,13 @@ def _patch_services(monkeypatch, fundamentals=None, earnings_data=None, price_mo
 
     async def fake_analyze_two_stage(
         ticker, user_query, context, price_context, gap_pct,
-        ticker_was_explicit=True,
+        ticker_was_explicit=True, model="llama",
     ):
         captured.update(
             ticker=ticker, user_query=user_query, live_context=context.live_context,
             market_data=context.market_data, valuation=context.valuation, earnings=context.earnings,
             price_context=price_context, gap_pct=gap_pct,
-            ticker_was_explicit=ticker_was_explicit,
+            ticker_was_explicit=ticker_was_explicit, model=model,
         )
         return {
             "recommendation": "HOLD", "news_reaction": "neutral",
@@ -145,3 +145,39 @@ def test_analyze_route_flags_ticker_as_explicit_when_query_names_one(client, mon
 
     assert response.status_code == 200
     assert captured["ticker_was_explicit"] is True
+
+
+# --- ?model= selection ---
+
+
+def test_analyze_route_defaults_to_llama_when_no_model_given(client, monkeypatch):
+    captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
+
+    response = client.post("/api/analyze", json={"user_query": "Is $AAPL a buy?"}, headers={"X-API-Key": VALID_KEY})
+
+    assert response.status_code == 200
+    assert captured["model"] == "llama"
+
+
+def test_analyze_route_forwards_model_query_param_normalized(client, monkeypatch):
+    captured = _patch_services(monkeypatch, fundamentals=None, earnings_data=None)
+
+    response = client.post(
+        "/api/analyze?model=Apertus", json={"user_query": "Is $AAPL a buy?"}, headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == "apertus"
+
+
+def test_analyze_route_rejects_unknown_model_before_fetching_anything(client, monkeypatch):
+    fetches = []
+    monkeypatch.setattr(analyze_router, "fetch_fundamentals", lambda ticker: fetches.append(ticker))
+
+    response = client.post(
+        "/api/analyze?model=gpt9", json={"user_query": "Is $AAPL a buy?"}, headers={"X-API-Key": VALID_KEY},
+    )
+
+    assert response.status_code == 400
+    assert "gpt9" in response.json()["detail"]
+    assert fetches == []

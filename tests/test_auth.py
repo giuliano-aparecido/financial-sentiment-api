@@ -105,6 +105,44 @@ def test_update_inference_url_accepts_modal_run(client):
     assert response.json()["hf_inference_url"] == "https://gaparecido--financial-sentiment-reasoner-generate.modal.run"
 
 
+def test_update_inference_url_defaults_to_llama_and_only_repoints_that_model(client):
+    from app.services import inference
+
+    before = inference.configured_inference_url("apertus")
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "https://abc123.ngrok-free.app"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == "llama"
+    assert inference.configured_inference_url("llama") == "https://abc123.ngrok-free.app"
+    assert inference.configured_inference_url("apertus") == before
+
+
+def test_update_inference_url_repoints_named_model(client):
+    from app.services import inference
+
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "https://x--apertus.modal.run", "model": "apertus"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "model": "apertus", "hf_inference_url": "https://x--apertus.modal.run"}
+    assert inference.configured_inference_url("apertus") == "https://x--apertus.modal.run"
+
+
+def test_update_inference_url_rejects_unknown_model(client):
+    response = client.post(
+        "/api/update-inference-url",
+        json={"url": "https://abc123.ngrok-free.app", "model": "gpt9"},
+        headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 400
+    assert "gpt9" in response.json()["detail"]
+
+
 def test_update_yf_crumb_rejects_missing_key(client):
     response = client.post("/api/update-yf-crumb", json={"crumb": "abc", "cookies": {}})
     assert response.status_code == 401

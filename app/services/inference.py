@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import HTTPException
 
-from app.config import DEFAULT_HF_INFERENCE_URL, HF_API_TOKEN, MODEL_ARCHITECTURE, get_inference_url_for_model, require_hf_api_token
+from app.config import DEFAULT_MODEL, HF_API_TOKEN, INFERENCE_URLS, require_hf_api_token, resolve_model
 from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
@@ -32,20 +32,26 @@ def _sanitize_user_query(user_query: str) -> str:
     return sanitized.strip()
 
 # Mutable at runtime via /api/update-inference-url so a Colab/ngrok tunnel can
-# repoint this without a redeploy. Single-process, in-memory by design - this
+# repoint a model without a redeploy. Single-process, in-memory by design - this
 # app runs one worker and doesn't need it to survive a restart.
-_hf_inference_url = DEFAULT_HF_INFERENCE_URL
+_inference_urls: dict[str, str | None] = dict(INFERENCE_URLS)
 
 _client: httpx.AsyncClient | None = None
 
 
-def get_hf_inference_url() -> str:
-    return _hf_inference_url
+def configured_inference_url(model: str = DEFAULT_MODEL) -> str | None:
+    return _inference_urls[resolve_model(model)]
 
 
-def set_hf_inference_url(url: str) -> None:
-    global _hf_inference_url
-    _hf_inference_url = url
+def get_inference_url(model: str = DEFAULT_MODEL) -> str:
+    url = configured_inference_url(model)
+    if not url:
+        raise HTTPException(status_code=503, detail=f"No inference endpoint is configured for model {model!r}.")
+    return url
+
+
+def set_inference_url(url: str, model: str = DEFAULT_MODEL) -> None:
+    _inference_urls[resolve_model(model)] = url
 
 
 async def start_client() -> None:
@@ -81,15 +87,15 @@ def _client_or_raise() -> httpx.AsyncClient:
     return _client
 
 
-async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_label: str, model: str = "llama") -> str:
+async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_label: str, model: str = DEFAULT_MODEL) -> str:
     """POSTs `prompt` to the configured inference endpoint for the given
     model and returns the raw generated text - the shared transport core
     both classify_news (Task A) and generate_analysis (Task B) build on.
     Raises HTTPException(502) on any transport failure, non-200 response,
     or unexpected response shape; a PARSE failure of otherwise-successful
     generated text is each caller's own concern, not this function's."""
-    inference_url = get_inference_url_for_model(model)
-    logger.info("Prompt sent to [%s/%s] (model=%s) for ticker=%s:\n%s", MODEL_ARCHITECTURE, task_label, model, ticker, prompt)
+    inference_url = get_inference_url(model)
+    logger.info("Prompt sent to [%s/%s] for ticker=%s:\n%s", model, task_label, ticker, prompt)
 
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {
@@ -105,20 +111,20 @@ async def _call_model(prompt: str, max_new_tokens: int, *, ticker: str, task_lab
     try:
         response = await client.post(inference_url, headers=headers, json=payload)
     except httpx.RequestError as e:
-        logger.warning("HF inference request failed for [%s/%s] at %s: %s", MODEL_ARCHITECTURE, task_label, inference_url, e)
+        logger.warning("Inference request failed for [%s/%s] at %s: %s", model, task_label, inference_url, e)
         raise HTTPException(status_code=502, detail="Failed to reach the inference backend.")
 
     if response.status_code != 200:
         # response.text can carry HF account/model/quota details (or ngrok
         # internals) - log it server-side, don't hand it to the client.
-        logger.warning("Inference error for [%s/%s]: %s %s", MODEL_ARCHITECTURE, task_label, response.status_code, response.text[:1000])
+        logger.warning("Inference error for [%s/%s]: %s %s", model, task_label, response.status_code, response.text[:1000])
         raise HTTPException(status_code=502, detail="The inference backend returned an error.")
 
     try:
         res_data = response.json()
         return res_data[0]["generated_text"] if isinstance(res_data, list) else str(res_data)
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-        logger.warning("Unexpected inference response shape for [%s/%s]: %s - body: %s", MODEL_ARCHITECTURE, task_label, e, response.text[:1000])
+        logger.warning("Unexpected inference response shape for [%s/%s]: %s - body: %s", model, task_label, e, response.text[:1000])
         raise HTTPException(status_code=502, detail="The inference backend returned an unexpected response.")
 
 
@@ -227,7 +233,7 @@ Recent News & Results:
 """
 
 
-async def classify_news(ticker: str, price_context: str, live_context: str, model: str = "llama") -> str | None:
+async def classify_news(ticker: str, price_context: str, live_context: str, model: str = DEFAULT_MODEL) -> str | None:
     """Task A: classifies how the market has reacted to `live_context`
     given `price_context` (see fundamentals.price_move_on_date). Returns
     the news_reaction string on success, or None if the model's output
@@ -246,12 +252,13 @@ async def classify_news(ticker: str, price_context: str, live_context: str, mode
         return reaction
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.info("Task A output for [%s] ticker=%s wasn't a valid news_reaction (%s) - raw: %r",
-                    MODEL_ARCHITECTURE, ticker, e, raw_text[:300])
+                    model, ticker, e, raw_text[:300])
         return None
 
 
 async def generate_analysis(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext, model: str = "llama",
+    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
+    model: str = DEFAULT_MODEL,
 ) -> dict:
     """Task B: writes reasoning/answer given an ALREADY-DECIDED news_
     reaction + recommendation (never asked to produce either). Returns
@@ -268,8 +275,8 @@ async def generate_analysis(
         parsed = json.loads(json_str)
         return {"reasoning": parsed["reasoning"], "answer": parsed["answer"], "raw_json": parsed}
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.info("Task B output for [%s] ticker=%s wasn't the expected JSON shape (%s) - falling back to raw_response",
-                    MODEL_ARCHITECTURE, ticker, e)
+        logger.info("Task B output for [%s] ticker=%s wasn't the expected JSON shape (%s) - falling back to raw_response - raw: %r",
+                    model, ticker, e, raw_text[:300])
         return {"raw_response": raw_text}
 
 
@@ -280,7 +287,7 @@ async def analyze_two_stage(
     price_context: str,
     gap_pct: float | None,
     ticker_was_explicit: bool = True,
-    model: str = "llama",
+    model: str = DEFAULT_MODEL,
 ) -> dict:
     """Orchestrates the two-stage pipeline: Task A classifies news_
     reaction -> fusion.fuse() computes the ONLY recommendation this
@@ -306,7 +313,7 @@ async def analyze_two_stage(
     analysis = await generate_analysis(ticker, user_query, news_reaction, fusion_result.recommendation, context, model=model)
 
     result = {
-        "model_architecture": MODEL_ARCHITECTURE,
+        "model_architecture": model,
         "ticker": ticker,
         "ticker_was_explicit": ticker_was_explicit,
         "live_news_retrieved": context.live_context,

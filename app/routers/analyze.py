@@ -1,8 +1,8 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
-from app.deps import verify_api_key
+from app.deps import selected_model, verify_api_key
 from app.models import QueryRequest
 from app.services.earnings import earnings_block, fetch_earnings
 from app.services.fundamentals import fetch_fundamentals, market_data_block, price_move_on_date
@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 @router.post("/api/analyze", dependencies=[Depends(verify_api_key)])
-async def analyze_stock(req: QueryRequest, model: str = Query("llama", description="Model to use: 'llama' or 'apertus'")):
+async def analyze_stock(req: QueryRequest, model: str = Depends(selected_model)):
     ticker, ticker_was_explicit = extract_ticker(req.user_query)
     # fetch_fundamentals and fetch_earnings are independent of everything
     # else, so they still run concurrently. fetch_live_news_rag can't join
