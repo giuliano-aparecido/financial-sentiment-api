@@ -121,6 +121,18 @@ def test_task_a_requests_48_max_new_tokens(monkeypatch):
     assert fake.payloads[0]["parameters"]["max_new_tokens"] == 48
 
 
+def test_call_model_logs_the_prompt_and_the_raw_output_on_success(monkeypatch, caplog):
+    import logging
+
+    _install_fake_client(monkeypatch, [_ok('{"news_reaction": "good"}  <|eot_id|>')])
+    with caplog.at_level(logging.INFO, logger="app.services.inference"):
+        _run(inference.classify_news("AAPL", PRICE_CONTEXT, NEWS, model="llama"))
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("Prompt sent to [llama/reaction] for ticker=AAPL:") for m in messages)
+    assert 'Raw output from [llama/reaction] for ticker=AAPL:\n{"news_reaction": "good"}  <|eot_id|>' in messages
+
+
 def test_classify_news_returns_valid_reaction(monkeypatch):
     _install_fake_client(monkeypatch, [_reaction_response("overreaction_down")])
     result = _run(inference.classify_news("AAPL", PRICE_CONTEXT, NEWS))
