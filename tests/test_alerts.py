@@ -22,36 +22,39 @@ def _no_pending_alert(monkeypatch):
 # --- format_alert ---
 
 
-def test_format_alert_lists_each_row_with_change_and_volume_ratio():
-    subject, body = alerts.format_alert(
-        {"status": "done", "today_screener": ROWS, "universe_size": 120, "failed_ticker_count": 3}, NOW,
-    )
+DONE = {"status": "done", "today_screener": ROWS, "universe_size": 120, "failed_ticker_count": 3}
+
+
+def test_format_alert_plain_text_lists_each_row_with_its_yahoo_link():
+    subject, text, _html = alerts.format_alert(ROWS, DONE, NOW)
     assert subject == "[Swiss big-loss] 2 stock(s) 2026-09-17 15:30 UTC"
-    assert "ABCD.SW      -7.25%   Alpha AG" in body
-    assert "0.40x 10d avg volume, price 12.3" in body
-    assert "WXYZ.SW      -5.10%   Omega SA" in body
-    assert "volume ratio n/a, price 88.0" in body
-    assert "Universe: 120 tickers, 3 failed to fetch." in body
+    assert "ABCD.SW      -7.25%   Alpha AG" in text
+    assert "0.40x 10d avg volume, price 12.3" in text
+    assert "https://finance.yahoo.com/quote/ABCD.SW" in text
+    assert "WXYZ.SW      -5.10%   Omega SA" in text
+    assert "volume ratio n/a, price 88.0" in text
+    assert "Universe: 120 tickers, 3 failed to fetch." in text
 
 
-def test_format_alert_says_none_when_nothing_matched():
-    subject, body = alerts.format_alert(
-        {"status": "done", "today_screener": [], "universe_size": 120, "failed_ticker_count": 0}, NOW,
-    )
-    assert subject == "[Swiss big-loss] none today 2026-09-17 15:30 UTC"
-    assert "No Swiss stock is down 5% or more today." in body
+def test_format_alert_html_links_each_ticker_to_its_yahoo_quote_page():
+    _subject, _text, html_body = alerts.format_alert(ROWS, DONE, NOW)
+    assert '<a href="https://finance.yahoo.com/quote/ABCD.SW">ABCD.SW</a>' in html_body
+    assert '<a href="https://finance.yahoo.com/quote/WXYZ.SW">WXYZ.SW</a>' in html_body
+    assert "<td>-7.25%</td>" in html_body
+    assert "Universe: 120 tickers, 3 failed to fetch." in html_body
 
 
-def test_format_alert_reports_a_failed_scan_instead_of_staying_silent():
-    subject, body = alerts.format_alert({"status": "error", "error": "Yahoo Finance is currently rate-limiting"}, NOW)
-    assert subject == "[Swiss big-loss] scan FAILED 2026-09-17 15:30 UTC"
-    assert "Yahoo Finance is currently rate-limiting" in body
+def test_format_alert_escapes_html_in_names_and_urls_in_tickers():
+    rows = [{"ticker": "A&B.SW", "name": "<Evil> & Co", "change_pct": -6.0, "price": 1.0, "volume_vs_10d_avg": 1.0}]
+    _subject, text, html_body = alerts.format_alert(rows, {"universe_size": 1, "failed_ticker_count": 0}, NOW)
+    assert "&lt;Evil&gt; &amp; Co" in html_body
+    assert "<Evil>" not in html_body
+    assert 'href="https://finance.yahoo.com/quote/A%26B.SW"' in html_body
+    assert "https://finance.yahoo.com/quote/A%26B.SW" in text
 
 
-def test_format_alert_reports_a_timed_out_wait():
-    subject, body = alerts.format_alert({"status": "timeout", "error": "scan still running after 900s"}, NOW)
-    assert "FAILED" in subject
-    assert "still running" in body
+def test_yahoo_quote_url_matches_the_web_pages_link_format():
+    assert alerts.yahoo_quote_url("NESN.SW") == "https://finance.yahoo.com/quote/NESN.SW"
 
 
 # --- start_today_alert / _wait_for_scan ---
@@ -68,8 +71,8 @@ def test_start_today_alert_starts_the_scan_and_emails_when_it_finishes(monkeypat
     sent = []
     done = threading.Event()
 
-    def sender(subject, body):
-        sent.append((subject, body))
+    def sender(subject, text, html_body):
+        sent.append((subject, text, html_body))
         done.set()
 
     job = alerts.start_today_alert(sender=sender)
@@ -78,6 +81,23 @@ def test_start_today_alert_starts_the_scan_and_emails_when_it_finishes(monkeypat
     assert job["alert"] == "pending"
     assert done.wait(timeout=5)
     assert sent[0][0].startswith("[Swiss big-loss] 2 stock(s)")
+    assert "finance.yahoo.com/quote/ABCD.SW" in sent[0][2]
+
+
+@pytest.mark.parametrize("final_status, expected_log", [
+    ({"status": "done", "started_at": "2026-09-17T15:30:00+00:00", "today_screener": [], "universe_size": 120, "failed_ticker_count": 0}, "no stock down 5% or more today - no email"),
+    ({"status": "error", "started_at": "2026-09-17T15:30:00+00:00", "error": "Yahoo Finance is currently rate-limiting"}, "scan did not complete (error: Yahoo Finance is currently rate-limiting) - no email"),
+    ({"status": "timeout", "started_at": "2026-09-17T15:30:00+00:00", "error": "scan still running after 600s"}, "scan did not complete (timeout: scan still running after 600s) - no email"),
+])
+def test_run_alert_only_logs_when_there_is_nothing_to_send(monkeypatch, caplog, final_status, expected_log):
+    monkeypatch.setattr(alerts, "_wait_for_scan", lambda started_at: final_status)
+    sent = []
+
+    with caplog.at_level(logging.INFO, logger="app.services.alerts"):
+        alerts._run_alert("2026-09-17T15:30:00+00:00", lambda *a: sent.append(a))
+
+    assert sent == []
+    assert expected_log in caplog.text
 
 
 def test_start_today_alert_called_twice_for_the_same_scan_sends_one_email(monkeypatch):
@@ -86,14 +106,14 @@ def test_start_today_alert_called_twice_for_the_same_scan_sends_one_email(monkey
     monkeypatch.setattr(research_job, "start_today_scan", lambda: {"status": "running", "started_at": started_at})
     monkeypatch.setattr(
         research_job, "get_today_status",
-        lambda: {"status": "done", "started_at": started_at, "today_screener": []} if release.is_set()
+        lambda: {"status": "done", "started_at": started_at, "today_screener": ROWS} if release.is_set()
         else {"status": "running", "started_at": started_at},
     )
     monkeypatch.setattr(alerts, "POLL_INTERVAL_SECONDS", 0)
     sent = []
     finished = threading.Event()
 
-    def sender(subject, body):
+    def sender(subject, text, html_body):
         sent.append(subject)
         finished.set()
 
@@ -127,9 +147,9 @@ def test_wait_for_scan_keeps_waiting_for_an_older_result_then_times_out(monkeypa
 
 
 def test_run_alert_logs_and_survives_a_sender_failure(monkeypatch, caplog):
-    monkeypatch.setattr(alerts, "_wait_for_scan", lambda started_at: {"status": "done", "today_screener": []})
+    monkeypatch.setattr(alerts, "_wait_for_scan", lambda started_at: {"status": "done", "today_screener": ROWS})
 
-    def broken_sender(subject, body):
+    def broken_sender(subject, text, html_body):
         raise ConnectionError("smtp down")
 
     with caplog.at_level(logging.ERROR, logger="app.services.alerts"):
@@ -194,10 +214,14 @@ def test_send_email_addresses_every_recipient(monkeypatch):
         def send_message(self, msg, to_addrs=None):
             calls["to_header"] = msg["To"]
             calls["to_addrs"] = to_addrs
+            calls["parts"] = [part.get_content_type() for part in msg.iter_parts()]
+            calls["html"] = msg.get_body(preferencelist=("html",)).get_content()
 
     monkeypatch.setattr(alerts.smtplib, "SMTP", FakeSMTP)
-    alerts.send_email("subj", "body")
+    alerts.send_email("subj", "plain body", "<p>html body</p>")
 
     assert calls["to_header"] == "a@x.test, b@y.test"
     assert calls["to_addrs"] == ["a@x.test", "b@y.test"]
     assert calls["tls"] and calls["login"] == "bot@x.test"
+    assert calls["parts"] == ["text/plain", "text/html"]
+    assert "<p>html body</p>" in calls["html"]

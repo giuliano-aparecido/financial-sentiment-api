@@ -153,11 +153,12 @@ app/
   keep-alive drifted 24+ minutes — see git history: `ci/remove-keep-
   alive-workflow`); that drift is fine here, because the workflow gates
   on a one-hour Swiss-time window and a late alert is still an alert,
-  whereas a late keep-alive ping was a missed one. The API emails
-  the result whatever it is — a populated table, "none today", or the
-  scan's error — so a missing email means the trigger didn't fire or the
-  process died mid-wait (a redeploy, or Render's idle spin-down), never
-  that there was nothing to say. Two ways the trigger stops firing
+  whereas a late keep-alive ping was a missed one. An email goes out
+  only when the scan finds at least one match (each ticker linked to
+  its Yahoo Finance quote page, like the web table); an empty or failed
+  scan is logged on the API side, not mailed. That means a quiet inbox
+  is ambiguous — check the workflow's run history in the Actions tab
+  and the Render logs if you doubt it fired. Two ways the trigger stops
   silently: GitHub disables `schedule` workflows in a repo with no
   commits for 60 days (re-enable from the Actions tab), and a failed
   `curl` only shows up as GitHub's failed-run notification email. The
