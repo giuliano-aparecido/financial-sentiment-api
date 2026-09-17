@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
-from app.config import HF_MODEL_REPO, MODEL_ARCHITECTURE
+from app.config import DEFAULT_MODEL, HF_MODEL_REPO
+from app.services.inference import inference_urls
 
 router = APIRouter()
 
@@ -9,6 +10,7 @@ router = APIRouter()
 def health_check():
     return {
         "status": "online",
-        "active_architecture": MODEL_ARCHITECTURE,
+        "default_model": DEFAULT_MODEL,
+        "models": sorted(inference_urls()),
         "target_model_repo": HF_MODEL_REPO,
     }

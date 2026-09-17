@@ -54,20 +54,35 @@ app/
                               earnings-date fetch + block renderer
     inference.py                HF inference call + response parsing;
                               also holds the mutable in-memory
-                              HF_INFERENCE_URL (see below)
+                              per-model inference URLs (see below)
   routers/
     health.py, analyze.py, admin.py   Thin HTTP layer only
 ```
 
 ## Key design decisions
 
-- **`HF_INFERENCE_URL` is a mutable, in-memory global**, updatable via
-  `POST /api/update-inference-url` — this exists so a Colab-hosted model
-  (behind an ngrok tunnel that gets a new URL on every restart) can push
-  its current URL without a redeploy. Deliberately not made more
-  robust/persistent: this app runs a single process/instance and doesn't
-  need to scale, so the added complexity of a shared store wouldn't earn
-  its keep.
+- **Multiple models behind one API, with no model names in code.**
+  `/api/analyze?model=<name>` picks which fine-tuned model answers;
+  `DEFAULT_MODEL` (default `llama`) is used when the param is absent,
+  and a name that isn't registered is a 400. Models are registered two
+  ways, neither needing a code change:
+  - **Env var convention at startup:** every `<NAME>_INFERENCE_URL`
+    env var registers model `<name>` (lowercased) — `KIM_INFERENCE_URL`
+    makes `?model=kim` work. `HF_INFERENCE_URL` is the legacy
+    single-model var and still means "the `DEFAULT_MODEL`'s URL" when
+    that model has no dedicated var.
+  - **At runtime:** `POST /api/update-inference-url` with a `model`
+    that isn't registered yet registers it (see next bullet).
+  `GET /health` lists what's registered. All models share the same auth
+  (`HF_TOKEN` as bearer), host allowlist, and rate limit.
+- **The per-model inference URLs are mutable, in-memory globals**,
+  updatable via `POST /api/update-inference-url` (`{"url": ...,
+  "model": ...}`, `model` defaulting to `DEFAULT_MODEL`) — this exists
+  so a Colab-hosted model (behind an ngrok tunnel that gets a new URL on
+  every restart) can push its current URL without a redeploy.
+  Deliberately not made more robust/persistent: this app runs a single
+  process/instance and doesn't need to scale, so the added complexity
+  of a shared store wouldn't earn its keep.
 - **The update-inference-url host allowlist** (`ALLOWED_INFERENCE_HOST_SUFFIXES`)
   matches on an exact host or a `.`-bounded suffix, not a bare
   `str.endswith()` — a plain `endswith` would accept a registered
@@ -103,8 +118,8 @@ app/
   docstring for the two earlier, rejected attempts at fixing this and why
   they made it worse.
 - **`/api/analyze` sends the full v4 prompt (market data + valuation +
-  earnings + news), but no v4 model is live yet.** `HF_INFERENCE_URL`
-  still points at whatever model is currently deployed via
+  earnings + news), but no v4 model is live yet.** The default model's
+  inference URL still points at whatever is currently deployed via
   `/api/update-inference-url` — until `financial-sentiment-model`'s
   v4 model is trained, evaluated, and that URL is repointed, this app is
   serving the new prompt shape to an OLDER model that was never trained on

@@ -7,6 +7,7 @@ class QueryRequest(BaseModel):
 
 class UpdateInferenceURLRequest(BaseModel):
     url: str
+    model: str | None = None
 
 
 class UpdateYfCrumbRequest(BaseModel):
