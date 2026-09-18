@@ -162,8 +162,10 @@ app/
   silently: GitHub disables `schedule` workflows in a repo with no
   commits for 60 days (re-enable from the Actions tab), and a failed
   `curl` only shows up as GitHub's failed-run notification email. The
-  workflow needs two repository secrets, `API_KEY` and `API_BASE_URL`;
-  the API needs `SMTP_*` and `ALERT_EMAIL_*` (see `.env.example`).
+  workflow needs two repository secrets, `RAG_API_KEY` and `RAG_API_URL`
+  (the same ones `scripts/refresh_yf_crumb.py` uses — same server, same
+  single API key); the API needs `SMTP_*` and `ALERT_EMAIL_*` (see
+  `.env.example`).
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since
