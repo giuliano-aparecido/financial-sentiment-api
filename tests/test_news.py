@@ -92,6 +92,135 @@ def test_low_content_headline_does_not_catch_genuine_is_x_still_after_analysis_h
     )
 
 
+# --- 2026-09-18 back-port from portfolio-manager-backend ---
+
+
+def test_low_content_headline_catches_here_is_why_spelled_out():
+    # "here.s why" matched "here's"/"heres" but not "Here Is Why", which
+    # is how several outlets write it.
+    assert news._is_low_content_headline("IBM Stock Trades Up After Revenue Report, Here Is Why")
+    assert news._is_low_content_headline("Here Is Why Nestle Stock Rose Today")
+    assert news._is_low_content_headline("Amazon (AMZN): Here Is What Investors Should Know")
+
+
+def test_low_content_headline_catches_more_fund_filing_shapes():
+    # All four results in one live IBM window, 2026-09-18 - shapes the
+    # pre-existing branches missed because a share count sits between the
+    # verb and "Shares", or the verb isn't in their list.
+    assert news._is_low_content_headline(
+        "Sequoia Financial Advisors LLC Acquires 14,178 Shares of International Business Machines"
+    )
+    assert news._is_low_content_headline("Van Hulzen Asset Management LLC Has $31.69 Million Stock Holdings in IBM")
+    assert news._is_low_content_headline("Capital Analysts LLC Buys 7,892 Shares of IBM Corporation")
+
+
+def test_filing_spam_branches_require_a_quantity_not_just_a_financial_word():
+    # Every new branch keys on a share count or dollar figure. Gating on a
+    # filer keyword instead ("Bank", "Capital", "Financial", "Trust",
+    # "Management") would reject these, because those words are also just
+    # what financial-sector ISSUERS are called - and a denylist match has
+    # nothing downstream to rescue it.
+    for title in [
+        "Bank of America Buys Stake in Fintech Startup",
+        "Deutsche Bank Cuts Position in Troubled Property Unit",
+        "IBM Management Raises Stake in Quantum Venture",
+        "Berkshire Hathaway Boosts Stake in Occidental Petroleum",
+        "Nestle Sells Stake in Its Water Business to Private Equity",
+        # A percentage is no better a gate than a keyword: a company
+        # raising its own stake reads identically to a fund's 13F delta.
+        "Berkshire Hathaway Boosts Stake in Occidental Petroleum by 5%",
+        "Vale Reduces Stake in Joint Venture by 30% as Part of Overhaul",
+    ]:
+        assert not news._is_low_content_headline(title), title
+
+
+# --- _is_low_quality_publisher ---
+
+
+def test_denylisted_publisher_matched_however_google_news_spells_it():
+    # Confirmed live: exact-string matching let every "marketbeat.com"
+    # result through while "MarketBeat" was denied.
+    for publisher in [
+        "MarketBeat", "marketbeat.com", "Simply Wall St.", "simplywall.st",
+        "Zacks", "Zacks.com", "Zacks Investment Research", "TIKR", "TIKR.com",
+    ]:
+        assert news._is_low_quality_publisher(publisher), publisher
+
+
+def test_real_publisher_is_not_denylisted():
+    for publisher in ["Reuters", "Bloomberg", "Financial Times", "marketscreener.com", "The Motley Fool"]:
+        assert not news._is_low_quality_publisher(publisher), publisher
+
+
+def test_publisher_denylist_matches_whole_tokens_not_raw_prefixes():
+    # Short stems are only safe because matching is token-wise: a raw
+    # `startswith` on alphanumerics-only keys would let "TIKR" deny
+    # "Tikrit Daily" and "Zacks" deny "Zackerman Media".
+    assert not news._is_low_quality_publisher("Tikrit Daily")
+    assert not news._is_low_quality_publisher("Zackerman Media")
+    assert not news._is_low_quality_publisher(news.PUBLISHER_FALLBACK)
+
+
+# --- company-name folding ---
+
+
+def test_company_match_name_strips_accents_and_legal_suffixes():
+    # `name` is yfinance's registered name; headlines write the plain
+    # brand. Both ends are stripped - tail-only leaves "the coca-cola".
+    assert news._company_match_name("Nestlé S.A.") == "nestle"
+    assert news._company_match_name("Alphabet Inc.") == "alphabet"
+    assert news._company_match_name("Mondi plc") == "mondi"
+    assert news._company_match_name("The Coca-Cola Company") == "coca-cola"
+
+
+def test_relevant_headline_matches_registered_name_against_plain_brand():
+    assert news._is_relevant_headline("NESN", "Nestlé S.A.", None, "Nestle raises full-year outlook")
+    assert news._is_relevant_headline("KO", "The Coca-Cola Company", None, "Coca-Cola lifts full-year guidance")
+    # A real 2-character brand still works - the floor is 2, not 3.
+    assert news._is_relevant_headline("MMM", "3M Company", None, "3M raises full-year guidance")
+
+
+def test_relevant_headline_matches_name_on_word_boundary_not_substring():
+    # "Nestle" must not match inside another word.
+    assert not news._is_relevant_headline("NESN", "Nestlé S.A.", None, "Nestleford Council raises rates")
+
+
+def test_relevant_headline_requires_the_full_name_when_the_core_is_an_ordinary_word():
+    # Suffix stripping goes too far for these: the bare core matches
+    # unrelated headlines, and the name tier short-circuits the rest of
+    # _is_relevant_headline, so the headline is served as if it were
+    # about this company.
+    assert not news._is_relevant_headline(
+        "TGT", "Target Corporation", None, "Analysts Raise Price Target for Nvidia to $200"
+    )
+    assert not news._is_relevant_headline("SE", "Sea Limited", None, "Coast Guard Rescues Sailors After Storm at Sea")
+    assert not news._is_relevant_headline("BOX", "Box Inc.", None, "Amazon Warns of Cardboard Box Shortage")
+    # The full name still matches, which is the pre-stripping behaviour.
+    assert news._is_relevant_headline(
+        "TGT", "Target Corporation", None, "Target Corporation reports record holiday sales"
+    )
+
+
+def test_low_content_headline_leaves_acquisition_news_alone():
+    # A "Shares of X ... Acquired by Y" branch with a gap between the
+    # halves also matches ordinary M&A reporting, which states a cause
+    # and is exactly what this filter should keep.
+    for title in [
+        "Shares of Activision Jumped After the Company Was Acquired by Microsoft",
+        "Shares of Splunk Surged After It Agreed to Be Acquired by Cisco",
+    ]:
+        assert not news._is_low_content_headline(title), title
+
+
+def test_relevant_headline_ignores_a_single_character_name():
+    # routers/analyze.py falls back to the ticker when yfinance has no
+    # company name, so `name` can be "V"/"F". The name tier is
+    # case-INsensitive, so matching on one letter would make every "v."
+    # citation a Visa story; the ticker tier below is the case-sensitive
+    # one and still applies.
+    assert not news._is_relevant_headline("V", "V", None, "Apple v. Epic Systems ruling lands")
+
+
 # --- _is_relevant_headline ---
 
 
