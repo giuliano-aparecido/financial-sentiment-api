@@ -6,8 +6,8 @@ name: Big-loss alert
 # keeps only the one that lands in the target window in Europe/Zurich.
 on:
   schedule:
-    - cron: "0 10,11 * * 1-5"   # 12:00 Europe/Zurich (CEST / CET)
-    - cron: "30 15,16 * * 1-5"  # 17:30 Europe/Zurich (CEST / CET)
+    - cron: "0 10,11 * * 1-5"  # 12:00 Europe/Zurich (CEST / CET)
+    - cron: "0 14,15 * * 1-5"  # 16:00 Europe/Zurich (CEST / CET)
   workflow_dispatch:
 
 permissions: {}
@@ -23,7 +23,7 @@ jobs:
           echo "Europe/Zurich time: $now"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
              || { [ "$now" -ge 1200 ] && [ "$now" -lt 1300 ]; } \
-             || { [ "$now" -ge 1730 ] && [ "$now" -lt 1830 ]; }; then
+             || { [ "$now" -ge 1600 ] && [ "$now" -lt 1700 ]; }; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 

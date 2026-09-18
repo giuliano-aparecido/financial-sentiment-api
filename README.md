@@ -146,7 +146,9 @@ app/
 - **The big-loss email alert is triggered externally, by a GitHub
   Actions cron** (`.github/workflows/big-loss-alert.yml` → `POST
   /api/research/volatility/today/alert` → `app/services/alerts.py`),
-  twice a day at 12:00 and 17:30 Europe/Zurich. An in-process cron
+  twice a day at 12:00 and 16:00 Europe/Zurich (the evening slot moved
+  from 17:30 to 16:00 on 2026-09-18 — the owner wants it landed by 17:00
+  at the latest). An in-process cron
   can't do this: on Render's free tier the process is asleep between
   requests, and a cron inside a sleeping process never fires. A GitHub
   Actions cron was rejected once before in this repo (a `*/10`
