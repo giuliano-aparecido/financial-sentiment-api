@@ -143,6 +143,7 @@ def _clean_model_output(raw_text: str) -> str:
 
 
 _VALID_NEWS_REACTIONS = frozenset({"good", "bad", "neutral", "overreaction_down", "overreaction_up"})
+_VALID_RECOMMENDATIONS = frozenset({"BUY", "SELL", "HOLD"})
 
 
 def _build_reaction_prompt(ticker: str, price_context: str, live_context: str) -> str:
@@ -196,29 +197,30 @@ class MarketContext:
 
 
 def _build_analysis_prompt(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
+    ticker: str, user_query: str, news_reaction: str, context: MarketContext,
 ) -> str:
     # Canonical Task B template - same sync requirement as
-    # _build_reaction_prompt above. news_reaction/recommendation are
-    # ALREADY-DECIDED inputs here (fuse()'s output, never guessed by this
-    # call) - the instruction explicitly forbids advising the opposite of
-    # Recommended Action, mirroring the training data's own framing.
+    # _build_reaction_prompt above. news_reaction is an ALREADY-DECIDED
+    # input here (Task A's output) - but unlike the old single-call
+    # design and this prompt's own pre-redesign version, the
+    # recommendation itself is NOT given: the model must decide BUY/SELL/
+    # HOLD from news_reaction + the valuation/earnings/market data below,
+    # the same way fuse() does, rather than being told the answer and
+    # asked only to narrate it. See docs/task-b-learned-recommendation-
+    # plan.md for why.
     sanitized_user_query = _sanitize_user_query(user_query)
     return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
 
-You are given a recommended action for this stock, already determined from valuation and news analysis - your job is to explain it, not decide it. Output JSON containing detailed reasoning and a direct answer to the user's question, in exactly this shape:
-{{"reasoning": "...", "answer": "..."}}
-
-Your reasoning and answer must be consistent with the Recommended Action below and must never advise the opposite. Treat News Reaction and Recommended Action as given facts, not conclusions to re-derive.
+Decide the recommended action for this stock (BUY, SELL, or HOLD) yourself from the news reaction, valuation, earnings, and market data below, then explain your reasoning and answer the user's question. Output JSON in exactly this shape:
+{{"recommendation": "BUY|SELL|HOLD", "reasoning": "...", "answer": "..."}}
 
 ### Input:
 
 Target Stock: {ticker}
 User Question: {sanitized_user_query}
 News Reaction: {news_reaction}
-Recommended Action: {recommendation}
 
 Current Market Data:
 {context.market_data}
@@ -261,24 +263,30 @@ async def classify_news(ticker: str, price_context: str, live_context: str, mode
 
 
 async def generate_analysis(
-    ticker: str, user_query: str, news_reaction: str, recommendation: str, context: MarketContext,
+    ticker: str, user_query: str, news_reaction: str, context: MarketContext,
     model: str = DEFAULT_MODEL,
 ) -> dict:
-    """Task B: writes reasoning/answer given an ALREADY-DECIDED news_
-    reaction + recommendation (never asked to produce either). Returns
-    {"reasoning", "answer", "raw_json"} on success, or {"raw_response":
-    ...} if the model's output didn't parse - the caller (analyze_two_
-    stage) still has the recommendation/confidence/news_reaction
-    regardless, since none of those ever depended on this call
-    succeeding (a strict improvement over the old single-call design,
-    where a parse failure lost the recommendation entirely)."""
-    prompt = _build_analysis_prompt(ticker, user_query, news_reaction, recommendation, context)
+    """Task B: given an ALREADY-DECIDED news_reaction (never asked to
+    produce that), decides its OWN recommendation and writes reasoning/
+    answer consistent with it - unlike the old design, the recommendation
+    is not handed to this call as a fact to narrate. Returns
+    {"recommendation", "reasoning", "answer", "raw_json"} on success, or
+    {"raw_response": ...} if the model's output didn't parse or named a
+    recommendation outside _VALID_RECOMMENDATIONS - the caller (analyze_
+    two_stage) still has fuse()'s own recommendation/confidence/
+    news_reaction regardless, since none of those ever depended on this
+    call succeeding (a strict improvement over the old single-call
+    design, where a parse failure lost the recommendation entirely)."""
+    prompt = _build_analysis_prompt(ticker, user_query, news_reaction, context)
     raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis", model=model)
     try:
         json_str = extract_json_object(_clean_model_output(raw_text))
         parsed = json.loads(json_str)
-        return {"reasoning": parsed["reasoning"], "answer": parsed["answer"], "raw_json": parsed}
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        recommendation = parsed["recommendation"]
+        if recommendation not in _VALID_RECOMMENDATIONS:
+            raise ValueError(f"unrecognized recommendation: {recommendation!r}")
+        return {"recommendation": recommendation, "reasoning": parsed["reasoning"], "answer": parsed["answer"], "raw_json": parsed}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.info("Task B output for [%s] ticker=%s wasn't the expected JSON shape (%s) - falling back to raw_response - raw: %r",
                     model, ticker, e, raw_text[:300])
         return {"raw_response": raw_text}
@@ -294,11 +302,15 @@ async def analyze_two_stage(
     model: str = DEFAULT_MODEL,
 ) -> dict:
     """Orchestrates the two-stage pipeline: Task A classifies news_
-    reaction -> fusion.fuse() computes the ONLY recommendation this
-    service ever produces -> Task B explains it, given that
-    recommendation as input. Neither LLM call ever decides BUY/SELL/HOLD
-    itself - see fusion.py's own module docstring for why. Replaces the
-    old single-call analyze_with_hf. ticker_was_explicit just passes
+    reaction -> fusion.fuse() computes the recommendation this service
+    still SHOWS as `recommendation` -> Task B decides its own
+    recommendation from news_reaction + valuation/earnings/market data
+    and explains it. Task B's own recommendation is logged and returned
+    as `model_recommendation` alongside fuse()'s, but does not replace it
+    in production yet - see fusion.py's own module docstring and
+    docs/task-b-learned-recommendation-plan.md for why (the shadow-
+    comparison period this plan's eval gate is meant to end). Replaces
+    the old single-call analyze_with_hf. ticker_was_explicit just passes
     through to the result dict (see ticker.extract_ticker) - never
     affects Task A/B or fusion, purely informational for the frontend."""
     news_reaction = await classify_news(ticker, price_context, context.live_context, model=model)
@@ -314,7 +326,14 @@ async def analyze_two_stage(
 
     fusion_result = fuse(news_reaction, gap_pct)
 
-    analysis = await generate_analysis(ticker, user_query, news_reaction, fusion_result.recommendation, context, model=model)
+    analysis = await generate_analysis(ticker, user_query, news_reaction, context, model=model)
+
+    if "recommendation" in analysis and analysis["recommendation"] != fusion_result.recommendation:
+        # Shadow-comparison signal for the eval gate in docs/task-b-
+        # learned-recommendation-plan.md - not acted on yet, fuse() stays
+        # the production `recommendation` below regardless of this.
+        logger.info("Task B/fuse() recommendation divergence for [%s] ticker=%s: model=%s fuse=%s news_reaction=%s",
+                    model, ticker, analysis["recommendation"], fusion_result.recommendation, news_reaction)
 
     result = {
         "model_architecture": model,
@@ -332,6 +351,9 @@ async def analyze_two_stage(
     }
     if news_reaction_fallback:
         result["news_reaction_fallback"] = True
+
+    if "recommendation" in analysis:
+        result["model_recommendation"] = analysis["recommendation"]
 
     if "reasoning" in analysis:
         result["reasoning"] = analysis["reasoning"]

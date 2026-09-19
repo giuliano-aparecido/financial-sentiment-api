@@ -9,8 +9,11 @@ CONFLICT_DOWNGRADE_THRESHOLD, both now retired); now it's a fixed,
 testable table instead of something trained into the model.
 
 This repo uses it at inference time (see inference.py's analyze_two_stage)
-to compute the `recommendation` shown to Task B given news_reaction +
-valuation.valuation_assessment_for's numeric gap.
+to compute the production `recommendation` shown to users. Task B's LLM
+call now decides its own recommendation too (see docs/task-b-learned-
+recommendation-plan.md, financial-sentiment-model) - this stays the
+source of truth during that shadow-comparison period, and doubles as the
+training label Task B is taught to reproduce.
 
 SYNCED FILE: byte-identical copy lives at financial-sentiment-model/
 fusion_rules.py (used there to compute the `recommendation` given to Task
@@ -104,9 +107,14 @@ def valuation_bucket(gap_pct: Optional[float]) -> str:
 
 
 def fuse(news_reaction: str, gap_pct: Optional[float]) -> FusionResult:
-    """The only place BUY/SELL/HOLD is decided anywhere in this pipeline -
-    neither Task A nor Task B's LLM call ever produces a recommendation
-    itself. Raises ValueError for an unrecognized news_reaction; callers
+    """The deterministic recommendation shown to users and used as the
+    label Task B's LLM call is trained to reproduce (see docs/task-b-
+    learned-recommendation-plan.md, financial-sentiment-model). Task B
+    now also decides its own recommendation from the same inputs, but
+    this stays the production source of truth and a shadow/consistency
+    check against Task B's output - see inference.py's analyze_two_stage
+    for where the two are compared and logged. Raises ValueError for an
+    unrecognized news_reaction; callers
     must normalize a bad/unparseable LLM classification (e.g. to "neutral")
     before calling this, so a real bug here is never silently masked by an
     accidental fallback recommendation.
