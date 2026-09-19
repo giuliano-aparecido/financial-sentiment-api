@@ -7,7 +7,6 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import DEFAULT_MODEL, HF_API_TOKEN, INFERENCE_URLS, normalize_model_name, require_hf_api_token
-from app.services.fusion import fuse
 from app.services.parsing import extract_json_object
 
 logger = logging.getLogger(__name__)
@@ -155,8 +154,8 @@ def _build_reaction_prompt(ticker: str, price_context: str, live_context: str) -
     # another. Deliberately narrow: no user_query, no market_data/
     # valuation/earnings - Task A only ever reasons about the news itself
     # plus how the stock has recently moved, never fundamentals or the
-    # user's question (see the two-stage pipeline redesign - fusion.py,
-    # not this prompt, is what combines a reaction with valuation).
+    # user's question (see the two-stage pipeline redesign - Task B's
+    # prompt, not this one, is what combines a reaction with valuation).
     return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
@@ -204,10 +203,11 @@ def _build_analysis_prompt(
     # input here (Task A's output) - but unlike the old single-call
     # design and this prompt's own pre-redesign version, the
     # recommendation itself is NOT given: the model must decide BUY/SELL/
-    # HOLD from news_reaction + the valuation/earnings/market data below,
-    # the same way fuse() does, rather than being told the answer and
-    # asked only to narrate it. See docs/task-b-learned-recommendation-
-    # plan.md for why.
+    # HOLD itself from news_reaction + the valuation/earnings/market data
+    # below, rather than being told the answer and asked only to narrate
+    # it - fuse() no longer runs at inference at all (see
+    # analyze_two_stage's docstring). See docs/task-b-learned-
+    # recommendation-plan.md for why.
     sanitized_user_query = _sanitize_user_query(user_query)
     return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
@@ -245,9 +245,9 @@ async def classify_news(ticker: str, price_context: str, live_context: str, mode
     the news_reaction string on success, or None if the model's output
     didn't parse as JSON or named a class outside _VALID_NEWS_REACTIONS -
     callers must normalize a None to a safe default (see analyze_two_
-    stage) rather than letting it propagate, since fusion.fuse() raises
-    on an unrecognized reaction by design (a real bug should never be
-    silently masked by an accidental fallback recommendation)."""
+    stage) rather than letting it propagate, since Task B's prompt
+    interpolates news_reaction directly and was only ever trained on the
+    5 real class names."""
     prompt = _build_reaction_prompt(ticker, price_context, live_context)
     raw_text = await _call_model(prompt, max_new_tokens=48, ticker=ticker, task_label="reaction", model=model)
     try:
@@ -272,11 +272,13 @@ async def generate_analysis(
     is not handed to this call as a fact to narrate. Returns
     {"recommendation", "reasoning", "answer", "raw_json"} on success, or
     {"raw_response": ...} if the model's output didn't parse or named a
-    recommendation outside _VALID_RECOMMENDATIONS - the caller (analyze_
-    two_stage) still has fuse()'s own recommendation/confidence/
-    news_reaction regardless, since none of those ever depended on this
-    call succeeding (a strict improvement over the old single-call
-    design, where a parse failure lost the recommendation entirely)."""
+    recommendation outside _VALID_RECOMMENDATIONS - unlike the old
+    fuse()-backed design, a parse failure here means the caller
+    (analyze_two_stage) has NO recommendation to show at all for this
+    request, only news_reaction (which came from Task A, independently).
+    That's the real tradeoff of trusting Task B's own judgment instead of
+    a deterministic fallback - see docs/task-b-learned-recommendation-
+    plan.md for why this was accepted once eval cleared the gate."""
     prompt = _build_analysis_prompt(ticker, user_query, news_reaction, context)
     raw_text = await _call_model(prompt, max_new_tokens=512, ticker=ticker, task_label="analysis", model=model)
     try:
@@ -302,46 +304,35 @@ async def analyze_two_stage(
     model: str = DEFAULT_MODEL,
 ) -> dict:
     """Orchestrates the two-stage pipeline: Task A classifies news_
-    reaction -> fusion.fuse() computes the recommendation this service
-    still SHOWS as `recommendation` -> Task B decides its own
-    recommendation from news_reaction + valuation/earnings/market data
-    and explains it. Task B's own recommendation is logged and returned
-    as `model_recommendation` alongside fuse()'s, but does not replace it
-    in production yet - see fusion.py's own module docstring and
-    docs/task-b-learned-recommendation-plan.md for why (the shadow-
-    comparison period this plan's eval gate is meant to end). Replaces
-    the old single-call analyze_with_hf. ticker_was_explicit just passes
-    through to the result dict (see ticker.extract_ticker) - never
-    affects Task A/B or fusion, purely informational for the frontend."""
+    reaction -> Task B decides the recommendation itself from
+    news_reaction + valuation/earnings/market data and explains it.
+    fusion.fuse() no longer runs here - after the shadow-comparison
+    period documented in docs/task-b-learned-recommendation-plan.md
+    (recommendation-accuracy vs fuse() reached 95%), Task B's own
+    recommendation became the only one this service produces. fuse()
+    still exists to build Task B's training labels (see financial-
+    sentiment-model's generate_{real,synthetic}_dataset.py) - it just
+    has no role at inference anymore. Replaces the old single-call
+    analyze_with_hf. ticker_was_explicit just passes through to the
+    result dict (see ticker.extract_ticker) - never affects Task A/B,
+    purely informational for the frontend."""
     news_reaction = await classify_news(ticker, price_context, context.live_context, model=model)
     news_reaction_fallback = news_reaction is None
     if news_reaction_fallback:
-        # Fusion still yields a valuation-driven recommendation off
-        # "neutral" - conservative (never invents a directional read) and
-        # keeps the response usable even when Task A's output was
-        # unparseable (including the safety case of an old, pre-redesign
-        # checkpoint still pointed at by this API, which would emit an
-        # entirely different JSON shape here).
+        # Conservative fallback for Task B's input when Task A's own
+        # output was unparseable (including the safety case of an old,
+        # pre-redesign checkpoint still pointed at by this API, which
+        # would emit an entirely different JSON shape here) - never
+        # invents a directional read.
         news_reaction = "neutral"
 
-    fusion_result = fuse(news_reaction, gap_pct)
-
     analysis = await generate_analysis(ticker, user_query, news_reaction, context, model=model)
-
-    if "recommendation" in analysis and analysis["recommendation"] != fusion_result.recommendation:
-        # Shadow-comparison signal for the eval gate in docs/task-b-
-        # learned-recommendation-plan.md - not acted on yet, fuse() stays
-        # the production `recommendation` below regardless of this.
-        logger.info("Task B/fuse() recommendation divergence for [%s] ticker=%s: model=%s fuse=%s news_reaction=%s",
-                    model, ticker, analysis["recommendation"], fusion_result.recommendation, news_reaction)
 
     result = {
         "model_architecture": model,
         "ticker": ticker,
         "ticker_was_explicit": ticker_was_explicit,
         "live_news_retrieved": context.live_context,
-        "recommendation": fusion_result.recommendation,
-        "confidence": fusion_result.confidence,
         "news_reaction": news_reaction,
         "valuation_gap_pct": gap_pct,
         "market_data": context.market_data,
@@ -353,7 +344,7 @@ async def analyze_two_stage(
         result["news_reaction_fallback"] = True
 
     if "recommendation" in analysis:
-        result["model_recommendation"] = analysis["recommendation"]
+        result["recommendation"] = analysis["recommendation"]
 
     if "reasoning" in analysis:
         result["reasoning"] = analysis["reasoning"]

@@ -1329,12 +1329,17 @@ def valuation_assessment_for(fundamentals: dict | None, ticker: str | None = Non
     (price - intrinsic) / intrinsic * 100 (positive = overvalued) behind
     the rendered block, or None whenever there's no usable price/intrinsic
     pair (the "Data unavailable."/"Not applicable" early exits, or a
-    fallback chain that never found a usable basis). This is what
-    fusion.py's valuation_bucket() consumes directly - the 150%
-    VALUATION_PCT_DISPLAY_CAP applied when RENDERING block_text is a
-    display concern only, never part of the fusion decision. valuation_
-    block_for (above) is the pre-existing single-value convenience
-    wrapper, kept so every prior caller/test needs no change.
+    fallback chain that never found a usable basis). inference.py passes
+    this through to analyze_two_stage's result as the informational
+    `valuation_gap_pct` field - it no longer feeds any recommendation
+    decision at inference (see docs/task-b-learned-recommendation-plan.md,
+    financial-sentiment-model: fuse()/fusion.py's old valuation_bucket()
+    role is retired here, kept only in that repo's fusion_rules.py to
+    build training labels). The 150% VALUATION_PCT_DISPLAY_CAP applied
+    when RENDERING block_text is a display concern only, never part of
+    this raw gap_pct value. valuation_block_for (above) is the
+    pre-existing single-value convenience wrapper, kept so every prior
+    caller/test needs no change.
     """
     if not fundamentals or fundamentals.get("price") is None:
         return "Data unavailable.", None
