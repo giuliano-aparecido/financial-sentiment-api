@@ -48,8 +48,8 @@ def _reaction_response(reaction):
     return _ok(json.dumps({"news_reaction": reaction}))
 
 
-def _analysis_response(reasoning, answer):
-    return _ok(json.dumps({"reasoning": reasoning, "answer": answer}))
+def _analysis_response(reasoning, answer, recommendation="BUY"):
+    return _ok(json.dumps({"recommendation": recommendation, "reasoning": reasoning, "answer": answer}))
 
 
 def _install_fake_client(monkeypatch, responses):
@@ -154,9 +154,9 @@ def test_classify_news_returns_none_on_unrecognized_class(monkeypatch):
 # --- generate_analysis (Task B) ---
 
 
-def test_task_b_prompt_contains_all_blocks_and_given_recommendation(monkeypatch):
+def test_task_b_prompt_contains_all_blocks_and_no_given_recommendation(monkeypatch):
     fake = _install_fake_client(monkeypatch, [_analysis_response("Reasoning text.", "Yes, looks like a buy.")])
-    _run(inference.generate_analysis("AAPL", "Is AAPL a buy?", "overreaction_down", "BUY", CONTEXT))
+    _run(inference.generate_analysis("AAPL", "Is AAPL a buy?", "overreaction_down", CONTEXT))
 
     prompt = fake.payloads[0]["inputs"]
     assert "Current Market Data:\n" + MARKET_DATA in prompt
@@ -164,47 +164,70 @@ def test_task_b_prompt_contains_all_blocks_and_given_recommendation(monkeypatch)
     assert "Recent Earnings:\n" + EARNINGS in prompt
     assert "Recent News & Results:\n" + NEWS in prompt
     assert "News Reaction: overreaction_down" in prompt
-    assert "Recommended Action: BUY" in prompt
-    assert "must never advise the opposite" in prompt
+    # The whole point of this plan: no recommendation is handed to the
+    # model - it must decide BUY/SELL/HOLD itself from the inputs above.
+    assert "Recommended Action" not in prompt
+    assert "Decide the recommended action" in prompt
 
 
 def test_task_b_requests_512_max_new_tokens(monkeypatch):
     fake = _install_fake_client(monkeypatch, [_analysis_response("r", "a")])
-    _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
+    _run(inference.generate_analysis("AAPL", "", "good", CONTEXT))
     assert fake.payloads[0]["parameters"]["max_new_tokens"] == 512
 
 
-def test_generate_analysis_returns_reasoning_and_answer(monkeypatch):
-    _install_fake_client(monkeypatch, [_analysis_response("Solid fundamentals.", "Yes, a reasonable buy.")])
-    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
+def test_generate_analysis_returns_recommendation_reasoning_and_answer(monkeypatch):
+    _install_fake_client(monkeypatch, [_analysis_response("Solid fundamentals.", "Yes, a reasonable buy.", recommendation="BUY")])
+    result = _run(inference.generate_analysis("AAPL", "", "good", CONTEXT))
+    assert result["recommendation"] == "BUY"
     assert result["reasoning"] == "Solid fundamentals."
     assert result["answer"] == "Yes, a reasonable buy."
 
 
 def test_generate_analysis_falls_back_to_raw_response_on_unparseable_output(monkeypatch):
     _install_fake_client(monkeypatch, [_ok("not json at all, no braces here")])
-    result = _run(inference.generate_analysis("AAPL", "", "good", "BUY", CONTEXT))
+    result = _run(inference.generate_analysis("AAPL", "", "good", CONTEXT))
     assert result == {"raw_response": "not json at all, no braces here"}
+
+
+def test_generate_analysis_falls_back_to_raw_response_on_unrecognized_recommendation(monkeypatch):
+    _install_fake_client(monkeypatch, [_analysis_response("r", "a", recommendation="STRONG_BUY")])  # not a valid class
+    result = _run(inference.generate_analysis("AAPL", "", "good", CONTEXT))
+    assert "raw_response" in result
 
 
 # --- analyze_two_stage (full orchestration) ---
 
 
-def test_two_stage_happy_path_returns_recommendation_confidence_reasoning_answer(monkeypatch):
+def test_two_stage_happy_path_returns_recommendation_reasoning_answer(monkeypatch):
     _install_fake_client(monkeypatch, [
         _reaction_response("overreaction_down"),
-        _analysis_response("The drop looks overdone given the routine news.", "Yes, this looks like a buy."),
+        _analysis_response("The drop looks overdone given the routine news.", "Yes, this looks like a buy.", recommendation="BUY"),
     ])
     result = _run(_run_two_stage(gap_pct=-40.0))
 
     assert result["news_reaction"] == "overreaction_down"
-    assert result["recommendation"] == "BUY"  # overreaction_down + undervalued (gap<=-15) per fusion.FUSION_TABLE
-    assert 0.0 < result["confidence"] <= 0.95
+    assert result["recommendation"] == "BUY"  # Task B's own call
     assert result["reasoning"] == "The drop looks overdone given the routine news."
     assert result["answer"] == "Yes, this looks like a buy."
     assert result["valuation_gap_pct"] == -40.0
     assert result["market_data"] == MARKET_DATA
     assert result["valuation"] == VALUATION
+
+
+def test_two_stage_recommendation_is_whatever_task_b_says(monkeypatch):
+    # fuse() no longer runs at inference at all (see docs/task-b-learned-
+    # recommendation-plan.md) - Task B's own recommendation is trusted
+    # directly, even for a (news_reaction, gap_pct) pair fusion.FUSION_TABLE
+    # would have resolved differently (overreaction_down + undervalued was
+    # BUY there) - nothing here overrides or double-checks it anymore.
+    _install_fake_client(monkeypatch, [
+        _reaction_response("overreaction_down"),
+        _analysis_response("r", "a", recommendation="SELL"),
+    ])
+    result = _run(_run_two_stage(gap_pct=-40.0))
+
+    assert result["recommendation"] == "SELL"
 
 
 def test_ticker_was_explicit_defaults_true_and_propagates(monkeypatch):
@@ -245,13 +268,16 @@ def test_two_stage_task_a_failure_falls_back_to_neutral_and_flags_it(monkeypatch
 
     assert result["news_reaction"] == "neutral"
     assert result["news_reaction_fallback"] is True
-    # fuse("neutral", -40.0) -> undervalued bucket -> BUY (valuation alone
-    # drives the call when news itself is neutral) - the recommendation is
-    # still real and deterministic, not lost just because Task A failed.
+    # Task B still ran off the "neutral" fallback input and produced its
+    # own recommendation - Task A failing doesn't lose it, since Task B
+    # never depended on Task A's specific class, just SOME valid one.
     assert result["recommendation"] == "BUY"
 
 
-def test_two_stage_task_b_failure_keeps_recommendation_and_uses_raw_response(monkeypatch):
+def test_two_stage_task_b_failure_has_no_recommendation_and_uses_raw_response(monkeypatch):
+    # Unlike the old fuse()-backed design, there's no deterministic
+    # fallback recommendation anymore - if Task B's own output doesn't
+    # parse, there simply isn't one to show for this request.
     _install_fake_client(monkeypatch, [
         _reaction_response("good"),
         _ok("not json at all, no braces here"),  # Task B fails to parse
@@ -259,8 +285,8 @@ def test_two_stage_task_b_failure_keeps_recommendation_and_uses_raw_response(mon
     result = _run(_run_two_stage(gap_pct=None))
 
     assert result["news_reaction"] == "good"
-    assert result["recommendation"] == "HOLD"  # good + no_data gap per fusion.FUSION_TABLE
-    assert "confidence" in result
+    assert "recommendation" not in result
+    assert "confidence" not in result
     assert result["raw_response"] == "not json at all, no braces here"
     assert "reasoning" not in result
     assert "answer" not in result
@@ -275,11 +301,3 @@ def test_two_stage_result_includes_valuation_gap_pct(monkeypatch):
     assert result["valuation_gap_pct"] == 12.5
 
 
-def test_two_stage_no_gap_data_still_returns_a_recommendation(monkeypatch):
-    _install_fake_client(monkeypatch, [
-        _reaction_response("bad"),
-        _analysis_response("r", "a"),
-    ])
-    result = _run(_run_two_stage(gap_pct=None))
-    assert result["valuation_gap_pct"] is None
-    assert result["recommendation"] == "SELL"  # bad + no_data per fusion.FUSION_TABLE

@@ -804,7 +804,8 @@ def test_valuation_block_for_normal_surprise_does_not_trigger_not_applicable():
     assert "EPS-based" in valuation_block_for(fundamentals, ticker="QCOM")
 
 
-# --- valuation_assessment_for (fusion.py's numeric gap source) ---
+# --- valuation_assessment_for (feeds the informational valuation_gap_pct
+# response field, see inference.py's analyze_two_stage) ---
 
 
 def test_valuation_assessment_for_returns_same_block_as_valuation_block_for():
@@ -823,8 +824,8 @@ def test_valuation_assessment_for_returns_same_block_as_valuation_block_for():
 
 def test_valuation_assessment_for_gap_sign_positive_when_overvalued():
     # price 300 vs intrinsic $270.71 (see the byte-identical block test
-    # above) - price above intrinsic is overvalued, a positive gap in
-    # fusion.py's convention (gap_pct = (price-intrinsic)/intrinsic*100).
+    # above) - price above intrinsic is overvalued, a positive gap per
+    # this function's own convention (gap_pct = (price-intrinsic)/intrinsic*100).
     fundamentals = {
         "price": 300.0,
         "eps_trailing": 6.53,
@@ -888,12 +889,11 @@ def test_valuation_assessment_for_gap_is_none_when_eps_distorted_by_earnings_sur
 
 def test_valuation_assessment_for_gap_uncapped_past_display_cap():
     # The rendered block text caps display at VALUATION_PCT_DISPLAY_CAP
-    # (150%) - the raw gap_pct fusion.py actually consumes must NOT be
-    # capped the same way, since fusion's confidence scaling treats
-    # anything past a 50-point gap identically anyway (see
-    # test_fusion.py's own test for that), and capping the number itself
-    # (not just the display) would understate how decisive the signal
-    # really is.
+    # (150%) - the raw gap_pct returned alongside it (surfaced to callers
+    # as the informational `valuation_gap_pct` response field, see
+    # inference.py's analyze_two_stage) must NOT be capped the same way:
+    # capping the number itself (not just the display) would understate
+    # how decisive the signal really is.
     fundamentals = {
         "price": 1000.0,
         "eps_trailing": 6.53,
