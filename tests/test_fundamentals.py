@@ -182,6 +182,44 @@ def test_fetch_fundamentals_succeeds_directly_without_resolution(monkeypatch):
     assert result["price"] == 189.30
 
 
+def test_fetch_fundamentals_retries_the_same_symbol_before_resolving(monkeypatch):
+    # Regression: a transient/degraded yfinance response (no price, no
+    # exception) looks identical to a genuinely wrong symbol at the point
+    # _fetch_price_info returns None - confirmed in the wild for an
+    # ordinary NYSE equity (see portfolio-manager-backend's yahoo_provider
+    # history). A same-symbol retry should succeed without ever calling
+    # resolve_ticker's Search.
+    # First construction (the bare-symbol price check) gets an empty,
+    # no-price info; every construction after that (the same-symbol retry,
+    # plus the unrelated growth-consensus/earnings-surprise calls further
+    # down in fetch_fundamentals) gets a real quote.
+    call_count = {"n": 0}
+
+    def fake_ticker(symbol):
+        call_count["n"] += 1
+        info = {} if call_count["n"] == 1 else {"currentPrice": 189.30, "marketCap": 2.95e12}
+        return _FakeTicker(info)
+
+    # A plain raise here would be silently swallowed by resolve_ticker's
+    # own broad `except Exception` (logged as a warning, not propagated) -
+    # count calls instead so the assertion below checks the real
+    # observable behavior, not an exception that might never surface.
+    search_calls = {"n": 0}
+
+    def counting_search(q):
+        search_calls["n"] += 1
+        return _FakeSearch([])
+
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", fake_ticker)
+    monkeypatch.setattr(fundamentals_module.yf, "Search", counting_search)
+
+    result = fetch_fundamentals("AAPL")
+    assert search_calls["n"] == 0  # same-symbol retry succeeded, resolve_ticker's Search never needed
+    assert result["resolved_ticker"] == "AAPL"
+    assert result["price"] == 189.30
+    assert call_count["n"] >= 2  # the price check was retried at least once
+
+
 def test_fetch_fundamentals_retries_with_resolved_ticker_when_bare_symbol_fails(monkeypatch):
     tickers = {
         "NESN": {},  # no price - 404-equivalent

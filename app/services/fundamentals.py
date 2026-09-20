@@ -143,9 +143,9 @@ def _fetch_recent_eps_surprise(ticker: str) -> float | None:
 
 def _fetch_price_info(ticker: str) -> dict | None:
     """Ticker.info if it resolves to a real quote with a price, else None -
-    factored out so fetch_fundamentals can retry once with a
-    resolve_ticker()-corrected symbol without duplicating the fetch/
-    price-check logic."""
+    factored out so fetch_fundamentals can retry with the same ticker and
+    with a resolve_ticker()-corrected symbol without duplicating the
+    fetch/price-check logic."""
     try:
         info = yf.Ticker(ticker).info
     except Exception as e:
@@ -163,9 +163,11 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     range, EPS, book value) can still be None inside a successful result;
     callers render those as "N/A" rather than failing the whole block.
 
-    If the bare ticker doesn't resolve, retries once via resolve_ticker
-    (e.g. "NESN" -> "NESN.SW") before giving up - see that function's
-    docstring for why this is needed for most non-US listings. The
+    A failed first attempt retries the SAME ticker once (a transient/
+    degraded yfinance response looks identical to a wrong symbol - see
+    the retry's own comment below) before falling through to
+    resolve_ticker (e.g. "NESN" -> "NESN.SW") - see that function's
+    docstring for why the latter is needed for most non-US listings. The
     resolved symbol (which may equal the original) is used for every
     subsequent call in this function, including _fetch_growth_consensus
     below, and is exposed back as "resolved_ticker" so callers that need
@@ -175,6 +177,16 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     for callers that don't care.
     """
     info = _fetch_price_info(ticker)
+    if info is None:
+        # yfinance can return a real quote's .info with no price on a
+        # transient/degraded response, indistinguishable at this point from
+        # a genuinely wrong symbol - retry the same ticker once before
+        # falling through to resolve_ticker's more expensive Search call,
+        # which wouldn't help a flaky response anyway (confirmed in the
+        # wild: portfolio-manager-backend's ported copy of this function
+        # hit this for UBER, an ordinary NYSE equity - see that repo's
+        # yahoo_provider.py history).
+        info = _fetch_price_info(ticker)
     resolved_ticker = ticker
     if info is None:
         resolved_ticker = resolve_ticker(ticker)
