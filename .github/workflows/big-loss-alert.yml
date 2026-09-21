@@ -6,8 +6,11 @@ name: Big-loss alert
 # keeps only the one that lands in the target window in Europe/Zurich.
 on:
   schedule:
-    - cron: "0 10,11 * * 1-5"  # 12:00 Europe/Zurich (CEST / CET)
-    - cron: "0 14,15 * * 1-5"  # 16:00 Europe/Zurich (CEST / CET)
+    # Offset off :00 — GitHub documents the top of the hour as its most
+    # congested slot for scheduled workflows, where triggers can be
+    # delayed or dropped entirely under load.
+    - cron: "7 10,11 * * 1-5"  # 12:00 Europe/Zurich (CEST / CET)
+    - cron: "7 14,15 * * 1-5"  # 16:00 Europe/Zurich (CEST / CET)
   workflow_dispatch:
 
 permissions: {}
