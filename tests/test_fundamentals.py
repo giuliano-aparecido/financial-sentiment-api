@@ -228,6 +228,15 @@ def test_fetch_fundamentals_converts_gbx_the_same_as_gbp_pence(monkeypatch):
     assert result["price"] == 41.98
 
 
+def test_fetch_fundamentals_pence_conversion_is_none_safe_for_a_missing_year_range(monkeypatch):
+    info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBp"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["price"] == 41.98
+    assert result["year_low"] is None
+    assert result["year_high"] is None
+
+
 def test_fetch_fundamentals_retries_the_same_symbol_before_resolving(monkeypatch):
     # Regression: a transient/degraded yfinance response (no price, no
     # exception) looks identical to a genuinely wrong symbol at the point

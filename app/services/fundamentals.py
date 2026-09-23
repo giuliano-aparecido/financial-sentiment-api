@@ -49,6 +49,15 @@ def _usable(value) -> bool:
 # ~100. Ported (not imported) from portfolio-manager-backend's
 # yahoo_provider.py, same "ported not imported" convention as the rest of
 # this module's DCF math.
+#
+# Known-incomplete scope, not yet chased: other exchanges quote in a minor
+# subunit the same way London does (Johannesburg's "ZAc"/South African
+# cents, and some Yahoo data for Tel Aviv's "ILA"/agorot both come to
+# mind), and `resolve_ticker` can reach any exchange yfinance covers, not
+# just LSE. Not added speculatively - same "extend when a real miss is
+# confirmed live" discipline as this module's other denylists (e.g.
+# LOW_QUALITY_PUBLISHERS) - because a wrong guess at the exact currency
+# code or subunit ratio would be worse than the gap it's meant to close.
 _PENCE_CURRENCIES = frozenset({"GBp", "GBX"})
 
 
@@ -63,8 +72,11 @@ def _normalize_pence_quote(
     """
     if currency not in _PENCE_CURRENCIES:
         return currency, price, year_low, year_high
-    to_pounds = lambda v: v / 100 if v is not None else None  # noqa: E731
-    return "GBP", to_pounds(price), to_pounds(year_low), to_pounds(year_high)
+
+    def _to_pounds(v: float | None) -> float | None:
+        return v / 100 if v is not None else None
+
+    return "GBP", _to_pounds(price), _to_pounds(year_low), _to_pounds(year_high)
 
 
 def resolve_ticker(ticker: str) -> str:
