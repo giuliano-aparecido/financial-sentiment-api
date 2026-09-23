@@ -182,6 +182,52 @@ def test_fetch_fundamentals_succeeds_directly_without_resolution(monkeypatch):
     assert result["price"] == 189.30
 
 
+# --- pence/pound normalization ---
+# Real BATS.L info (2026-09-24): "currency": "GBp" (pence), but marketCap
+# is already price-in-pounds x shares, and trailingEps/bookValue/
+# dividendRate are all already in whole pounds.
+
+
+def test_fetch_fundamentals_converts_a_pence_quote_to_pounds(monkeypatch):
+    info = {
+        "currentPrice": 4198.0,
+        "marketCap": 90355507200,
+        "currency": "GBp",
+        "financialCurrency": "GBP",
+        "fiftyTwoWeekLow": 3677.0,
+        "fiftyTwoWeekHigh": 5368.0,
+        "trailingEps": 2.91,
+        "bookValue": 21.472,
+        "dividendRate": 2.45,
+    }
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["currency"] == "GBP"
+    assert result["price"] == 41.98
+    assert result["year_low"] == 36.77
+    assert result["year_high"] == 53.68
+    # Already-in-pounds fields are untouched.
+    assert result["eps_trailing"] == 2.91
+    assert result["book_value_per_share"] == 21.472
+    assert result["dividend_rate"] == 2.45
+
+
+def test_fetch_fundamentals_leaves_a_pound_quote_alone(monkeypatch):
+    info = {"currentPrice": 189.30, "marketCap": 2.95e12, "currency": "USD"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("AAPL")
+    assert result["currency"] == "USD"
+    assert result["price"] == 189.30
+
+
+def test_fetch_fundamentals_converts_gbx_the_same_as_gbp_pence(monkeypatch):
+    info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBX"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["currency"] == "GBP"
+    assert result["price"] == 41.98
+
+
 def test_fetch_fundamentals_retries_the_same_symbol_before_resolving(monkeypatch):
     # Regression: a transient/degraded yfinance response (no price, no
     # exception) looks identical to a genuinely wrong symbol at the point
