@@ -162,16 +162,8 @@ def test_cash_flow_basis_value_revenue_none_when_price_and_financial_currency_di
 
 
 def test_cash_flow_basis_value_eps_and_dividends_available_despite_a_currency_mismatch():
-    # Unlike revenue/fcf, eps_trailing/dividend_rate are yfinance's own
-    # PER-SHARE stock statistics - confirmed live these are already
-    # expressed in the TRADING currency regardless of financial_currency,
-    # across both a direct dual-currency listing (Mondi: GBP-quoted/EUR-
-    # financials) and several ADRs (BABA/TM/SNY/TSM: USD-quoted, home-
-    # currency financials) - Yahoo's own priceToBook/dividendYield/
-    # trailingPE fields reconcile against the TRADING-currency price in
-    # every case, never financial_currency. An earlier version of this fix
-    # gated these two bases the same way as revenue/fcf and silently
-    # nulled out DCF coverage for any ADR - reverted.
+    # See cash_flow_basis_value's own comment: unlike revenue/fcf, these
+    # two are already in the trading currency regardless of financial_currency.
     assert cash_flow_basis_value("eps", {"eps_trailing": 8.71, "currency": "USD", "financial_currency": "CNY"}) == 8.71
     assert cash_flow_basis_value(
         "dividends", {"dividend_rate": 2.12, "currency": "USD", "financial_currency": "JPY"}

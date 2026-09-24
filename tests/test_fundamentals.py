@@ -182,10 +182,7 @@ def test_fetch_fundamentals_succeeds_directly_without_resolution(monkeypatch):
     assert result["price"] == 189.30
 
 
-# --- pence/pound normalization ---
-# Real BATS.L info (2026-09-24): "currency": "GBp" (pence), but marketCap
-# is already price-in-pounds x shares, and trailingEps/bookValue/
-# dividendRate are all already in whole pounds.
+# --- pence/pound normalization (see _normalize_pence_quote's comment) ---
 
 
 def test_fetch_fundamentals_converts_a_pence_quote_to_pounds(monkeypatch):

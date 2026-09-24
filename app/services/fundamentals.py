@@ -26,43 +26,18 @@ def _usable(value) -> bool:
         return True
 
 
-# Yahoo quotes LSE-listed securities' raw price ticks in PENCE ("GBp" -
-# note the lowercase p, the only thing distinguishing it from "GBP" - or
-# occasionally "GBX"), while every other numeric field on the SAME
-# `.info` response - market cap, EPS, book value, dividend rate, revenue,
-# free cash flow - is already in whole POUNDS, matching the company's own
-# financial-statement currency (`financialCurrency`). Confirmed live
-# 2026-09-24 on BATS.L: currency="GBp", currentPrice=4198.0, but
-# marketCap (90,355,507,200) / sharesOutstanding (2,152,346,530) = 41.98 -
-# i.e. marketCap is ALREADY (price-in-pounds x shares), and
-# trailingEps=2.91 / bookValue=21.472 / dividendRate=2.45 are all
-# obviously pounds too (a 2.45-PENCE dividend on a GBP41.98 share would be
-# a 0.06% yield, not BAT's real ~5.9% - dividendYield=5.88 confirms
-# pounds). Every ratio yfinance computes itself (trailingPE, priceToBook,
-# dividendYield, ...) is already correct - Yahoo uses its own
-# consistently-scaled numbers internally before exposing the ratio; only
-# the raw quote-tick fields need correcting here.
-#
-# Left uncorrected, anything that compares price against a per-share
-# fundamental - see valuation.py's cash_flow_basis_value/
-# _shares_outstanding_approx (market_cap / price) - is off by a factor of
-# ~100. Ported (not imported) from portfolio-manager-backend's
-# yahoo_provider.py, same "ported not imported" convention as the rest of
-# this module's DCF math.
-#
-# Known-incomplete scope, not yet chased: other exchanges quote in a minor
-# subunit the same way London does (Johannesburg's "ZAc"/South African
-# cents, and some Yahoo data for Tel Aviv's "ILA"/agorot both come to
-# mind), and `resolve_ticker` can reach any exchange yfinance covers, not
-# just LSE. Not added speculatively - same "extend when a real miss is
-# confirmed live" discipline as this module's other denylists (e.g.
-# LOW_QUALITY_PUBLISHERS) - because a wrong guess at the exact currency
-# code or subunit ratio would be worse than the gap it's meant to close.
+# Yahoo quotes LSE-listed securities (currency "GBp" or "GBX") in pence,
+# while every other numeric `.info` field - market cap, EPS, book value,
+# dividend rate, revenue, FCF - is already in pounds. Uncorrected, any
+# per-share math derived from market_cap/price (see valuation.py's
+# _shares_outstanding_approx) is off by ~100x. Other exchanges with a
+# similar minor-subunit convention (Johannesburg's ZAc, Tel Aviv's ILA)
+# aren't covered yet - not added speculatively, only once confirmed live.
 _PENCE_CURRENCIES = frozenset({"GBp", "GBX"})
 
 
 def _normalize_pence_quote(
-    currency: str | None, price: float | None, year_low: float | None, year_high: float | None
+    *, currency: str | None, price: float | None, year_low: float | None, year_high: float | None
 ) -> tuple[str | None, float | None, float | None, float | None]:
     """(currency, price, year_low, year_high) with a pence quote converted
     to pounds and relabeled "GBP" - unchanged for anything else. Case-
@@ -249,10 +224,10 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         return None
 
     currency, price, year_low, year_high = _normalize_pence_quote(
-        info.get("currency"),
-        info.get("currentPrice") or info.get("regularMarketPrice"),
-        info.get("fiftyTwoWeekLow"),
-        info.get("fiftyTwoWeekHigh"),
+        currency=info.get("currency"),
+        price=info.get("currentPrice") or info.get("regularMarketPrice"),
+        year_low=info.get("fiftyTwoWeekLow"),
+        year_high=info.get("fiftyTwoWeekHigh"),
     )
     fundamentals = {
         "resolved_ticker": resolved_ticker,
