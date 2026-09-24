@@ -212,6 +212,21 @@ def test_low_content_headline_leaves_acquisition_news_alone():
         assert not news._is_low_content_headline(title), title
 
 
+def test_relevant_headline_matches_a_name_whose_legal_suffix_contains_a_slash():
+    # Regression test for the Danish "A/S" legal-suffix slash - see
+    # _company_match_name's docstring.
+    assert news._is_relevant_headline(
+        "NVO", "Novo Nordisk A/S", "Healthcare",
+        "Novo Nordisk Stock Slides After Unveiling Long Term Pipeline Growth Targets",
+    )
+
+
+def test_slash_in_a_headline_does_not_merge_two_names_into_one_token():
+    # Regression test for _normalize_for_match's slash-preservation
+    # contract - see its docstring.
+    assert news._is_relevant_headline("BIDU", "Baidu", "Technology", "Baidu/Alibaba race for AI dominance")
+
+
 def test_relevant_headline_ignores_a_single_character_name():
     # routers/analyze.py falls back to the ticker when yfinance has no
     # company name, so `name` can be "V"/"F". The name tier is

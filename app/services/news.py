@@ -292,7 +292,13 @@ _AMBIGUOUS_NAME_CORES = frozenset(
 def _normalize_for_match(text: str) -> str:
     """Accents folded, lower-cased, periods and commas dropped, whitespace
     collapsed - applied to BOTH the name and the headline so "Nestle S.A."
-    and "Nestle SA" compare equal."""
+    and "Nestle SA" compare equal.
+
+    Deliberately leaves "/" alone, unlike "." and ",": a slash in headline
+    text is usually a real word separator ("Baidu/Alibaba race for AI
+    dominance"), and dropping it would merge the two sides into one token
+    and break the `\\b` word-boundary match on either name.
+    """
     folded = unicodedata.normalize("NFKD", text)
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     folded = folded.lower().replace(".", "").replace(",", "")
@@ -305,15 +311,18 @@ def _company_match_name(name: str) -> str:
     leaves "the coca-cola", which never appears in a headline that writes
     "Coca-Cola". "" when nothing survives, so the caller can fall back.
 
+    A Danish "A/S" suffix (left intact by _normalize_for_match, see its
+    own docstring) still matches the "as" entry here.
+
     Known limitation, deliberately not chased: a name carrying its brand
     AFTER the suffix ("Petroleo Brasileiro S.A. - Petrobras") keeps the
     whole string and won't match a "Petrobras ..." headline on this tier -
     it still has the ticker tier.
     """
     words = _normalize_for_match(name).split()
-    while words and words[0] in _LEGAL_SUFFIX_WORDS:
+    while words and words[0].replace("/", "") in _LEGAL_SUFFIX_WORDS:
         words.pop(0)
-    while words and words[-1] in _LEGAL_SUFFIX_WORDS:
+    while words and words[-1].replace("/", "") in _LEGAL_SUFFIX_WORDS:
         words.pop()
     return " ".join(words)
 
