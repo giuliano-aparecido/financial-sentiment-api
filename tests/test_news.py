@@ -213,11 +213,8 @@ def test_low_content_headline_leaves_acquisition_news_alone():
 
 
 def test_relevant_headline_matches_a_name_whose_legal_suffix_contains_a_slash():
-    # "Novo Nordisk A/S" - the "/" isn't dropped by the accent/period/comma
-    # fold, so "a/s" used to survive as its own token, never match the "as"
-    # entry in _LEGAL_SUFFIX_WORDS, and leave the needle as the literal
-    # "novo nordisk a/s", which no real headline contains. Confirmed live
-    # 2026-09-23.
+    # Regression test for the Danish "A/S" legal-suffix slash - see
+    # _company_match_name's docstring.
     assert news._is_relevant_headline(
         "NVO", "Novo Nordisk A/S", "Healthcare",
         "Novo Nordisk Stock Slides After Unveiling Long Term Pipeline Growth Targets",
@@ -225,10 +222,8 @@ def test_relevant_headline_matches_a_name_whose_legal_suffix_contains_a_slash():
 
 
 def test_slash_in_a_headline_does_not_merge_two_names_into_one_token():
-    # _normalize_for_match deliberately leaves "/" alone (only
-    # _company_match_name strips it, and only for a legal-suffix word) -
-    # a slash separating two unrelated names in a headline must still act
-    # as a word boundary.
+    # Regression test for _normalize_for_match's slash-preservation
+    # contract - see its docstring.
     assert news._is_relevant_headline("BIDU", "Baidu", "Technology", "Baidu/Alibaba race for AI dominance")
 
 

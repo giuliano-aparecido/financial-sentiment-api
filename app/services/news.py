@@ -274,28 +274,6 @@ _MIN_NEEDLE_LENGTH = 2
 #
 # Whack-a-mole like the rest of this module's denylists - extend it when
 # a collision shows up, and the three verified cases are the seed.
-#
-# A general word-frequency check (the wordfreq library) was tried here
-# instead of this hand-picked list, to answer "is this ordinary English"
-# generically rather than per-word. Reverted 2026-09-23: it doesn't
-# separate the risk classes that actually matter. Corpus frequency
-# conflates "common word" with "common NAME" (a person's surname, a
-# place), and those two are frequently adjacent on the frequency scale -
-# "novo" (3.18, safe - the word this fix exists to catch, see
-# _name_needle's docstring) and "hathaway" (3.29, Anne Hathaway - a real
-# collision confirmed live: "Anne Hathaway stuns at movie premiere" would
-# match Berkshire Hathaway's core split on "hathaway" alone) are
-# essentially indistinguishable by this metric. No threshold closes that
-# gap; broader live testing surfaced four more real, non-hypothetical
-# collisions the same way (Procter & Gamble/"gamble", Home Depot/"depot",
-# Wells Fargo/"fargo", Stitch Fix/"stitch" - all real headlines about
-# gambling, a freight depot, a place in North Dakota, and sewing,
-# respectively). This file's own stated bias is to prefer a false
-# negative over a false positive (see the comment above), and a generic
-# per-word split traded that away for real collisions across a random
-# sample of large caps, not just an edge case - so it's gone, and this
-# hand-picked list is back as the (imperfect, but empirically safer)
-# alternative.
 _AMBIGUOUS_NAME_CORES = frozenset(
     {
         "target", "sea", "box", "gap", "shell", "ford", "key", "cross",
@@ -337,13 +315,9 @@ def _company_match_name(name: str) -> str:
     "Coca-Cola". "" when nothing survives, so the caller can fall back.
 
     Each end's word is also compared with internal "/" removed before the
-    _LEGAL_SUFFIX_WORDS lookup - needed for "Novo Nordisk A/S" (Danish,
-    this company's own legal-entity suffix, same role as "Inc."/"plc"):
-    _normalize_for_match deliberately leaves "/" in place (see its own
-    docstring), so the raw word here is "a/s", which never equals the
-    "as" entry in _LEGAL_SUFFIX_WORDS on its own. Confirmed live
-    2026-09-23: without this, the name needle for Novo Nordisk stayed the
-    literal "novo nordisk a/s", which no real headline contains.
+    _LEGAL_SUFFIX_WORDS lookup, so a Danish "A/S" suffix (left intact by
+    _normalize_for_match, see its own docstring) still matches the "as"
+    entry.
 
     Known limitation, deliberately not chased: a name carrying its brand
     AFTER the suffix ("Petroleo Brasileiro S.A. - Petrobras") keeps the
