@@ -142,6 +142,35 @@ def test_cash_flow_basis_value_fcf_none_when_fcf_missing():
     assert cash_flow_basis_value("fcf", {"free_cash_flow": None, "market_cap": 3.0e12, "price": 300.0}) is None
 
 
+def test_cash_flow_basis_value_revenue_none_when_price_and_financial_currency_differ():
+    # See cash_flow_basis_value's own comment. Mondi plc (GBP-quoted on
+    # the LSE, EUR financials) is a real example of this mismatch.
+    fundamentals = {
+        "total_revenue": 4.0e11, "market_cap": 3.0e12, "price": 300.0,
+        "currency": "GBP", "financial_currency": "EUR",
+    }
+    assert cash_flow_basis_value("revenue", fundamentals) is None
+    fundamentals = {
+        "free_cash_flow": 1.0e11, "market_cap": 3.0e12, "price": 300.0,
+        "currency": "GBP", "financial_currency": "EUR",
+    }
+    assert cash_flow_basis_value("fcf", fundamentals) is None
+
+
+def test_cash_flow_basis_value_eps_and_dividends_available_despite_a_currency_mismatch():
+    # See cash_flow_basis_value's own comment: unlike revenue/fcf, these
+    # two are already in the trading currency regardless of financial_currency.
+    assert cash_flow_basis_value("eps", {"eps_trailing": 8.71, "currency": "USD", "financial_currency": "CNY"}) == 8.71
+    assert cash_flow_basis_value(
+        "dividends", {"dividend_rate": 2.12, "currency": "USD", "financial_currency": "JPY"}
+    ) == 2.12
+
+
+def test_cash_flow_basis_value_eps_available_when_currencies_match():
+    fundamentals = {"eps_trailing": 8.71, "currency": "GBP", "financial_currency": "GBP"}
+    assert cash_flow_basis_value("eps", fundamentals) == 8.71
+
+
 # --- scenario_dcf_value (full-sum: interim years + terminal, "dividends" basis) ---
 # Reference value below computed via an independent Python loop (not this
 # module) for cf0=10.0, g1=g2=0.08, exit_multiple=15.0, r=0.10: year-10

@@ -26,6 +26,33 @@ def _usable(value) -> bool:
         return True
 
 
+# GBX doesn't occur in practice - don't re-add without re-verifying (an
+# earlier version guessed it as an alternate spelling of pence; only
+# "GBp" is ever actually returned).
+_PENCE_CURRENCIES = frozenset({"GBp"})
+
+
+def _normalize_pence_quote(
+    *, currency: str | None, price: float | None, year_low: float | None, year_high: float | None
+) -> tuple[str | None, float | None, float | None, float | None]:
+    """(currency, price, year_low, year_high) with a "GBp" quote converted
+    from pence to pounds - every other numeric `.info` field (market cap,
+    EPS, book value, dividend rate, revenue, FCF) is already in pounds,
+    so left uncorrected, per-share math derived from market_cap/price
+    (see valuation.py's _shares_outstanding_approx) is off by ~100x.
+    Case-sensitive on purpose: "GBp" (pence) and "GBP" (pounds) differ
+    only in the case of that last letter, so folding case here would
+    erase the only signal there is.
+    """
+    if currency not in _PENCE_CURRENCIES:
+        return currency, price, year_low, year_high
+
+    def _to_pounds(v: float | None) -> float | None:
+        return v / 100 if v is not None else None
+
+    return "GBP", _to_pounds(price), _to_pounds(year_low), _to_pounds(year_high)
+
+
 def resolve_ticker(ticker: str) -> str:
     """Resolves a bare ticker to the symbol yfinance/Yahoo actually
     recognizes, e.g. "NESN" -> "NESN.SW". app.services.ticker.extract_ticker
@@ -195,17 +222,23 @@ def fetch_fundamentals(ticker: str) -> dict | None:
     if info is None:
         return None
 
+    currency, price, year_low, year_high = _normalize_pence_quote(
+        currency=info.get("currency"),
+        price=info.get("currentPrice") or info.get("regularMarketPrice"),
+        year_low=info.get("fiftyTwoWeekLow"),
+        year_high=info.get("fiftyTwoWeekHigh"),
+    )
     fundamentals = {
         "resolved_ticker": resolved_ticker,
-        "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        "price": price,
         "market_cap": info.get("marketCap"),
         "pe_trailing": info.get("trailingPE"),
         "pe_forward": info.get("forwardPE"),
         "eps_trailing": info.get("trailingEps"),
         "book_value_per_share": info.get("bookValue"),
         "dividend_yield": info.get("dividendYield"),
-        "year_low": info.get("fiftyTwoWeekLow"),
-        "year_high": info.get("fiftyTwoWeekHigh"),
+        "year_low": year_low,
+        "year_high": year_high,
         # Added for the scenario-DCF valuation model (app/services/
         # valuation.py) - all sourced from this SAME .info call, no extra
         # yfinance request. free_cash_flow/total_revenue/dividend_rate are
@@ -232,7 +265,7 @@ def fetch_fundamentals(ticker: str) -> dict | None:
         # cash_flow_basis_value uses this to avoid dividing a
         # financial-currency total by a trading-currency share count for
         # the fcf/revenue bases - see that function's own comment.
-        "currency": info.get("currency"),
+        "currency": currency,
         "financial_currency": info.get("financialCurrency"),
         # Value-screen metric (see value_screen_metrics below) with no
         # existing fetched-or-derivable equivalent elsewhere in this dict -

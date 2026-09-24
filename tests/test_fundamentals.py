@@ -182,6 +182,60 @@ def test_fetch_fundamentals_succeeds_directly_without_resolution(monkeypatch):
     assert result["price"] == 189.30
 
 
+# --- pence/pound normalization (see _normalize_pence_quote's comment) ---
+
+
+def test_fetch_fundamentals_converts_a_pence_quote_to_pounds(monkeypatch):
+    info = {
+        "currentPrice": 4198.0,
+        "marketCap": 90355507200,
+        "currency": "GBp",
+        "financialCurrency": "GBP",
+        "fiftyTwoWeekLow": 3677.0,
+        "fiftyTwoWeekHigh": 5368.0,
+        "trailingEps": 2.91,
+        "bookValue": 21.472,
+        "dividendRate": 2.45,
+    }
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["currency"] == "GBP"
+    assert result["price"] == 41.98
+    assert result["year_low"] == 36.77
+    assert result["year_high"] == 53.68
+    # Already-in-pounds fields are untouched.
+    assert result["eps_trailing"] == 2.91
+    assert result["book_value_per_share"] == 21.472
+    assert result["dividend_rate"] == 2.45
+
+
+def test_fetch_fundamentals_leaves_a_pound_quote_alone(monkeypatch):
+    info = {"currentPrice": 189.30, "marketCap": 2.95e12, "currency": "USD"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("AAPL")
+    assert result["currency"] == "USD"
+    assert result["price"] == 189.30
+
+
+def test_fetch_fundamentals_leaves_gbx_unconverted(monkeypatch):
+    # GBX is deliberately not in _PENCE_CURRENCIES (see its comment) and
+    # must be left alone like any other currency.
+    info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBX"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["currency"] == "GBX"
+    assert result["price"] == 4198.0
+
+
+def test_fetch_fundamentals_pence_conversion_is_none_safe_for_a_missing_year_range(monkeypatch):
+    info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBp"}
+    monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
+    result = fetch_fundamentals("BATS.L")
+    assert result["price"] == 41.98
+    assert result["year_low"] is None
+    assert result["year_high"] is None
+
+
 def test_fetch_fundamentals_retries_the_same_symbol_before_resolving(monkeypatch):
     # Regression: a transient/degraded yfinance response (no price, no
     # exception) looks identical to a genuinely wrong symbol at the point
