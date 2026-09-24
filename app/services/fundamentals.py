@@ -26,14 +26,18 @@ def _usable(value) -> bool:
         return True
 
 
-# Yahoo quotes LSE-listed securities (currency "GBp" or "GBX") in pence,
-# while every other numeric `.info` field - market cap, EPS, book value,
+# Yahoo quotes LSE-listed securities (currency "GBp") in pence, while
+# every other numeric `.info` field - market cap, EPS, book value,
 # dividend rate, revenue, FCF - is already in pounds. Uncorrected, any
 # per-share math derived from market_cap/price (see valuation.py's
-# _shares_outstanding_approx) is off by ~100x. Other exchanges with a
-# similar minor-subunit convention (Johannesburg's ZAc, Tel Aviv's ILA)
-# aren't covered yet - not added speculatively, only once confirmed live.
-_PENCE_CURRENCIES = frozenset({"GBp", "GBX"})
+# _shares_outstanding_approx) is off by ~100x. "GBX" was included here in
+# an earlier version as a guessed alternate spelling; checked live
+# against 20+ real LSE tickers and yfinance never returns it, only "GBp" -
+# removed rather than keep unverified handling for a case that doesn't
+# occur. Other exchanges with a similar minor-subunit convention
+# (Johannesburg's ZAc, Tel Aviv's ILA) aren't covered either, for the
+# same reason - only added once confirmed live.
+_PENCE_CURRENCIES = frozenset({"GBp"})
 
 
 def _normalize_pence_quote(

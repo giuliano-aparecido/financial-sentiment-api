@@ -217,12 +217,15 @@ def test_fetch_fundamentals_leaves_a_pound_quote_alone(monkeypatch):
     assert result["price"] == 189.30
 
 
-def test_fetch_fundamentals_converts_gbx_the_same_as_gbp_pence(monkeypatch):
+def test_fetch_fundamentals_leaves_gbx_unconverted(monkeypatch):
+    # "GBX" isn't a real yfinance currency value (checked live against
+    # 20+ LSE tickers - only "GBp" occurs), so it's deliberately not in
+    # _PENCE_CURRENCIES and must be left alone like any other currency.
     info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBX"}
     monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     result = fetch_fundamentals("BATS.L")
-    assert result["currency"] == "GBP"
-    assert result["price"] == 41.98
+    assert result["currency"] == "GBX"
+    assert result["price"] == 4198.0
 
 
 def test_fetch_fundamentals_pence_conversion_is_none_safe_for_a_missing_year_range(monkeypatch):
