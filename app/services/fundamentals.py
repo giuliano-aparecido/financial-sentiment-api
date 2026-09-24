@@ -26,28 +26,23 @@ def _usable(value) -> bool:
         return True
 
 
-# Yahoo quotes LSE-listed securities (currency "GBp") in pence, while
-# every other numeric `.info` field - market cap, EPS, book value,
-# dividend rate, revenue, FCF - is already in pounds. Uncorrected, any
-# per-share math derived from market_cap/price (see valuation.py's
-# _shares_outstanding_approx) is off by ~100x. "GBX" was included here in
-# an earlier version as a guessed alternate spelling; checked live
-# against 20+ real LSE tickers and yfinance never returns it, only "GBp" -
-# removed rather than keep unverified handling for a case that doesn't
-# occur. Other exchanges with a similar minor-subunit convention
-# (Johannesburg's ZAc, Tel Aviv's ILA) aren't covered either, for the
-# same reason - only added once confirmed live.
+# GBX doesn't occur in practice - don't re-add without re-verifying (an
+# earlier version guessed it as an alternate spelling of pence; only
+# "GBp" is ever actually returned).
 _PENCE_CURRENCIES = frozenset({"GBp"})
 
 
 def _normalize_pence_quote(
     *, currency: str | None, price: float | None, year_low: float | None, year_high: float | None
 ) -> tuple[str | None, float | None, float | None, float | None]:
-    """(currency, price, year_low, year_high) with a pence quote converted
-    to pounds and relabeled "GBP" - unchanged for anything else. Case-
-    sensitive on purpose: "GBp" (pence) and "GBP" (pounds) differ only in
-    the case of that last letter, so folding case here would erase the
-    only signal there is.
+    """(currency, price, year_low, year_high) with a "GBp" quote converted
+    from pence to pounds - every other numeric `.info` field (market cap,
+    EPS, book value, dividend rate, revenue, FCF) is already in pounds,
+    so left uncorrected, per-share math derived from market_cap/price
+    (see valuation.py's _shares_outstanding_approx) is off by ~100x.
+    Case-sensitive on purpose: "GBp" (pence) and "GBP" (pounds) differ
+    only in the case of that last letter, so folding case here would
+    erase the only signal there is.
     """
     if currency not in _PENCE_CURRENCIES:
         return currency, price, year_low, year_high

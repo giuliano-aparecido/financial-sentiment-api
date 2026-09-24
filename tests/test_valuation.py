@@ -143,12 +143,8 @@ def test_cash_flow_basis_value_fcf_none_when_fcf_missing():
 
 
 def test_cash_flow_basis_value_revenue_none_when_price_and_financial_currency_differ():
-    # total_revenue/free_cash_flow ARE genuinely reported in
-    # financial_currency (company-total figures straight from the
-    # financial statements), so a real cross-currency case with no FX rate
-    # wired into this module (e.g. Mondi plc: GBP-quoted on the LSE, EUR
-    # financials) must decline these two bases rather than silently divide
-    # a EUR total by a GBP-derived share count.
+    # See cash_flow_basis_value's own comment. Mondi plc (GBP-quoted on
+    # the LSE, EUR financials) is a real example of this mismatch.
     fundamentals = {
         "total_revenue": 4.0e11, "market_cap": 3.0e12, "price": 300.0,
         "currency": "GBP", "financial_currency": "EUR",

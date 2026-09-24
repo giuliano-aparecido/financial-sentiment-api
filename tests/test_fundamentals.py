@@ -218,9 +218,8 @@ def test_fetch_fundamentals_leaves_a_pound_quote_alone(monkeypatch):
 
 
 def test_fetch_fundamentals_leaves_gbx_unconverted(monkeypatch):
-    # "GBX" isn't a real yfinance currency value (checked live against
-    # 20+ LSE tickers - only "GBp" occurs), so it's deliberately not in
-    # _PENCE_CURRENCIES and must be left alone like any other currency.
+    # GBX is deliberately not in _PENCE_CURRENCIES (see its comment) and
+    # must be left alone like any other currency.
     info = {"currentPrice": 4198.0, "marketCap": 90355507200, "currency": "GBX"}
     monkeypatch.setattr(fundamentals_module.yf, "Ticker", lambda symbol: _FakeTicker(info))
     result = fetch_fundamentals("BATS.L")
