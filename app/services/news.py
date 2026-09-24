@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 import feedparser
 import httpx
+import yfinance as yf
+
+from app.services import news_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,10 @@ logger = logging.getLogger(__name__)
 _EXCHANGE_SUFFIX_RE = re.compile(r"\.[A-Za-z]{1,3}$")
 
 PUBLISHER_FALLBACK = "Google News"
+
+# The Google query has no date window, so importance only outranks recency
+# within this many days - otherwise a months-old earnings report wins.
+_RECENT_DAYS = 7
 
 # How many raw RSS entries to consider as candidates before filtering -
 # NOT the final count shown to the model (exactly one headline is always
@@ -427,10 +434,13 @@ def _most_recent(candidates: list[_Candidate]) -> _Candidate:
 
 def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.date | None]:
     """Returns (live_context text, published_date of the selected
-    headline). Selects exactly ONE headline - the most recently published
-    candidate that passes quality (LOW_QUALITY_PUBLISHERS/_is_low_
-    content_headline) AND relevance (_is_relevant_headline) filtering -
-    matching training's actual per-row shape: financial-sentiment-model's
+    headline). Candidates come from Google News RSS plus Yahoo's news for
+    `ticker`. Selects exactly ONE headline - the one news_classifier
+    (Gemini) rates most relevant and important, or when it can't answer,
+    the most recently published candidate that passes quality
+    (LOW_QUALITY_PUBLISHERS/_is_low_content_headline) AND relevance
+    (_is_relevant_headline) filtering - matching training's actual per-row
+    shape: financial-sentiment-model's
     generate_real_dataset.py has always been single-headline-per-row, but
     this used to join up to 4 headlines into one block backed by a single
     TRAILING price move, a real train/inference mismatch. The single
@@ -441,10 +451,21 @@ def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.d
     traceability - its reasoning should reference the actual news Task A
     reacted to), not a separately fetched multi-headline block.
 
-    ("Data unavailable.", None) if the feed is empty or every entry fails
-    to parse, or on any fetch error.
+    ("Data unavailable.", None) if neither source yields a candidate.
     """
     search_ticker = _EXCHANGE_SUFFIX_RE.sub("", ticker)
+    candidates = _dedupe(_fetch_google_candidates(ticker, search_ticker) + _fetch_yahoo_candidates(ticker))
+    if not candidates:
+        return "Data unavailable.", None
+
+    selected = _classified_pick(candidates, search_ticker, name, sector) or _select_candidate(
+        candidates, ticker, search_ticker, name, sector
+    )
+    text = f"- [{selected.published_display}] {selected.title} - {selected.publisher}"
+    return text, selected.published_date
+
+
+def _fetch_google_candidates(ticker: str, search_ticker: str) -> list[_Candidate]:
     try:
         query = f"{search_ticker} stock earnings financial news"
         encoded_query = urllib.parse.quote(query)
@@ -456,22 +477,75 @@ def fetch_live_news_rag(ticker: str, name: str, sector) -> tuple[str, datetime.d
         # explicit timeout ourselves and hand feedparser the bytes instead.
         response = httpx.get(rss_url, timeout=10.0)
         response.raise_for_status()
-        feed = feedparser.parse(response.content)
-
-        if not feed.entries:
-            return "Data unavailable.", None
-
-        candidates = _build_candidates(feed)
-        if not candidates:
-            return "Data unavailable.", None
-
-        selected = _select_candidate(candidates, ticker, search_ticker, name, sector)
-        text = f"- [{selected.published_display}] {selected.title} - {selected.publisher}"
-        return text, selected.published_date
-
+        return _build_candidates(feedparser.parse(response.content))
     except Exception as e:
         logger.warning("RAG Google News RSS error for %s: %s", ticker, e)
-        return "Data unavailable.", None
+        return []
+
+
+def _fetch_yahoo_candidates(ticker: str) -> list[_Candidate]:
+    try:
+        candidates = []
+        for entry in yf.Ticker(ticker).news or []:
+            content = entry.get("content") or {}
+            title = content.get("title")
+            if not title:
+                continue
+            published_date = _parse_iso_date(content.get("pubDate"))
+            candidates.append(
+                _Candidate(
+                    title=title,
+                    publisher=(content.get("provider") or {}).get("displayName") or "Yahoo Finance",
+                    published_display=published_date.strftime("%a, %d %b %Y") if published_date else "",
+                    published_date=published_date,
+                )
+            )
+        return candidates
+    except Exception as e:
+        logger.warning("RAG Yahoo news error for %s: %s", ticker, e)
+        return []
+
+
+def _parse_iso_date(value: str | None) -> datetime.date | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _dedupe(candidates: list[_Candidate]) -> list[_Candidate]:
+    seen: set[str] = set()
+    unique = []
+    for candidate in candidates:
+        key = candidate.title.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _classified_pick(candidates: list[_Candidate], search_ticker: str, name: str, sector) -> _Candidate | None:
+    """The most important relevant headline of the past week, else the
+    newest relevant one, preferring those rated important. None when the
+    classifier can't answer or finds nothing relevant."""
+    assessments = news_classifier.classify_headlines(
+        name or search_ticker, search_ticker, sector, [(c.title, c.publisher) for c in candidates]
+    )
+    if assessments is None:
+        return None
+    relevant = [(c, a) for c, a in zip(candidates, assessments) if a.relevant]
+    if not relevant:
+        return None
+    week_ago = datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=_RECENT_DAYS)
+    recent = [(c, a) for c, a in relevant if a.importance > 1 and c.published_date and c.published_date >= week_ago]
+    if recent:
+        best, _ = max(recent, key=lambda ca: (ca[1].importance, ca[0].published_date))
+        return best
+    pool = [(c, a) for c, a in relevant if a.importance >= news_classifier.IMPORTANCE_THRESHOLD] or relevant
+    best, _ = max(pool, key=lambda ca: (ca[0].published_date or datetime.date.min, ca[1].importance))
+    return best
 
 
 def _build_candidates(feed) -> list[_Candidate]:

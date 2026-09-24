@@ -1,7 +1,11 @@
 import datetime
 import urllib.parse
+from types import SimpleNamespace
 
-from app.services import news
+from app.services import news, news_classifier
+from app.services.news_classifier import HeadlineAssessment
+
+_REAL_FETCH_YAHOO_CANDIDATES = news._fetch_yahoo_candidates
 
 
 class FakeResponse:
@@ -406,3 +410,183 @@ def test_unparseable_published_date_falls_back_to_rss_order(monkeypatch):
     result, published_date = news.fetch_live_news_rag("ORCL", "Oracle", "Technology")
     assert "Oracle cuts guidance" in result
     assert published_date is None
+
+
+# --- Gemini screen and Yahoo source ---
+
+
+def _classifier(verdicts, calls=None):
+    def classify(company, ticker, sector, headlines):
+        if calls is not None:
+            calls.append([title for title, _ in headlines])
+        return [HeadlineAssessment(*verdicts.get(title, (False, 1))) for title, _ in headlines]
+
+    return classify
+
+
+def _yahoo(title, published_date, publisher="Yahoo Finance"):
+    display = published_date.strftime("%a, %d %b %Y") if published_date else ""
+    return news._Candidate(title, publisher, display, published_date)
+
+
+def test_classifier_picks_the_newest_important_relevant_headline(monkeypatch):
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({
+        "Novo Sets Long-Term Targets": (True, 4),
+        "Novo Nordisk lifts outlook": (True, 5),
+        "Novo Banco reports record profit": (False, 5),
+        "Should you buy Novo Nordisk?": (True, 1),
+    }))
+    _install(monkeypatch, [
+        _entry("Should you buy Novo Nordisk? - Motley Fool", published_parsed=_StructTime(2026, 6, 24)),
+        _entry("Novo Banco reports record profit - Reuters", published_parsed=_StructTime(2026, 6, 24)),
+        _entry("Novo Sets Long-Term Targets - Reuters", published="Tue, 23 Jun 2026 00:00", published_parsed=_StructTime(2026, 6, 23)),
+        _entry("Novo Nordisk lifts outlook - Reuters", published_parsed=_StructTime(2026, 5, 4)),
+    ])
+    result, published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert result == "- [Tue, 23 Jun 2026] Novo Sets Long-Term Targets - Reuters"
+    assert published_date == datetime.date(2026, 6, 23)
+
+
+def test_within_the_past_week_importance_outranks_recency(monkeypatch):
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({
+        "BAT names new CEO and cuts guidance": (True, 5),
+        "Regulator speeds nicotine pouch approvals": (True, 3),
+    }))
+    monkeypatch.setattr(news, "_fetch_yahoo_candidates", lambda ticker: [
+        _yahoo("Regulator speeds nicotine pouch approvals", today),
+        _yahoo("BAT names new CEO and cuts guidance", today - datetime.timedelta(days=2)),
+    ])
+    _install(monkeypatch, [])
+    result, _published_date = news.fetch_live_news_rag("BATS.L", "British American Tobacco p.l.c.", "Consumer Defensive")
+    assert "BAT names new CEO and cuts guidance" in result
+
+
+def test_a_recent_minor_headline_beats_an_old_important_one(monkeypatch):
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({
+        "Novo Nordisk lifts outlook": (True, 5),
+        "Novo Nordisk shares edge higher on pipeline hopes": (True, 2),
+    }))
+    monkeypatch.setattr(news, "_fetch_yahoo_candidates", lambda ticker: [
+        _yahoo("Novo Nordisk lifts outlook", today - datetime.timedelta(days=50)),
+        _yahoo("Novo Nordisk shares edge higher on pipeline hopes", today - datetime.timedelta(days=1)),
+    ])
+    _install(monkeypatch, [])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert "Novo Nordisk shares edge higher on pipeline hopes" in result
+
+
+def test_a_recent_noise_headline_does_not_beat_an_older_important_one(monkeypatch):
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({
+        "Novo Nordisk cuts guidance": (True, 5),
+        "Novo Nordisk shares acquired by Some Advisors LLC": (True, 1),
+    }))
+    monkeypatch.setattr(news, "_fetch_yahoo_candidates", lambda ticker: [
+        _yahoo("Novo Nordisk cuts guidance", today - datetime.timedelta(days=10)),
+        _yahoo("Novo Nordisk shares acquired by Some Advisors LLC", today - datetime.timedelta(days=1)),
+    ])
+    _install(monkeypatch, [])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert "Novo Nordisk cuts guidance" in result
+
+
+def test_classifier_falls_back_to_unimportant_relevant_headlines(monkeypatch):
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({"Novo Nordisk shares edge higher": (True, 2)}))
+    _install(monkeypatch, [
+        _entry("Novo Banco reports record profit - Reuters"),
+        _entry("Novo Nordisk shares edge higher - Reuters"),
+    ])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert "Novo Nordisk shares edge higher" in result
+
+
+def test_nothing_relevant_to_the_classifier_falls_back_to_the_regex_selection(monkeypatch):
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({}))
+    _install(monkeypatch, [
+        _entry("Novo Banco reports record profit - Reuters", published_parsed=_StructTime(2026, 6, 24)),
+        _entry("Oracle cuts guidance, citing softening cloud demand - Reuters", published_parsed=_StructTime(2026, 6, 20)),
+    ])
+    result, _published_date = news.fetch_live_news_rag("ORCL", "Oracle", "Technology")
+    assert "Oracle cuts guidance" in result
+
+
+def test_classifier_breaks_an_importance_tie_by_recency(monkeypatch):
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({
+        "Novo cuts prices": (True, 3),
+        "Novo opens a plant": (True, 3),
+    }))
+    _install(monkeypatch, [
+        _entry("Novo cuts prices - Reuters", published_parsed=_StructTime(2026, 6, 20)),
+        _entry("Novo opens a plant - Reuters", published_parsed=_StructTime(2026, 6, 22)),
+    ])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert "Novo opens a plant" in result
+
+
+def test_a_denylisted_publisher_can_still_be_picked_by_the_classifier(monkeypatch):
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({"Novo Sets Long-Term Targets": (True, 4)}))
+    _install(monkeypatch, [
+        _entry("Novo Sets Long-Term Targets - TIKR"),
+        _entry("Novo Nordisk shares edge higher - Reuters"),
+    ])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert result.endswith("Novo Sets Long-Term Targets - TIKR")
+
+
+def test_yahoo_headlines_join_the_candidates_deduped_against_google(monkeypatch):
+    calls = []
+    title = "Novo Nordisk Stock Slides After Unveiling Long Term Pipeline Growth Targets"
+    monkeypatch.setattr(news_classifier, "classify_headlines", _classifier({title: (True, 4)}, calls))
+    monkeypatch.setattr(news, "_fetch_yahoo_candidates", lambda ticker: [
+        _yahoo(title, datetime.date(2026, 9, 23), publisher="Barrons.com"),
+        _yahoo("novo banco reports record profit", datetime.date(2026, 9, 23)),
+    ])
+    _install(monkeypatch, [_entry("Novo Banco reports record profit - Reuters")])
+    result, published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert calls == [["Novo Banco reports record profit", title]]
+    assert result == f"- [Wed, 23 Sep 2026] {title} - Barrons.com"
+    assert published_date == datetime.date(2026, 9, 23)
+
+
+def test_yahoo_candidates_survive_a_google_fetch_error(monkeypatch):
+    def _boom(url, timeout=None):
+        raise Exception("network error")
+
+    monkeypatch.setattr(news.httpx, "get", _boom)
+    monkeypatch.setattr(news, "_fetch_yahoo_candidates", lambda ticker: [
+        _yahoo("Novo Nordisk wins FDA approval", datetime.date(2026, 9, 23)),
+    ])
+    result, _published_date = news.fetch_live_news_rag("NVO", "Novo Nordisk A/S", "Healthcare")
+    assert "Novo Nordisk wins FDA approval" in result
+
+
+def test_yahoo_news_is_parsed_from_the_content_payload(monkeypatch):
+    payload = [
+        {"content": {
+            "title": "Novo Sets Long-Term Targets",
+            "pubDate": "2026-09-23T14:05:00Z",
+            "provider": {"displayName": "Barrons.com"},
+        }},
+        {"content": {"title": "", "pubDate": "2026-09-23T14:05:00Z"}},
+        {"content": {"title": "No provider", "pubDate": "not a date"}},
+    ]
+    monkeypatch.setattr(news.yf, "Ticker", lambda ticker: SimpleNamespace(news=payload))
+    assert _REAL_FETCH_YAHOO_CANDIDATES("NVO") == [
+        news._Candidate("Novo Sets Long-Term Targets", "Barrons.com", "Wed, 23 Sep 2026", datetime.date(2026, 9, 23)),
+        news._Candidate("No provider", "Yahoo Finance", "", None),
+    ]
+
+
+def test_a_yahoo_failure_yields_no_candidates(monkeypatch):
+    def _boom(ticker):
+        raise RuntimeError("crumb")
+
+    monkeypatch.setattr(news.yf, "Ticker", _boom)
+    assert _REAL_FETCH_YAHOO_CANDIDATES("NVO") == []
+
+
+def test_a_malformed_yahoo_payload_yields_no_candidates(monkeypatch):
+    monkeypatch.setattr(news.yf, "Ticker", lambda ticker: SimpleNamespace(news=["not a dict"]))
+    assert _REAL_FETCH_YAHOO_CANDIDATES("NVO") == []

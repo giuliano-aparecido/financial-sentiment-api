@@ -15,6 +15,9 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 HF_API_TOKEN = os.getenv("HF_TOKEN")
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+
 
 def require_hf_api_token() -> None:
     """Fails loudly and specifically if HF_API_TOKEN is missing - same
