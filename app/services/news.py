@@ -297,10 +297,7 @@ def _normalize_for_match(text: str) -> str:
     Deliberately leaves "/" alone, unlike "." and ",": a slash in headline
     text is usually a real word separator ("Baidu/Alibaba race for AI
     dominance"), and dropping it would merge the two sides into one token
-    and break the `\\b` word-boundary match on either name - only a
-    legal-entity suffix like "A/S" needs the slash removed, and that's
-    handled locally in _company_match_name instead, where it can't affect
-    headline text.
+    and break the `\\b` word-boundary match on either name.
     """
     folded = unicodedata.normalize("NFKD", text)
     folded = "".join(c for c in folded if not unicodedata.combining(c))
@@ -314,10 +311,8 @@ def _company_match_name(name: str) -> str:
     leaves "the coca-cola", which never appears in a headline that writes
     "Coca-Cola". "" when nothing survives, so the caller can fall back.
 
-    Each end's word is also compared with internal "/" removed before the
-    _LEGAL_SUFFIX_WORDS lookup, so a Danish "A/S" suffix (left intact by
-    _normalize_for_match, see its own docstring) still matches the "as"
-    entry.
+    A Danish "A/S" suffix (left intact by _normalize_for_match, see its
+    own docstring) still matches the "as" entry here.
 
     Known limitation, deliberately not chased: a name carrying its brand
     AFTER the suffix ("Petroleo Brasileiro S.A. - Petrobras") keeps the
