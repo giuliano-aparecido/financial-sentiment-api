@@ -62,26 +62,35 @@ def test_today_alert_requires_api_key(client):
     assert response.status_code == 401
 
 
-def test_today_alert_returns_503_when_email_is_not_configured(client, monkeypatch):
-    from app.services import alerts
-
-    monkeypatch.setattr(alerts, "is_email_configured", lambda: False)
-    started = []
-    monkeypatch.setattr(alerts, "start_today_alert", lambda: started.append(1))
-    response = client.post("/api/research/volatility/today/alert", headers={"X-API-Key": VALID_KEY})
-    assert response.status_code == 503
-    assert "SMTP_HOST" in response.json()["detail"]
-    assert started == []
-
-
-def test_today_alert_delegates_to_alerts_when_configured(client, monkeypatch):
-    from app.services import alerts
-
-    monkeypatch.setattr(alerts, "is_email_configured", lambda: True)
-    monkeypatch.setattr(alerts, "start_today_alert", lambda: {"status": "running", "started_at": "now"})
+def test_today_alert_start_starts_the_today_scan(client, monkeypatch):
+    monkeypatch.setattr(research_router, "start_today_scan", lambda: {"status": "running", "started_at": "now"})
     response = client.post("/api/research/volatility/today/alert", headers={"X-API-Key": VALID_KEY})
     assert response.status_code == 200
     assert response.json() == {"status": "running", "started_at": "now"}
+
+
+def test_today_alert_get_requires_api_key(client):
+    response = client.get("/api/research/volatility/today/alert", params={"started_at": "2026-09-17T15:30:00+00:00"})
+    assert response.status_code == 401
+
+
+def test_today_alert_get_returns_the_rendered_alert_for_that_scan(client, monkeypatch):
+    started_at = "2026-09-17T15:30:00+00:00"
+    monkeypatch.setattr(
+        research_router, "get_today_status",
+        lambda: {"status": "done", "started_at": started_at, "today_screener": [], "universe_size": 1},
+    )
+    response = client.get(
+        "/api/research/volatility/today/alert", params={"started_at": started_at}, headers={"X-API-Key": VALID_KEY},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "done", "match_count": 0, "email": None}
+
+
+@pytest.mark.parametrize("query", ["started_at=2026-09-17T15:30:00+00:00", "started_at=2026-09-17T15:30:00"])
+def test_today_alert_get_rejects_a_started_at_without_a_usable_offset(client, query):
+    response = client.get(f"/api/research/volatility/today/alert?{query}", headers={"X-API-Key": VALID_KEY})
+    assert response.status_code == 422
 
 
 # --- rebound / indicator GET handlers never trigger a scan ---

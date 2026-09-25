@@ -144,40 +144,50 @@ app/
   the user waits a few extra minutes behind a disabled button, but the
   rate-limit safety is worth more than the wait.
 - **The big-loss email alert is triggered externally, by cron-job.org
-  dispatching a GitHub Actions workflow** (cron-job.org → GitHub
-  `workflow_dispatch` API → `.github/workflows/big-loss-alert.yml` →
-  `POST /api/research/volatility/today/alert` → `app/services/alerts.py`),
-  twice a day at 12:00 and 16:00 Europe/Zurich (the evening slot moved
-  from 17:30 to 16:00 on 2026-09-18 — the owner wants it landed by 17:00
-  at the latest). An in-process cron
-  can't do this: on Render's free tier the process is asleep between
-  requests, and a cron inside a sleeping process never fires. GitHub's
-  own `schedule:` trigger was used until 2026-09-25 and dropped: it fired
-  4-5 hours late every day in this repo (the 12:00 slot landed ~17:00,
-  the 16:00 slot ~20:20), which no gating can fix. cron-job.org fires
-  on the minute, handles DST itself (job timezone Europe/Zurich), and
-  only has to make a fast API call — the workflow keeps the curl retries
-  that ride out Render's cold start. Setup: a fine-grained GitHub token
-  scoped to this repo only with **Actions: Read and write**, and two
-  cron-job.org jobs (Mon-Fri, 12:00 and 16:00, timezone Europe/Zurich)
-  doing `POST https://api.github.com/repos/GiulianoAparecido/financial-sentiment-api/actions/workflows/big-loss-alert.yml/dispatches`
+  dispatching a GitHub Actions workflow, and sent from the Actions
+  runner, not from the API** (cron-job.org → GitHub `workflow_dispatch`
+  API → `.github/workflows/big-loss-alert.yml` →
+  `scripts/send_big_loss_alert.py`, which `POST`s
+  `/api/research/volatility/today/alert` to start the scan, polls `GET
+  …/today/alert?started_at=` until `app/services/alerts.py` returns the
+  rendered email, and sends it over SMTP itself), twice a day at 12:00
+  and 16:00 Europe/Zurich (the evening slot moved from 17:30 to 16:00 on
+  2026-09-18 — the owner wants it landed by 17:00 at the latest). Why
+  each piece:
+  - An in-process cron can't do this: on Render's free tier the process
+    is asleep between requests, and a cron inside a sleeping process
+    never fires.
+  - GitHub's own `schedule:` trigger was used until 2026-09-25 and
+    dropped: it fired 4-5 hours late every day in this repo (the 12:00
+    slot landed ~17:00, the 16:00 slot ~20:20), which no gating can fix.
+    cron-job.org fires on the minute and handles DST itself (job
+    timezone Europe/Zurich).
+  - The runner sends the email because Render's free tier blocks
+    outbound SMTP (ports 25/465/587, since 2025-09-26), which is why the
+    API's own `smtplib` send failed on 2026-09-24.
+
+  Setup: a fine-grained GitHub token scoped to this repo only with
+  **Actions: Read and write**, and two cron-job.org jobs (Mon-Fri, 12:00
+  and 16:00, timezone Europe/Zurich) doing `POST
+  https://api.github.com/repos/GiulianoAparecido/financial-sentiment-api/actions/workflows/big-loss-alert.yml/dispatches`
   with headers `Authorization: Bearer <token>`, `Accept:
-  application/vnd.github+json` and body `{"ref":"master"}` (expects
-  HTTP 204). Turn on both jobs' failure notifications in cron-job.org:
-  an expired token fails the dispatch before any Actions run exists,
-  and cron-job.org auto-disables a job after repeated failures.
-  An email goes out
-  only when the scan finds at least one match (each ticker linked to
-  its Yahoo Finance quote page, like the web table); an empty or failed
-  scan is logged on the API side, not mailed. That means a quiet inbox
-  is ambiguous — check cron-job.org's execution history, the workflow's
-  run history in the Actions tab, and the Render logs if you doubt it
-  fired. A failed `curl` only shows
-  up as GitHub's failed-run notification email. The
-  workflow needs two repository secrets, `RAG_API_KEY` and `RAG_API_URL`
-  (the same ones `scripts/refresh_yf_crumb.py` uses — same server, same
-  single API key); the API needs `SMTP_*` and `ALERT_EMAIL_*` (see
-  `.env.example`).
+  application/vnd.github+json` and body `{"ref":"master"}` (expects HTTP
+  204). Turn on both jobs' failure notifications in cron-job.org: an
+  expired token fails the dispatch before any Actions run exists, and
+  cron-job.org auto-disables a job after repeated failures. Repository
+  secrets: `RAG_API_KEY` and `RAG_API_URL` (the same ones
+  `scripts/refresh_yf_crumb.py` uses), plus `SMTP_HOST`, `SMTP_USER`,
+  `SMTP_PASSWORD` (for Gmail an App Password), `ALERT_EMAIL_TO`
+  (comma-separated), and optionally `SMTP_PORT` (default 587, STARTTLS)
+  and `ALERT_EMAIL_FROM` (default `SMTP_USER`).
+
+  An email goes out only when the scan finds at least one match (each
+  ticker linked to its Yahoo Finance quote page, like the web table). A
+  failed or timed-out scan, a failed send, or a missing secret fails the
+  workflow run, so GitHub's failed-run notification email is the error
+  signal; an empty scan passes quietly. So a quiet inbox means either no
+  match or no run — check cron-job.org's execution history and the
+  Actions tab if you doubt it fired.
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since
