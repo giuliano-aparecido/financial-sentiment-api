@@ -1,23 +1,10 @@
 name: Big-loss alert
 
 # Wakes the (scale-to-zero) API and asks it to run the Swiss big-loss scan
-# and email the result. GitHub cron is UTC-only, so each Swiss-time target
-# is scheduled at both its CET and CEST UTC equivalent, and the gate step
-# keeps only the one matching the CURRENT DST offset. This must be decided
-# from the offset, not from wall-clock local time: GitHub routinely delays
-# scheduled runs by hours (observed 2-5h delays in practice), which blew
-# past a same-day 1-hour local-time gate window and silently skipped the
-# real trigger along with the intended DST duplicate — the job still
-# showed green because a skipped step isn't a failure.
+# and email the result. Triggered only by workflow_dispatch from an
+# external scheduler (cron-job.org, Europe/Zurich) — see README. Don't add
+# a `schedule:` trigger back: GitHub ran it hours late in this repo.
 on:
-  schedule:
-    # Offset off :00 — GitHub documents the top of the hour as its most
-    # congested slot for scheduled workflows, where triggers can be
-    # delayed or dropped entirely under load.
-    - cron: "7 10 * * 1-5"  # 12:00 Europe/Zurich, CEST (UTC+2)
-    - cron: "7 11 * * 1-5"  # 12:00 Europe/Zurich, CET  (UTC+1)
-    - cron: "7 14 * * 1-5"  # 16:00 Europe/Zurich, CEST (UTC+2)
-    - cron: "7 15 * * 1-5"  # 16:00 Europe/Zurich, CET  (UTC+1)
   workflow_dispatch:
 
 permissions: {}
@@ -26,30 +13,7 @@ jobs:
   alert:
     runs-on: ubuntu-latest
     steps:
-      - name: Gate on current DST offset
-        id: gate
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          offset=$(TZ=Europe/Zurich date +%z)  # +0200 CEST, +0100 CET
-          sched="${{ github.event.schedule }}"
-          echo "Fired schedule: $sched, current Zurich offset: $offset"
-
-          case "$sched" in
-            "7 10 * * 1-5"|"7 14 * * 1-5") want="+0200" ;;
-            "7 11 * * 1-5"|"7 15 * * 1-5") want="+0100" ;;
-            *) want="" ;;
-          esac
-
-          if [ "$offset" = "$want" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Trigger scan + email
-        if: steps.gate.outputs.run == 'true'
         env:
           API_KEY: ${{ secrets.RAG_API_KEY }}
           API_BASE_URL: ${{ secrets.RAG_API_URL }}

@@ -143,27 +143,37 @@ app/
   `RESEARCH_SCAN_BATCH_DELAY_SECONDS`) is kept for the on-demand runs:
   the user waits a few extra minutes behind a disabled button, but the
   rate-limit safety is worth more than the wait.
-- **The big-loss email alert is triggered externally, by a GitHub
-  Actions cron** (`.github/workflows/big-loss-alert.yml` → `POST
-  /api/research/volatility/today/alert` → `app/services/alerts.py`),
+- **The big-loss email alert is triggered externally, by cron-job.org
+  dispatching a GitHub Actions workflow** (cron-job.org → GitHub
+  `workflow_dispatch` API → `.github/workflows/big-loss-alert.yml` →
+  `POST /api/research/volatility/today/alert` → `app/services/alerts.py`),
   twice a day at 12:00 and 16:00 Europe/Zurich (the evening slot moved
   from 17:30 to 16:00 on 2026-09-18 — the owner wants it landed by 17:00
   at the latest). An in-process cron
   can't do this: on Render's free tier the process is asleep between
-  requests, and a cron inside a sleeping process never fires. A GitHub
-  Actions cron was rejected once before in this repo (a `*/10`
-  keep-alive drifted 24+ minutes — see git history: `ci/remove-keep-
-  alive-workflow`); that drift is fine here, because the workflow gates
-  on a one-hour Swiss-time window and a late alert is still an alert,
-  whereas a late keep-alive ping was a missed one. An email goes out
+  requests, and a cron inside a sleeping process never fires. GitHub's
+  own `schedule:` trigger was used until 2026-09-25 and dropped: it fired
+  4-5 hours late every day in this repo (the 12:00 slot landed ~17:00,
+  the 16:00 slot ~20:20), which no gating can fix. cron-job.org fires
+  on the minute, handles DST itself (job timezone Europe/Zurich), and
+  only has to make a fast API call — the workflow keeps the curl retries
+  that ride out Render's cold start. Setup: a fine-grained GitHub token
+  scoped to this repo only with **Actions: Read and write**, and two
+  cron-job.org jobs (Mon-Fri, 12:00 and 16:00, timezone Europe/Zurich)
+  doing `POST https://api.github.com/repos/GiulianoAparecido/financial-sentiment-api/actions/workflows/big-loss-alert.yml/dispatches`
+  with headers `Authorization: Bearer <token>`, `Accept:
+  application/vnd.github+json` and body `{"ref":"master"}` (expects
+  HTTP 204). Turn on both jobs' failure notifications in cron-job.org:
+  an expired token fails the dispatch before any Actions run exists,
+  and cron-job.org auto-disables a job after repeated failures.
+  An email goes out
   only when the scan finds at least one match (each ticker linked to
   its Yahoo Finance quote page, like the web table); an empty or failed
   scan is logged on the API side, not mailed. That means a quiet inbox
-  is ambiguous — check the workflow's run history in the Actions tab
-  and the Render logs if you doubt it fired. Two ways the trigger stops
-  silently: GitHub disables `schedule` workflows in a repo with no
-  commits for 60 days (re-enable from the Actions tab), and a failed
-  `curl` only shows up as GitHub's failed-run notification email. The
+  is ambiguous — check cron-job.org's execution history, the workflow's
+  run history in the Actions tab, and the Render logs if you doubt it
+  fired. A failed `curl` only shows
+  up as GitHub's failed-run notification email. The
   workflow needs two repository secrets, `RAG_API_KEY` and `RAG_API_URL`
   (the same ones `scripts/refresh_yf_crumb.py` uses — same server, same
   single API key); the API needs `SMTP_*` and `ALERT_EMAIL_*` (see
@@ -209,7 +219,7 @@ pytest
 
 Render, via the `Dockerfile` (pinned base image digest, non-root user,
 healthcheck against `/health`). No CI is configured — the only workflow in
-`.github/workflows/` is the big-loss alert cron, not a test runner — run `pytest` locally
+`.github/workflows/` is the big-loss alert trigger, not a test runner — run `pytest` locally
 before opening a PR.
 
 ## Contributing
