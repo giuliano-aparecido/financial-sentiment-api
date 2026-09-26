@@ -144,30 +144,37 @@ app/
   the user waits a few extra minutes behind a disabled button, but the
   rate-limit safety is worth more than the wait.
 - **The big-loss email alert is triggered externally, by a GitHub
-  Actions cron** (`.github/workflows/big-loss-alert.yml` → `POST
-  /api/research/volatility/today/alert` → `app/services/alerts.py`),
-  twice a day at 12:00 and 16:00 Europe/Zurich (the evening slot moved
-  from 17:30 to 16:00 on 2026-09-18 — the owner wants it landed by 17:00
-  at the latest). An in-process cron
-  can't do this: on Render's free tier the process is asleep between
-  requests, and a cron inside a sleeping process never fires. A GitHub
-  Actions cron was rejected once before in this repo (a `*/10`
-  keep-alive drifted 24+ minutes — see git history: `ci/remove-keep-
-  alive-workflow`); that drift is fine here, because the workflow gates
-  on a one-hour Swiss-time window and a late alert is still an alert,
-  whereas a late keep-alive ping was a missed one. An email goes out
-  only when the scan finds at least one match (each ticker linked to
-  its Yahoo Finance quote page, like the web table); an empty or failed
-  scan is logged on the API side, not mailed. That means a quiet inbox
-  is ambiguous — check the workflow's run history in the Actions tab
-  and the Render logs if you doubt it fired. Two ways the trigger stops
-  silently: GitHub disables `schedule` workflows in a repo with no
-  commits for 60 days (re-enable from the Actions tab), and a failed
-  `curl` only shows up as GitHub's failed-run notification email. The
-  workflow needs two repository secrets, `RAG_API_KEY` and `RAG_API_URL`
-  (the same ones `scripts/refresh_yf_crumb.py` uses — same server, same
-  single API key); the API needs `SMTP_*` and `ALERT_EMAIL_*` (see
-  `.env.example`).
+  Actions cron, and sent from the Actions runner, not from the API**
+  (`.github/workflows/big-loss-alert.yml` →
+  `scripts/send_big_loss_alert.py`, which `POST`s
+  `/api/research/volatility/today/alert` to start the scan, polls `GET
+  …/today/alert?started_at=` until `app/services/alerts.py` returns the
+  rendered email, and sends it over SMTP itself), twice a day at 12:00
+  and 16:00 Europe/Zurich (the evening slot moved from 17:30 to 16:00 on
+  2026-09-18 — the owner wants it landed by 17:00 at the latest). An
+  in-process cron can't do this: on Render's free tier the process is
+  asleep between requests, and a cron inside a sleeping process never
+  fires. A GitHub Actions cron was rejected once before in this repo (a
+  `*/10` keep-alive drifted 24+ minutes — see git history: `ci/remove-
+  keep-alive-workflow`), and scheduled runs here have landed hours late
+  (the 16:00 slot around 20:20); that is accepted as the tradeoff for
+  needing no service outside GitHub. The runner sends the email because Render's free tier blocks
+  outbound SMTP (ports 25/465/587, since 2025-09-26), which is why the
+  API's own `smtplib` send failed on 2026-09-24. Repository secrets:
+  `RAG_API_KEY` and `RAG_API_URL` (the same ones
+  `scripts/refresh_yf_crumb.py` uses), plus `SMTP_HOST`, `SMTP_USER`,
+  `SMTP_PASSWORD` (for Gmail an App Password), `ALERT_EMAIL_TO`
+  (comma-separated), and optionally `SMTP_PORT` (default 587, STARTTLS)
+  and `ALERT_EMAIL_FROM` (default `SMTP_USER`).
+
+  An email goes out only when the scan finds at least one match (each
+  ticker linked to its Yahoo Finance quote page, like the web table). A
+  failed or timed-out scan, a failed send, or a missing secret fails the
+  workflow run, so GitHub's failed-run notification email is the error
+  signal; an empty scan passes quietly. So a quiet inbox means either no
+  match or no run — check the Actions tab if you doubt it fired. GitHub
+  also disables `schedule` workflows in a repo with no commits for 60
+  days (re-enable from the Actions tab).
 - **The rate limiter keys on a constant, not client IP.** Every real
   request arrives via the Next.js frontend's single proxy IP, so per-IP
   keying already bucketed all legitimate traffic together — and since

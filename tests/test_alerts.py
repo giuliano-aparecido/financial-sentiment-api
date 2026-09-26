@@ -1,10 +1,6 @@
 import datetime
-import logging
-import threading
 
-import pytest
-
-from app.services import alerts, research_job
+from app.services import alerts
 
 NOW = datetime.datetime(2026, 9, 17, 15, 30, tzinfo=datetime.timezone.utc)
 
@@ -12,11 +8,6 @@ ROWS = [
     {"ticker": "ABCD.SW", "name": "Alpha AG", "change_pct": -7.25, "price": 12.3, "volume_vs_10d_avg": 0.4},
     {"ticker": "WXYZ.SW", "name": "Omega SA", "change_pct": -5.1, "price": 88.0, "volume_vs_10d_avg": None},
 ]
-
-
-@pytest.fixture(autouse=True)
-def _no_pending_alert(monkeypatch):
-    monkeypatch.setattr(alerts, "_pending_started_at", None)
 
 
 # --- format_alert ---
@@ -57,106 +48,37 @@ def test_yahoo_quote_url_matches_the_web_pages_link_format():
     assert alerts.yahoo_quote_url("NESN.SW") == "https://finance.yahoo.com/quote/NESN.SW"
 
 
-# --- start_today_alert / _wait_for_scan ---
+# --- alert_for ---
+
+STARTED = "2026-09-17T15:30:00+00:00"
 
 
-def test_start_today_alert_starts_the_scan_and_emails_when_it_finishes(monkeypatch):
-    statuses = iter([
-        {"status": "running", "started_at": "2026-09-17T15:30:00+00:00"},
-        {"status": "done", "started_at": "2026-09-17T15:30:00+00:00", "today_screener": ROWS, "universe_size": 1, "failed_ticker_count": 0},
-    ])
-    monkeypatch.setattr(research_job, "start_today_scan", lambda: {"status": "running", "started_at": "2026-09-17T15:30:00+00:00"})
-    monkeypatch.setattr(research_job, "get_today_status", lambda: next(statuses))
-    monkeypatch.setattr(alerts, "POLL_INTERVAL_SECONDS", 0)
-    sent = []
-    done = threading.Event()
-
-    def sender(subject, text, html_body):
-        sent.append((subject, text, html_body))
-        done.set()
-
-    job = alerts.start_today_alert(sender=sender)
-
-    assert job["status"] == "running"
-    assert job["alert"] == "pending"
-    assert done.wait(timeout=5)
-    assert sent[0][0].startswith("[Swiss big-loss] 2 stock(s)")
-    assert "finance.yahoo.com/quote/ABCD.SW" in sent[0][2]
+def test_alert_for_is_running_while_the_scan_is_running():
+    assert alerts.alert_for({"status": "running", "started_at": STARTED}, STARTED, NOW) == {"status": "running"}
 
 
-@pytest.mark.parametrize("final_status, expected_log", [
-    ({"status": "done", "started_at": "2026-09-17T15:30:00+00:00", "today_screener": [], "universe_size": 120, "failed_ticker_count": 0}, "no stock down 5% or more today - no email"),
-    ({"status": "error", "started_at": "2026-09-17T15:30:00+00:00", "error": "Yahoo Finance is currently rate-limiting"}, "scan did not complete (error: Yahoo Finance is currently rate-limiting) - no email"),
-    ({"status": "timeout", "started_at": "2026-09-17T15:30:00+00:00", "error": "scan still running after 600s"}, "scan did not complete (timeout: scan still running after 600s) - no email"),
-])
-def test_run_alert_only_logs_when_there_is_nothing_to_send(monkeypatch, caplog, final_status, expected_log):
-    monkeypatch.setattr(alerts, "_wait_for_scan", lambda started_at: final_status)
-    sent = []
-
-    with caplog.at_level(logging.INFO, logger="app.services.alerts"):
-        alerts._run_alert("2026-09-17T15:30:00+00:00", lambda *a: sent.append(a))
-
-    assert sent == []
-    assert expected_log in caplog.text
+def test_alert_for_is_running_while_only_an_older_scan_has_finished():
+    older = {"status": "done", "started_at": "2026-09-17T15:29:00+00:00", "today_screener": ROWS}
+    assert alerts.alert_for(older, STARTED, NOW) == {"status": "running"}
 
 
-def test_start_today_alert_called_twice_for_the_same_scan_sends_one_email(monkeypatch):
-    started_at = "2026-09-17T16:00:00+00:00"
-    release = threading.Event()
-    monkeypatch.setattr(research_job, "start_today_scan", lambda: {"status": "running", "started_at": started_at})
-    monkeypatch.setattr(
-        research_job, "get_today_status",
-        lambda: {"status": "done", "started_at": started_at, "today_screener": ROWS} if release.is_set()
-        else {"status": "running", "started_at": started_at},
-    )
-    monkeypatch.setattr(alerts, "POLL_INTERVAL_SECONDS", 0)
-    sent = []
-    finished = threading.Event()
-
-    def sender(subject, text, html_body):
-        sent.append(subject)
-        finished.set()
-
-    first = alerts.start_today_alert(sender=sender)
-    second = alerts.start_today_alert(sender=sender)
-    release.set()
-
-    assert first["alert"] == "pending"
-    assert second["alert"] == "already_pending"
-    assert finished.wait(timeout=5)
-    assert len(sent) == 1
+def test_alert_for_renders_the_email_when_the_scan_found_matches():
+    alert = alerts.alert_for({**DONE, "started_at": STARTED}, STARTED, NOW)
+    assert alert["status"] == "done"
+    assert alert["match_count"] == 2
+    assert alert["email"]["subject"] == "[Swiss big-loss] 2 stock(s) 2026-09-17 15:30 UTC"
+    assert "ABCD.SW" in alert["email"]["text"]
+    assert "finance.yahoo.com/quote/ABCD.SW" in alert["email"]["html"]
 
 
-def test_wait_for_scan_accepts_a_newer_finished_scan_instead_of_waiting_for_an_exact_started_at_match(monkeypatch):
-    monkeypatch.setattr(
-        research_job, "get_today_status",
-        lambda: {"status": "done", "started_at": "2026-09-17T15:31:00+00:00", "today_screener": []},
-    )
-    status = alerts._wait_for_scan("2026-09-17T15:30:00+00:00")
-    assert status["status"] == "done"
+def test_alert_for_has_no_email_when_nothing_is_down_enough():
+    status = {"status": "done", "started_at": STARTED, "today_screener": [], "universe_size": 120}
+    assert alerts.alert_for(status, STARTED, NOW) == {"status": "done", "match_count": 0, "email": None}
 
 
-def test_wait_for_scan_keeps_waiting_for_an_older_result_then_times_out(monkeypatch):
-    monkeypatch.setattr(
-        research_job, "get_today_status",
-        lambda: {"status": "done", "started_at": "2026-09-17T15:29:00+00:00", "today_screener": []},
-    )
-    monkeypatch.setattr(alerts, "SCAN_WAIT_SECONDS", 0)
-    status = alerts._wait_for_scan("2026-09-17T15:30:00+00:00")
-    assert status["status"] == "timeout"
-
-
-def test_run_alert_logs_and_survives_a_sender_failure(monkeypatch, caplog):
-    monkeypatch.setattr(alerts, "_wait_for_scan", lambda started_at: {"status": "done", "today_screener": ROWS})
-
-    def broken_sender(subject, text, html_body):
-        raise ConnectionError("smtp down")
-
-    with caplog.at_level(logging.ERROR, logger="app.services.alerts"):
-        alerts._run_alert("2026-09-17T15:30:00+00:00", broken_sender)
-
-    assert "failed to send" in caplog.text
-    assert "smtp down" in caplog.text
+def test_alert_for_reports_a_failed_scan():
+    status = {"status": "error", "started_at": STARTED, "error": "Yahoo Finance is currently rate-limiting"}
+    assert alerts.alert_for(status, STARTED, NOW) == {"status": "error", "error": "Yahoo Finance is currently rate-limiting"}
 
 
 def test_finished_at_or_after_compares_timestamps_not_strings():
@@ -167,61 +89,3 @@ def test_finished_at_or_after_compares_timestamps_not_strings():
     assert not alerts._finished_at_or_after({"status": "running", "started_at": base}, base)
     assert not alerts._finished_at_or_after({"status": "idle"}, base)
 
-
-# --- is_email_configured ---
-
-
-REQUIRED_EMAIL_SETTINGS = ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "ALERT_EMAIL_TO")
-
-
-@pytest.mark.parametrize("missing", REQUIRED_EMAIL_SETTINGS)
-def test_is_email_configured_is_false_when_any_required_value_is_missing(monkeypatch, missing):
-    from app import config
-
-    for name in REQUIRED_EMAIL_SETTINGS:
-        monkeypatch.setattr(config, name, ("x",) if name == "ALERT_EMAIL_TO" else "x")
-    assert alerts.is_email_configured() is True
-    monkeypatch.setattr(config, missing, () if missing == "ALERT_EMAIL_TO" else None)
-    assert alerts.is_email_configured() is False
-
-
-def test_send_email_addresses_every_recipient(monkeypatch):
-    from app import config
-
-    monkeypatch.setattr(config, "SMTP_HOST", "smtp.test")
-    monkeypatch.setattr(config, "SMTP_USER", "bot@x.test")
-    monkeypatch.setattr(config, "SMTP_PASSWORD", "pw")
-    monkeypatch.setattr(config, "ALERT_EMAIL_FROM", "bot@x.test")
-    monkeypatch.setattr(config, "ALERT_EMAIL_TO", ("a@x.test", "b@y.test"))
-    calls = {}
-
-    class FakeSMTP:
-        def __init__(self, host, port, timeout):
-            calls["connect"] = (host, port)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def starttls(self):
-            calls["tls"] = True
-
-        def login(self, user, password):
-            calls["login"] = user
-
-        def send_message(self, msg, to_addrs=None):
-            calls["to_header"] = msg["To"]
-            calls["to_addrs"] = to_addrs
-            calls["parts"] = [part.get_content_type() for part in msg.iter_parts()]
-            calls["html"] = msg.get_body(preferencelist=("html",)).get_content()
-
-    monkeypatch.setattr(alerts.smtplib, "SMTP", FakeSMTP)
-    alerts.send_email("subj", "plain body", "<p>html body</p>")
-
-    assert calls["to_header"] == "a@x.test, b@y.test"
-    assert calls["to_addrs"] == ["a@x.test", "b@y.test"]
-    assert calls["tls"] and calls["login"] == "bot@x.test"
-    assert calls["parts"] == ["text/plain", "text/html"]
-    assert "<p>html body</p>" in calls["html"]
