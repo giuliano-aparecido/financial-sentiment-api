@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -125,8 +126,19 @@ async def today_volatility_scan_status(request: Request):
 
 @router.post("/api/research/volatility/today/alert", dependencies=[Depends(verify_api_key)])
 async def start_today_volatility_alert(request: Request):
-    """Runs the today scan and emails the result - for the external
-    scheduler (.github/workflows/big-loss-alert.yml)."""
-    if not alerts.is_email_configured():
-        raise HTTPException(status_code=503, detail="Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/ALERT_EMAIL_TO).")
-    return alerts.start_today_alert()
+    """Starts (or joins) the today scan for the alert sender
+    (scripts/send_big_loss_alert.py); poll the GET route below with the
+    returned started_at."""
+    return start_today_scan()
+
+
+@router.get("/api/research/volatility/today/alert", dependencies=[Depends(verify_api_key)])
+@limiter.limit("30/minute")
+async def today_volatility_alert(request: Request, started_at: str):
+    try:
+        aware = datetime.datetime.fromisoformat(started_at).tzinfo is not None
+    except ValueError:
+        aware = False
+    if not aware:
+        raise HTTPException(status_code=422, detail=f"started_at must be an ISO-8601 timestamp with a UTC offset, got {started_at!r}")
+    return alerts.alert_for(get_today_status(), started_at, datetime.datetime.now(datetime.timezone.utc))

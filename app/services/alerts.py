@@ -1,40 +1,16 @@
-"""Emails the matches of a today/big-loss scan (research_job.py) to
-ALERT_EMAIL_TO - only when there is at least one; an empty or failed scan
-is logged, not mailed. Triggered by POST /api/research/volatility/today/alert,
-which an external scheduler (.github/workflows/big-loss-alert.yml) calls
-twice a day - an in-process cron can't do this because the Render free
-tier sleeps the process between requests.
+"""Builds the big-loss alert email for a today/big-loss scan
+(research_job.py). The API only renders it; scripts/send_big_loss_alert.py
+(run by .github/workflows/big-loss-alert.yml) polls for it and sends it -
+see that script for why.
 """
 
 import datetime
 import html
-import logging
-import smtplib
-import threading
-import time
-from collections.abc import Callable
-from email.message import EmailMessage
 from urllib.parse import quote
 
-from app import config
-from app.services import research_job
 from app.services.swiss_today_screener import LOSS_THRESHOLD_PCT
 
-logger = logging.getLogger(__name__)
-
-Sender = Callable[[str, str, str], None]
-
 YAHOO_QUOTE_URL = "https://finance.yahoo.com/quote/"
-
-SCAN_WAIT_SECONDS = 10 * 60
-POLL_INTERVAL_SECONDS = 5
-
-_pending_lock = threading.Lock()
-_pending_started_at: str | None = None
-
-
-def is_email_configured() -> bool:
-    return bool(config.SMTP_HOST and config.SMTP_USER and config.SMTP_PASSWORD and config.ALERT_EMAIL_TO)
 
 
 def yahoo_quote_url(ticker: str) -> str:
@@ -79,68 +55,24 @@ def format_alert(rows: list[dict], status: dict, now: datetime.datetime) -> tupl
     return (f"[Swiss big-loss] {len(rows)} stock(s) {stamp}", text, html_body)
 
 
-def send_email(subject: str, text: str, html_body: str) -> None:
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = config.ALERT_EMAIL_FROM
-    msg["To"] = ", ".join(config.ALERT_EMAIL_TO)
-    msg.set_content(text)
-    msg.add_alternative(html_body, subtype="html")
-    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as smtp:
-        smtp.starttls()
-        smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        smtp.send_message(msg, to_addrs=list(config.ALERT_EMAIL_TO))
-
-
 def _finished_at_or_after(status: dict, started_at: str) -> bool:
     if status.get("status") == "running" or not status.get("started_at"):
         return False
     return datetime.datetime.fromisoformat(status["started_at"]) >= datetime.datetime.fromisoformat(started_at)
 
 
-def _wait_for_scan(started_at: str) -> dict:
-    deadline = time.monotonic() + SCAN_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        status = research_job.get_today_status()
-        if _finished_at_or_after(status, started_at):
-            return status
-        time.sleep(POLL_INTERVAL_SECONDS)
-    return {"status": "timeout", "error": f"scan still running after {SCAN_WAIT_SECONDS}s"}
-
-
-def _run_alert(started_at: str, sender: Sender) -> None:
-    global _pending_started_at
-    try:
-        status = _wait_for_scan(started_at)
-        if status.get("status") != "done":
-            logger.warning("Big-loss alert: scan did not complete (%s: %s) - no email", status.get("status"), status.get("error"))
-            return
-        rows = status.get("today_screener") or []
-        if not rows:
-            logger.info("Big-loss alert: no stock down %g%% or more today - no email", abs(LOSS_THRESHOLD_PCT))
-            return
-        subject, text, html_body = format_alert(rows, status, datetime.datetime.now(datetime.timezone.utc))
-        try:
-            sender(subject, text, html_body)
-            logger.info("Big-loss alert sent: %s", subject)
-        except Exception:
-            logger.exception("Big-loss alert email failed to send")
-    finally:
-        with _pending_lock:
-            if _pending_started_at == started_at:
-                _pending_started_at = None
-
-
-def start_today_alert(sender: Sender = send_email) -> dict:
-    """Starts (or joins) the today scan and, if it finds any match, emails
-    the table when it finishes. Returns the scan's start status
-    immediately; a second call while an alert is already waiting on the
-    same scan sends nothing extra."""
-    global _pending_started_at
-    job = research_job.start_today_scan()
-    with _pending_lock:
-        if _pending_started_at == job["started_at"]:
-            return {**job, "alert": "already_pending"}
-        _pending_started_at = job["started_at"]
-    threading.Thread(target=_run_alert, args=(job["started_at"], sender), daemon=True).start()
-    return {**job, "alert": "pending"}
+def alert_for(status: dict, started_at: str, now: datetime.datetime) -> dict:
+    """The alert for the scan started at `started_at` (or a newer one):
+    {"status": "running"} until it finishes, then {"status": "error",
+    "error"} or {"status": "done", "match_count", "email"}, where email is
+    {"subject", "text", "html"} - or None when nothing is down enough."""
+    if not _finished_at_or_after(status, started_at):
+        return {"status": "running"}
+    if status.get("status") != "done":
+        return {"status": "error", "error": status.get("error") or f"scan ended as {status.get('status')}"}
+    rows = status.get("today_screener") or []
+    email = None
+    if rows:
+        subject, text, html_body = format_alert(rows, status, now)
+        email = {"subject": subject, "text": text, "html": html_body}
+    return {"status": "done", "match_count": len(rows), "email": email}

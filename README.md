@@ -81,9 +81,12 @@ app/
   only runs when the user clicks Refresh. The old daily/monthly cron was
   removed so the Yahoo Finance request budget goes to the twice-daily
   big-loss alert instead.
-- **The big-loss email alert is triggered externally, by a GitHub Actions
-  cron**, not an in-process scheduler — Render's free tier sleeps the
-  process between requests, so an in-process cron never fires.
+- **The big-loss email alert is triggered externally by a GitHub Actions
+  cron, and sent from the Actions runner, not the API.** An in-process
+  cron can't do it — Render's free tier sleeps the process between
+  requests — and the runner has to send the email itself because Render's
+  free tier also blocks outbound SMTP. The workflow starts the scan via
+  the API, polls for the rendered email, then sends it over SMTP directly.
 - **The rate limiter keys on a constant, not client IP.** All real traffic
   arrives via the frontend's single proxy IP, so per-IP keying already
   bucketed everything together — and was spoofable via `X-Forwarded-For`
@@ -130,3 +133,12 @@ before opening a PR.
 No dedicated `CONTRIBUTING.md` yet, but the fleet-wide default (see the
 `AGENTS.md` one directory up, outside this repo, alongside its sibling
 repos) applies: **branch + PR, never push directly to `main`/`master`.**
+
+## License
+
+Dual-licensed under either of
+
+- [MIT license](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.

@@ -1,9 +1,10 @@
 name: Big-loss alert
 
-# Wakes the (scale-to-zero) API and asks it to run the Swiss big-loss scan
-# and email the result. GitHub cron is UTC-only, so each Swiss-time target
-# is scheduled at both its CET and CEST UTC equivalent, and the gate step
-# keeps only the one matching the CURRENT DST offset. This must be decided
+# Wakes the (scale-to-zero) API, asks it to run the Swiss big-loss scan,
+# then sends the resulting email from the runner. GitHub cron is UTC-only,
+# so each Swiss-time target is scheduled at both its CET and CEST UTC
+# equivalent, and the gate job keeps only the one matching the CURRENT DST
+# offset. This must be decided
 # from the offset, not from wall-clock local time: GitHub routinely delays
 # scheduled runs by hours (observed 2-5h delays in practice), which blew
 # past a same-day 1-hour local-time gate window and silently skipped the
@@ -20,11 +21,14 @@ on:
     - cron: "7 15 * * 1-5"  # 16:00 Europe/Zurich, CET  (UTC+1)
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
-  alert:
+  gate:
     runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
     steps:
       - name: Gate on current DST offset
         id: gate
@@ -48,14 +52,31 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Trigger scan + email
-        if: steps.gate.outputs.run == 'true'
+  send:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    # Only on this job, so a gated-out DST duplicate never enters the group:
+    # a newly queued run displaces the group's pending one.
+    concurrency:
+      group: big-loss-alert
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/send_big_loss_alert.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Run scan + send email
+        timeout-minutes: 25
         env:
           API_KEY: ${{ secrets.RAG_API_KEY }}
           API_BASE_URL: ${{ secrets.RAG_API_URL }}
-        run: |
-          curl --silent --show-error --fail-with-body \
-            --retry 4 --retry-delay 30 --retry-all-errors --max-time 120 \
-            -X POST \
-            -H "X-API-Key: $API_KEY" \
-            "$API_BASE_URL/api/research/volatility/today/alert"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+        run: python3 scripts/send_big_loss_alert.py
