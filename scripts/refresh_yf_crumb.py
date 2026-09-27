@@ -1,5 +1,5 @@
 """Automates the Yahoo crumb-refresh workaround documented in
-app/services/swiss_universe.py's seed_yf_session_from_env()/reseed_
+app/services/yf_session.py's seed_yf_session_from_env()/reseed_
 yf_session(). Run from a machine whose outbound IP ISN'T blocked by
 Yahoo (originally scheduled daily via .github/workflows/
 refresh-yf-crumb.yml on a GitHub Actions runner, not Render, where this
@@ -11,7 +11,7 @@ POST /api/update-yf-crumb.
 
 Why this has to run somewhere other than Render: the whole reason a
 seeded crumb is needed is that Render's own outbound IP is blocked
-specifically at Yahoo's crumb-fetch endpoint (see swiss_universe.py's
+specifically at Yahoo's crumb-fetch endpoint (see yf_session.py's
 module-level comment) - a refresh attempted FROM Render would just hit
 the same block. This script is deliberately meant to run on different
 infrastructure. GitHub Actions runners aren't guaranteed to stay
@@ -35,7 +35,7 @@ script never kept them in sync even when it ran on a schedule, so update
 them by hand in Render's dashboard occasionally if that fallback staying
 reasonably fresh matters to you. With no scheduled run at all now, the
 hot-swapped crumb this script pushes via /api/update-yf-crumb will
-itself go stale between manual runs - see swiss_universe.py's own
+itself go stale between manual runs - see yf_session.py's own
 comment for what that looks like when it happens.
 
 Required environment variables (previously set as GitHub Actions repo

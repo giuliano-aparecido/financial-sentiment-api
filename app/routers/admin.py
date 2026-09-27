@@ -8,7 +8,7 @@ from app.config import DEFAULT_MODEL, is_allowed_inference_host, normalize_model
 from app.deps import verify_api_key
 from app.models import UpdateInferenceURLRequest, UpdateYfCrumbRequest
 from app.services.inference import inference_urls, set_inference_url
-from app.services.swiss_universe import reseed_yf_session
+from app.services.yf_session import reseed_yf_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,7 +45,7 @@ async def update_inference_url(req: UpdateInferenceURLRequest, request: Request)
 @router.post("/api/update-yf-crumb", dependencies=[Depends(verify_api_key)])
 async def update_yf_crumb(req: UpdateYfCrumbRequest, request: Request):
     """Hot-swaps the running process's yfinance crumb/cookie pair with a
-    freshly captured one - see swiss_universe.reseed_yf_session's own
+    freshly captured one - see yf_session.reseed_yf_session's own
     docstring. Called by scripts/refresh_yf_crumb.py instead of that
     script's old Render-env-var-push-plus-redeploy path, added 2026-08-20
     at the user's explicit request to stop redeploying the whole app just

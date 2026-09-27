@@ -12,6 +12,11 @@ via a Hugging Face Inference endpoint. Serves
 Hardened for correctness and security even though it's a single-instance
 app that doesn't need to scale.
 
+Swiss market research scans (volatility indicator, crash rebound, a
+big-loss alert) used to live here too - extracted to a private sibling
+repo, `financial-research-api`, so this repo stays purely the
+AI-reasoning feature.
+
 ## Documentation
 
 - [`PROJECT.md`](PROJECT.md) — architecture, key design decisions, auth,
@@ -20,8 +25,6 @@ app that doesn't need to scale.
 ## Stack
 
 - **FastAPI** — the API itself
-- **SQLAlchemy 2.0** + **Postgres** (Neon) — persistence for the two
-  on-demand research scans
 - **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
 
 Talks to a Hugging Face Inference endpoint for the fine-tuned model,
@@ -41,16 +44,6 @@ uvicorn main:app --reload
 host suffixes, etc.). `.env` is loaded automatically (`python-dotenv`) if
 present — copy `.env.example` to start.
 
-The persisted research scans additionally need `DATABASE_CONNECTION_STRING`
-(a Neon Postgres connection string) and a migration:
-
-```bash
-python -m alembic upgrade head
-```
-
-Tests never touch the real database or trigger a real scan — see
-`tests/test_scan_persistence.py`'s in-memory-SQLite fixture.
-
 ## Tests
 
 ```bash
@@ -60,8 +53,7 @@ pytest
 ## Deployment
 
 Render, via the `Dockerfile` (pinned base image digest, non-root user,
-healthcheck against `/health`). No CI is configured — the only workflow in
-`.github/workflows/` is the big-loss alert cron, not a test runner — run `pytest` locally
+healthcheck against `/health`). No CI is configured — run `pytest` locally
 before opening a PR.
 
 ## Contributing
