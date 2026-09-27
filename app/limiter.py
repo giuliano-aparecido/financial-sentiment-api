@@ -13,9 +13,9 @@ def rate_limit_key(request: Request) -> str:
     return "global"
 
 
-# Factored out of main.py (which used to define this inline) so router
-# modules can import `limiter` for per-route @limiter.limit(...) overrides
-# without a circular import back to main.py.
+# Factored out of main.py (which used to define this inline) so it can be
+# imported both there (app.state.limiter) and from routers without a
+# circular import back to main.py.
 #
 # default_limits=["10/minute"] applies to every route that doesn't
 # override it - sized for this app's normal per-request cost (one HF

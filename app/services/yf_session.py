@@ -18,17 +18,6 @@ case using it from a different IP fails too. If the exact same
 YFRateLimitError keeps happening after setting these, that's the answer:
 IP-bound, and this doesn't help.
 
-Same mechanism as `financial-research-api`'s copy of this module (used
-there for the Swiss market-scan yfinance calls instead) - each process
-has its own independent yfinance singleton, so each app needs its own
-seeded crumb; this isn't shared state between the two repos, just shared
-logic, deliberately duplicated (same "ported, not imported" convention
-used elsewhere in this fleet).
-
-Refresh via scripts/refresh_yf_crumb.py (run manually whenever the seeded
-crumb/cookies go stale - see that script's own docstring), which calls
-reseed_yf_session() below via the /api/update-yf-crumb admin endpoint to
-hot-swap the running process's crumb with no restart needed.
 """
 
 import json
@@ -56,12 +45,10 @@ def seed_yf_session_from_env():
 
 def reseed_yf_session(crumb: str, cookies: dict) -> None:
     """Hot-swaps the running process's yfinance crumb/cookie jar with a
-    freshly captured pair - called from app/routers/admin.py's /api/
-    update-yf-crumb endpoint, itself called by scripts/refresh_yf_crumb.py
-    (see that script's own docstring). Unlike seed_yf_session_from_env
-    above, this ALWAYS overwrites (no "already seeded, don't clobber"
-    guard) - the whole point is refreshing an already-seeded, now-stale
-    crumb without restarting the process at all."""
+    freshly captured pair. Unlike seed_yf_session_from_env above, this
+    ALWAYS overwrites (no "already seeded, don't clobber" guard) - the
+    whole point is refreshing an already-seeded, now-stale crumb without
+    restarting the process at all."""
     data = YfData()
     data._session.cookies.clear()
     for name, value in cookies.items():

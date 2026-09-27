@@ -20,29 +20,19 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
 
 
 def require_hf_api_token() -> None:
-    """Fails loudly and specifically if HF_API_TOKEN is missing - same
-    style as DATABASE_CONNECTION_STRING's check in app/db/session.py's
-    _session_factory(). Without this, app/services/inference.py's
-    _call_model sends `Authorization: Bearer None` on every call, and
-    every one fails with the SAME generic 502 a real backend outage would
-    produce - indistinguishable from this repo's own misconfiguration.
-    Called from inference.start_client() (app startup, main.py's
-    lifespan), not at import time here, so unrelated code that merely
-    imports this module (alembic migrations, tests that never exercise
-    inference) isn't forced to have HF_TOKEN set just to import it - same
-    lazy-check reasoning as _session_factory()'s own comment."""
+    """Fails loudly and specifically if HF_API_TOKEN is missing. Without
+    this, app/services/inference.py's _call_model sends `Authorization:
+    Bearer None` on every call, and every one fails with the SAME generic
+    502 a real backend outage would produce - indistinguishable from this
+    repo's own misconfiguration. Called from inference.start_client() (app
+    startup, main.py's lifespan), not at import time here, so unrelated
+    code that merely imports this module (tests that never exercise
+    inference) isn't forced to have HF_TOKEN set just to import it."""
     if not HF_API_TOKEN:
         raise RuntimeError(
             "HF_TOKEN is not set - required for calling the Hugging Face inference backend (app/services/inference.py)."
         )
 
-
-# Neon Postgres connection string for the research-scan persistence layer
-# (app/db, app/services/scan_persistence.py) - same variable name already
-# set on Render (see that service's env vars), not the DATABASE_URL name
-# portfolio-manager-backend uses, to avoid requiring a Render-side rename
-# of something already configured.
-DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
 MODEL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
