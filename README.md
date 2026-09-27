@@ -12,6 +12,11 @@ via a Hugging Face Inference endpoint. Serves
 Hardened for correctness and security even though it's a single-instance
 app that doesn't need to scale.
 
+## Documentation
+
+- [`PROJECT.md`](PROJECT.md) — architecture, key design decisions, auth,
+  rate limiting
+
 ## Stack
 
 - **FastAPI** — the API itself
@@ -22,50 +27,6 @@ app that doesn't need to scale.
 Talks to a Hugging Face Inference endpoint for the fine-tuned model,
 Google News RSS for live headlines, and yfinance for market
 fundamentals/earnings — all keyless except the HF token.
-
-## Architecture
-
-`app/services/` holds the business logic (news fetching, DCF valuation
-math, LLM inference call + response parsing); `app/routers/` is a thin
-HTTP layer with no logic of its own; `app/db/` plus
-`services/scan_persistence.py` handle Postgres persistence for the two
-on-demand research scans. `main.py` wires it together (middleware, the
-shared httpx client's lifespan, router mounting) and stays thin by design.
-
-## Key design decisions
-
-- **Multiple models behind one API, no model names hardcoded.**
-  `/api/analyze?model=<name>` picks the model; every `<NAME>_INFERENCE_URL`
-  env var registers one at startup, and `POST /api/update-inference-url`
-  can add or repoint one at runtime (useful for a Colab-hosted model behind
-  an ngrok tunnel that gets a new URL on every restart).
-- **The inference-URL host allowlist matches on exact host or a
-  `.`-bounded suffix, not `str.endswith()`** — a bare `endswith` would
-  accept a look-alike domain like `evil-huggingface.co`, and the resolved
-  URL receives the HF bearer token on every request after that.
-- **Valuation is deterministic, code-only math, never LLM-generated.**
-  Replaced an earlier Graham Number implementation that was badly broken
-  for asset-light, buyback-heavy companies (it showed Apple as "725%
-  overvalued" purely because its book value/share is tiny). Each company
-  is classified into one of four valuation bases (FCF, EPS, Dividends, or
-  Revenue) and projected through a 2-stage, 3-scenario growth model —
-  since a single metric can't value both a bank and a pre-profit
-  growth company.
-- **The rebound/volatility-indicator research tables are on-demand, not
-  scheduled.** They read the last persisted scan from Postgres; a scan
-  only runs when the user clicks Refresh. The old daily/monthly cron was
-  removed so the Yahoo Finance request budget goes to the twice-daily
-  big-loss alert instead.
-- **The big-loss email alert is triggered externally by a GitHub Actions
-  cron, and sent from the Actions runner, not the API.** An in-process
-  cron can't do it — Render's free tier sleeps the process between
-  requests — and the runner has to send the email itself because Render's
-  free tier also blocks outbound SMTP. The workflow starts the scan via
-  the API, polls for the rendered email, then sends it over SMTP directly.
-- **The rate limiter keys on a constant, not client IP.** All real traffic
-  arrives via the frontend's single proxy IP, so per-IP keying already
-  bucketed everything together — and was spoofable via `X-Forwarded-For`
-  besides.
 
 ## Local development
 
