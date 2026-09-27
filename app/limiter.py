@@ -15,11 +15,9 @@ def rate_limit_key(request: Request) -> str:
 
 # Factored out of main.py (which used to define this inline) so router
 # modules can import `limiter` for per-route @limiter.limit(...) overrides
-# (see app/routers/research.py) without a circular import back to main.py.
+# without a circular import back to main.py.
 #
 # default_limits=["10/minute"] applies to every route that doesn't
 # override it - sized for this app's normal per-request cost (one HF
-# inference call + a handful of yfinance calls), not for
-# research.py's volatility scan, which makes ~150+ yfinance calls per run
-# and gets its own much stricter override.
+# inference call + a handful of yfinance calls).
 limiter = Limiter(key_func=rate_limit_key, default_limits=["10/minute"])

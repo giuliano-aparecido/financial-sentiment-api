@@ -12,11 +12,14 @@ via a Hugging Face Inference endpoint. Serves
 Hardened for correctness and security even though it's a single-instance
 app that doesn't need to scale.
 
+Swiss market research scans (volatility indicator, crash rebound, a
+big-loss alert) used to live here too - extracted to a private sibling
+repo, `financial-research-api`, so this repo stays purely the
+AI-reasoning feature.
+
 ## Stack
 
 - **FastAPI** — the API itself
-- **SQLAlchemy 2.0** + **Postgres** (Neon) — persistence for the two
-  on-demand research scans
 - **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
 
 Talks to a Hugging Face Inference endpoint for the fine-tuned model,
@@ -27,10 +30,9 @@ fundamentals/earnings — all keyless except the HF token.
 
 `app/services/` holds the business logic (news fetching, DCF valuation
 math, LLM inference call + response parsing); `app/routers/` is a thin
-HTTP layer with no logic of its own; `app/db/` plus
-`services/scan_persistence.py` handle Postgres persistence for the two
-on-demand research scans. `main.py` wires it together (middleware, the
-shared httpx client's lifespan, router mounting) and stays thin by design.
+HTTP layer with no logic of its own. `main.py` wires it together
+(middleware, the shared httpx client's lifespan, router mounting) and
+stays thin by design.
 
 ## Key design decisions
 
@@ -51,17 +53,12 @@ shared httpx client's lifespan, router mounting) and stays thin by design.
   Revenue) and projected through a 2-stage, 3-scenario growth model —
   since a single metric can't value both a bank and a pre-profit
   growth company.
-- **The rebound/volatility-indicator research tables are on-demand, not
-  scheduled.** They read the last persisted scan from Postgres; a scan
-  only runs when the user clicks Refresh. The old daily/monthly cron was
-  removed so the Yahoo Finance request budget goes to the twice-daily
-  big-loss alert instead.
-- **The big-loss email alert is triggered externally by a GitHub Actions
-  cron, and sent from the Actions runner, not the API.** An in-process
-  cron can't do it — Render's free tier sleeps the process between
-  requests — and the runner has to send the email itself because Render's
-  free tier also blocks outbound SMTP. The workflow starts the scan via
-  the API, polls for the rendered email, then sends it over SMTP directly.
+- **The yfinance crumb is seeded at startup, and can be hot-swapped
+  without a restart.** `app/services/yf_session.py` works around Render's
+  outbound IP being blocked at Yahoo's crumb-fetch endpoint by seeding a
+  crumb/cookie pair captured from elsewhere; `POST /api/update-yf-crumb`
+  lets `scripts/refresh_yf_crumb.py` push a fresh one in without a
+  redeploy when the seeded one goes stale.
 - **The rate limiter keys on a constant, not client IP.** All real traffic
   arrives via the frontend's single proxy IP, so per-IP keying already
   bucketed everything together — and was spoofable via `X-Forwarded-For`
@@ -80,16 +77,6 @@ uvicorn main:app --reload
 host suffixes, etc.). `.env` is loaded automatically (`python-dotenv`) if
 present — copy `.env.example` to start.
 
-The persisted research scans additionally need `DATABASE_CONNECTION_STRING`
-(a Neon Postgres connection string) and a migration:
-
-```bash
-python -m alembic upgrade head
-```
-
-Tests never touch the real database or trigger a real scan — see
-`tests/test_scan_persistence.py`'s in-memory-SQLite fixture.
-
 ## Tests
 
 ```bash
@@ -99,8 +86,7 @@ pytest
 ## Deployment
 
 Render, via the `Dockerfile` (pinned base image digest, non-root user,
-healthcheck against `/health`). No CI is configured — the only workflow in
-`.github/workflows/` is the big-loss alert cron, not a test runner — run `pytest` locally
+healthcheck against `/health`). No CI is configured — run `pytest` locally
 before opening a PR.
 
 ## Contributing
