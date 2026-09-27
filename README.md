@@ -17,6 +17,11 @@ big-loss alert) used to live here too - extracted to a private sibling
 repo, `financial-research-api`, so this repo stays purely the
 AI-reasoning feature.
 
+## Documentation
+
+- [`PROJECT.md`](PROJECT.md) — architecture, key design decisions, auth,
+  rate limiting
+
 ## Stack
 
 - **FastAPI** — the API itself
@@ -25,44 +30,6 @@ AI-reasoning feature.
 Talks to a Hugging Face Inference endpoint for the fine-tuned model,
 Google News RSS for live headlines, and yfinance for market
 fundamentals/earnings — all keyless except the HF token.
-
-## Architecture
-
-`app/services/` holds the business logic (news fetching, DCF valuation
-math, LLM inference call + response parsing); `app/routers/` is a thin
-HTTP layer with no logic of its own. `main.py` wires it together
-(middleware, the shared httpx client's lifespan, router mounting) and
-stays thin by design.
-
-## Key design decisions
-
-- **Multiple models behind one API, no model names hardcoded.**
-  `/api/analyze?model=<name>` picks the model; every `<NAME>_INFERENCE_URL`
-  env var registers one at startup, and `POST /api/update-inference-url`
-  can add or repoint one at runtime (useful for a Colab-hosted model behind
-  an ngrok tunnel that gets a new URL on every restart).
-- **The inference-URL host allowlist matches on exact host or a
-  `.`-bounded suffix, not `str.endswith()`** — a bare `endswith` would
-  accept a look-alike domain like `evil-huggingface.co`, and the resolved
-  URL receives the HF bearer token on every request after that.
-- **Valuation is deterministic, code-only math, never LLM-generated.**
-  Replaced an earlier Graham Number implementation that was badly broken
-  for asset-light, buyback-heavy companies (it showed Apple as "725%
-  overvalued" purely because its book value/share is tiny). Each company
-  is classified into one of four valuation bases (FCF, EPS, Dividends, or
-  Revenue) and projected through a 2-stage, 3-scenario growth model —
-  since a single metric can't value both a bank and a pre-profit
-  growth company.
-- **The yfinance crumb is seeded at startup, and can be hot-swapped
-  without a restart.** `app/services/yf_session.py` works around Render's
-  outbound IP being blocked at Yahoo's crumb-fetch endpoint by seeding a
-  crumb/cookie pair captured from elsewhere; `POST /api/update-yf-crumb`
-  lets `scripts/refresh_yf_crumb.py` push a fresh one in without a
-  redeploy when the seeded one goes stale.
-- **The rate limiter keys on a constant, not client IP.** All real traffic
-  arrives via the frontend's single proxy IP, so per-IP keying already
-  bucketed everything together — and was spoofable via `X-Forwarded-For`
-  besides.
 
 ## Local development
 
