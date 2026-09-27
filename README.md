@@ -14,51 +14,23 @@ app that doesn't need to scale.
 
 ## Stack
 
-- **FastAPI** + **uvicorn**
-- **httpx** — shared `AsyncClient` (started in the app's lifespan, not
-  recreated per request) for both the HF inference call and the news fetch
-- **feedparser** — Google News RSS, no API key needed
-- **yfinance** — market fundamentals/earnings (keyless; see `app/services/
-  fundamentals.py`/`earnings.py`/`valuation.py`)
-- **slowapi** — global rate limit
-- **SQLAlchemy 2.0** + **Alembic** + **psycopg3** — Postgres (Neon)
-  persistence for the two on-demand research scans (`app/db/`,
-  `app/services/scan_persistence.py`) — same pattern as
-  `portfolio-manager-backend`'s DB layer, adapted where noted (see that
-  module's own comments)
+- **FastAPI** — the API itself
+- **SQLAlchemy 2.0** + **Postgres** (Neon) — persistence for the two
+  on-demand research scans
 - **pytest** — run locally before opening a PR (no CI configured currently, see Deployment)
+
+Talks to a Hugging Face Inference endpoint for the fine-tuned model,
+Google News RSS for live headlines, and yfinance for market
+fundamentals/earnings — all keyless except the HF token.
 
 ## Architecture
 
-```
-main.py                       App creation, middleware, lifespan (shared
-                              httpx client), router mounting - deliberately
-                              thin
-app/
-  config.py                   All env-var reads in one place
-  models.py                   Pydantic request models
-  deps.py                     API-key auth dependency
-  services/
-    ticker.py                 $CASHTAG extraction (falls back to a
-                              capitalized-word heuristic if no cashtag)
-    parsing.py                 Brace-balanced JSON extraction from raw
-                              LLM output (handles trailing model chatter,
-                              markdown fences, special tokens)
-    news.py                    Google News RSS fetch, with a timeout
-                              (feedparser's own url-fetching has none)
-    fundamentals.py            yfinance current-price/P-E/dividend/52wk
-                              fetch + "Current Market Data" block renderer
-    valuation.py               Scenario-weighted 2-stage DCF valuation
-                              (deterministic math, never LLM-generated)
-                              + block renderer
-    earnings.py                yfinance last-quarter revenue/EPS/next-
-                              earnings-date fetch + block renderer
-    inference.py                HF inference call + response parsing;
-                              also holds the mutable in-memory
-                              per-model inference URLs (see below)
-  routers/
-    health.py, analyze.py, admin.py   Thin HTTP layer only
-```
+`app/services/` holds the business logic (news fetching, DCF valuation
+math, LLM inference call + response parsing); `app/routers/` is a thin
+HTTP layer with no logic of its own; `app/db/` plus
+`services/scan_persistence.py` handle Postgres persistence for the two
+on-demand research scans. `main.py` wires it together (middleware, the
+shared httpx client's lifespan, router mounting) and stays thin by design.
 
 ## Key design decisions
 
