@@ -147,9 +147,9 @@ _VALID_RECOMMENDATIONS = frozenset({"BUY", "SELL", "HOLD"})
 
 def _build_reaction_prompt(ticker: str, price_context: str, live_context: str) -> str:
     # Canonical Task A template - must stay byte-identical to financial-
-    # sentiment-model's colab/train/{gpu,tpu}/train_model.py and
-    # evaluate_*.py copies, and runpod/{train_model,evaluate_model}.py
-    # (see that repo's CONTRIBUTING.md sync rule). The model is trained on
+    # sentiment-model's notebooks/train/{gpu,tpu}/train_model.py and
+    # evaluate_*.py copies (the gpu copies also cover RunPod/plain-GPU-box
+    # runs - see that repo's CONTRIBUTING.md sync rule). The model is trained on
     # exactly this shape; a drift here trains one prompt and serves
     # another. Deliberately narrow: no user_query, no market_data/
     # valuation/earnings - Task A only ever reasons about the news itself
