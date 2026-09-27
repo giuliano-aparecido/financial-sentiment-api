@@ -1,5 +1,7 @@
 # Multi-Model Financial RAG Reasoning Engine — API
 
+*An experimental project exploring agentic coding workflows with Claude Code.*
+
 A FastAPI backend for a financial-news sentiment/reasoning demo: takes a
 free-text (or `$TICKER`-cashtagged) query, fetches live news for the
 ticker, and runs a fine-tuned LLM's chain-of-thought reasoning against it
