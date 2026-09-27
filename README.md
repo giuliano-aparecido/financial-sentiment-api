@@ -1,4 +1,4 @@
-# Multi-Model Financial RAG Reasoning Engine — API
+# Multi-Model Financial Sentiment Reasoning Engine — API
 
 *An experimental project exploring agentic coding workflows with Claude Code.*
 *Also an experiment in LoRA fine-tuning and self-hosting a small LLM.*
