@@ -7,7 +7,7 @@ A FastAPI backend for a financial-news sentiment/reasoning: takes a
 free-text (or `$TICKER`-cashtagged) query, fetches live news for the
 ticker, and runs a fine-tuned LLM's chain-of-thought reasoning against it
 via a Hugging Face Inference endpoint. Serves
-[`financial-sentiment-web`](https://github.com/GiulianoAparecido/financial-sentiment-web).
+[`financial-sentiment-web`](https://github.com/giuliano-aparecido/financial-sentiment-web).
 The reasoning is made in 2 steps:
 - Step 1: collect most relevant news about the TICKER and give it to the LLM to reason the possible market reaction.
 - Step 2: give the news reaction together with valuation and other fundamentals to the LLM to reason a recommendation. 

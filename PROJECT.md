@@ -6,13 +6,13 @@ A FastAPI backend for a financial-news sentiment/reasoning demo: takes a
 free-text (or `$TICKER`-cashtagged) query, fetches live news for the
 ticker, and runs a fine-tuned LLM's chain-of-thought reasoning against it
 via a Hugging Face Inference endpoint. Serves
-[`financial-sentiment-web`](https://github.com/GiulianoAparecido/financial-sentiment-web).
+[`financial-sentiment-web`](https://github.com/giuliano-aparecido/financial-sentiment-web).
 The fine-tuning pipeline for the model itself lives in
-[`financial-sentiment-model`](https://github.com/GiulianoAparecido/financial-sentiment-model).
+[`financial-sentiment-model`](https://github.com/giuliano-aparecido/financial-sentiment-model).
 
 Swiss market research scans (volatility indicator, crash rebound,
 same-day big-loss alert) used to live here too - extracted to a private
-sibling repo, [`financial-research-api`](https://github.com/GiulianoAparecido/financial-research-api),
+sibling repo, [`financial-research-api`](https://github.com/giuliano-aparecido/financial-research-api),
 so this repo is only the `$TICKER` AI-reasoning feature.
 
 ## Architecture
