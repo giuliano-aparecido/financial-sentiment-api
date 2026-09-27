@@ -3,19 +3,17 @@
 *An experimental project exploring agentic coding workflows with Claude Code.*
 *Also an experiment in LoRA fine-tuning and self-hosting a small LLM.*
 
-A FastAPI backend for a financial-news sentiment/reasoning demo: takes a
+A FastAPI backend for a financial-news sentiment/reasoning: takes a
 free-text (or `$TICKER`-cashtagged) query, fetches live news for the
 ticker, and runs a fine-tuned LLM's chain-of-thought reasoning against it
 via a Hugging Face Inference endpoint. Serves
 [`financial-sentiment-web`](https://github.com/GiulianoAparecido/financial-sentiment-web).
+The reasoning is made in 2 steps:
+- Step 1: collect most relevant news about the TICKER and give it to the LLM to reason the possible market reaction.
+- Step 2: give the news reaction together with valuation and other fundamentals to the LLM to reason a recommendation. 
 
 Hardened for correctness and security even though it's a single-instance
 app that doesn't need to scale.
-
-Swiss market research scans (volatility indicator, crash rebound, a
-big-loss alert) used to live here too - extracted to a private sibling
-repo, `financial-research-api`, so this repo stays purely the
-AI-reasoning feature.
 
 ## Documentation
 
